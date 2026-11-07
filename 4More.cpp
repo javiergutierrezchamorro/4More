@@ -1,33 +1,41 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 2.92
+   Build 2.98
 
-   Novedades de esta revisión:
-   - VISTA UNICODE REESCRITA SOBRE BYTES: el decodificador UTF-16 hacía un
-     casting de los bytes crudos a WCHAR*, que sólo es válido con WCHAR de
-     2 bytes (Windows). El banco de auditoría (ASan) lo delató: con wchar_t
-     más ancho la copia leía el doble y desalineada. Ahora el BOM, el corte
-     y el chequeo de surrogates huérfanos leen bytes, y la copia nativa se
-     conserva cuando WCHAR es de 2 bytes (mismo rendimiento en Windows).
-   - FUGA EN OOM CERRADA: si NormalizeNewlines se quedaba sin memoria, el
-     buffer del texto (hasta 64 MB) se perdía en CADA reintento: la entrega
-     es dueña del buffer pero moría antes de llegar a sus delete[]. Ahora
-     libera y relanza; el cambio de vista (ApplyView) y la carga
-     (ApplyLoadResult) gestionan el fallo sin perder nada.
-   - ENTREGA FALLIDA AVISADA: DeliverTextSafely devuelve un BOOL que antes
-     nadie miraba; si la entrega moría de forma estructurada, el usuario se
-     quedaba con una ventana vacía y sin explicación. Ahora se avisa.
-   - ROBUSTEZ: la fuente de la barra de estado se crea sobre una estructura
-     NONCLIENTMETRICS inicializada a cero (si SystemParametersInfo fallara,
-     CreateFontIndirect recibiría basura en vez de una fuente por defecto).
-   - SIN CAMBIOS: línea de comandos con GetCommandLineW + CommandLineToArgvW
-     (__targv no existe), números en formato regional con GetNumberFormatEx
-     (sólo cuando lo mostrado cambia), carga asíncrona en dos fases (64 KB
-     de detección, tope de 32 MB de texto u 8 MB de hex), LoadJob dueño de
-     sus buffers, offsets en negrita pintados fuera del buffer del control,
-     tabla de pares hexadecimales en Win64, lectura sólo de lo que se
-     muestra, título con ruta/STDIN, Font Size +/-, About con
-     bitness/fecha/compilador, ESC, sólo lectura, rutas largas.
+   Novedades de esta revisión (RENDIMIENTO: el estudio de por qué V es instantáneo):
+   - EM_SETHANDLE: LA ENTREGA SIN COPIA. El texto de la vista ya no se entrega
+     con WM_SETTEXT (que hace que el control EDIT copie decenas de MB a su
+     propio buffer en el hilo UI): el texto se construye directamente en un
+     bloque móvil GlobalAlloc y se entrega con EM_SETHANDLE, que lo ADOPTA
+     tal cual. Menos memoria de punta (una copia menos del texto completo),
+     menos memcpy en el hilo UI, arranque y cambio de vista más rápidos.
+   - SWITCH /TIMING: INSTRUMENTACIÓN. "4More big.log /timing" mide y muestra
+     en la barra de estado los milisegundos de cada fase (read · decode ·
+     normalize · deliver), en cargas y en cambios de vista. Sin datos no hay
+     optimización: esto dice exactamente dónde están los segundos en tu
+     máquina. (El análisis dice que el cuello de botella restante es la
+     indexación de líneas del propio control EDIT; V lo evita pintando sólo
+     lo visible — el paso siguiente sería una vista hex pintada a demanda.)
+   - FIX .RC (2.97): sin #include "targetver.h" (fichero del asistente de
+     Visual Studio, no del SDK): sólo windows.h + resource.h, compilable con
+     rc.exe y windres.
+   - BÚSQUEDA DE BYTES MULTHILO (2.96): el escaneo del fichero crudo corre
+     en su propio hilo; la ventana NUNCA se congela, ESC cancela al instante,
+     progreso limitado a ~10 avisos/s, resultado vía WM_APP_SEARCHDONE.
+   - HEX 100 GB (2.96): Ctrl+Home / Ctrl+End saltan a la primera / última
+     página del FICHERO; Ctrl+End deja el caret en el último byte; el gutter
+     se ensancha solo a partir de 8 dígitos.
+   - CTRL+ / CTRL- DE TECLADO (2.96): el subclass atiende también la fila
+     principal (VK_OEM_PLUS/MINUS, '=' y '_'); el acelerador cubre el numpad.
+   - RECIENTES (2.96): File > Recent Files, MRU de 10 (ficheros, clipboard,
+     stdin) persistido en 4More.ini; "(stdin)" explica que no se reproduce.
+   - PREFERENCIAS (2.94): fuente, números de línea, wrap, tail, posición de
+     ventana y recientes en 4More.ini; los switches CLI prevalecen.
+   - SIMPLIFICACIÓN (2.97): ScanFileBytes y su bombeo de mensajes eliminados
+     (reemplazado por el hilo); global iGutterW eliminado (GutterWidth() es
+     la única fuente de verdad); manejadores muertos Undo/Cut/Paste/Clear
+     eliminados (el control es ES_READONLY); decimales regionales fix
+     (NumDigits=0, separadores del locale).
    ============================================================================================ */
 
 #include "4More.h"
@@ -83,11 +91,17 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"2.92"
+#define APP_VERSION L"2.98"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
 #define WM_APP_LOADDONE (WM_APP + 1)
+// Posted by the raw-file search worker (2.96): ~10 progress updates per
+// second while scanning, and one final message with wParam = 1 (found) or
+// 0xFFFFFFFF (not found). The found OFFSET travels in g_qwSearchResult:
+// wParam is only 32 bits on Win32 builds.
+#define WM_APP_SEARCHPROGRESS (WM_APP + 2)
+#define WM_APP_SEARCHDONE (WM_APP + 3)
 
 
 /* -------------------------------------------------------------------------------------------- */
@@ -100,7 +114,6 @@ HFONT hFont;
 HFONT hFontHexBold;                             // same family and size as hFont, bold: offset column
 int iHexLineH = 0;                              // editor line height in pixels (from hFont's metrics)
 int iHexCharW = 0;                              // editor character advance in pixels
-int iGutterW = 0;                               // width of the hex offset column (0 = no column)
 HFONT hFontStatus;
 HWND hDlgFind;
 FINDREPLACEW fr;
@@ -110,12 +123,65 @@ HWND hWndMain;                                  // main window: ESC close + View
 BYTE* pFileBytes;                               // raw bytes loaded (bounded by the view caps): source of every view
 DWORD cbFile;                                   // valid bytes in pFileBytes
 ULONGLONG g_cbFileTotal;                        // REAL size on disk (status bar + notices); 0 = unknown
-int iView;                                      // active view: VIEW_ANSI / VIEW_UTF8 / VIEW_UTF16 / VIEW_HEX
+int iView;                                      // active view: VIEW_ANSI / VIEW_UTF8 / VIEW_UTF16 / VIEW_UTF16BE / VIEW_EBCDIC / VIEW_HEX
+WCHAR g_szCurrentFile[MAX_PATH] = {};           // path of the file whose bytes are on screen ("" = none)
+ULONGLONG g_qwBase = 0;                         // file offset of the FIRST byte loaded (paged view)
+bool g_bLineNums = false;                       // View > Line Numbers: text gutter, painted like the hex one
+bool g_bWrap = false;                           // View > Word Wrap: edit styles are create-only, so this recreates the control
+bool g_bTail = false;                           // View > Tail File: 2 s timer, reload on change, jump to the end
+int g_iForcedView = -1;                         // /hex /utf8... initial view from the command line (first load only)
+DWORD* g_pBookmarks = nullptr;                  // bookmarked lines (page-relative), kept sorted
+int g_cBookmarks = 0, g_cBookmarksMax = 0;
+ULONGLONG g_qwPendingGoto = (ULONGLONG) -1;     // byte offset to position on when its page lands
+bool g_bInByteSearch = false;                   // raw-file byte scan in progress: blocks loads and the tail timer
+WCHAR g_szBytesPattern[128] = {};               // last pattern of Find Bytes (dialog default)
+bool g_bBytesHex = false;                       // last mode of Find Bytes: TRUE = hex pairs
+
+// --- Performance instrumentation (/timing switch) ---
+bool g_bTiming = false;                         // CLI /timing: show the per-phase load times
+volatile ULONGLONG g_msRead = 0;                // worker: raw read phase, ms
+volatile ULONGLONG g_msDecode = 0;              // worker: decode-to-text phase, ms
+volatile ULONGLONG g_msNormalize = 0;          // UI: CRLF normalization pass, ms
+volatile ULONGLONG g_msDeliver = 0;            // UI: hand the text to the EDIT control, ms
+
+// --- Preferences (4More.ini, written on exit, loaded before the switches) ---
+WCHAR g_szIniPath[MAX_PATH] = {};               // 4More.ini beside the executable ("" = no persistence)
+#define INI_WINPOS_INVALID 0x7FFFFFFF           // sentinel: the INI holds no usable placement
+bool g_bWinPos = false;                         // the INI held a usable window placement
+RECT g_rcWinInit = {};                          // restored window rect
+bool g_bWinMax = false;                         // restored maximized state
+
+// --- Recent files (File > Recent Files, MRU persisted in the INI) ---
+#define RECENT_MAX 10
+#define RECENT_CLIPBOARD L"(clipboard)"
+#define RECENT_STDIN     L"(stdin)"
+static_assert(ID_FILE_RECENT_LAST - ID_FILE_RECENT_FIRST + 1 == RECENT_MAX, "resource.h recent-ID block must match RECENT_MAX");
+WCHAR g_szRecent[RECENT_MAX][MAX_PATH] = {};    // MRU list: [0] = most recent
+int g_cRecent = 0;
+HMENU g_hRecentMenu = nullptr;                  // the popup, built once at WM_CREATE
+
+// --- Raw-file search worker (one search at a time, gated by g_bInByteSearch) ---
+BYTE g_abSearchPat[128];                        // pattern the worker scans for (copied before launch)
+DWORD g_cbSearchPat = 0;
+HANDLE g_hSearchThread = nullptr;
+volatile LONG g_bSearchCancel = 0;              // ESC or a dying window: stop the scan
+volatile ULONGLONG g_qwSearchPos = 0;          // bytes scanned so far (status bar progress)
+ULONGLONG g_qwSearchResult = (ULONGLONG) -1;   // found offset, -1 = not found
+
+// --- Edit control text adoption (EM_SETHANDLE, 2.98) ---
+// The view text is built in a movable global block and handed to the control
+// with EM_SETHANDLE: the control ADOPTS the buffer instead of copying tens of
+// MB the way WM_SETTEXT does. The previous buffer is fetched with EM_GETHANDLE
+// and freed right there (the documented EM_SETHANDLE pattern), so no tracking
+// global is needed: whatever handle the control answers with is, by
+// definition, the one it is done with. At process exit the current block is
+// simply left to the OS: freeing it while the control still exists would race
+// its destruction for zero gain.
 
 // View modes for the View menu. The order must match the ID_VIEW_* values in
 // resource.h (they are consecutive there): ID_VIEW_ANSI + iView is the
 // command ID of each view.
-enum { VIEW_ANSI = 0, VIEW_UTF8 = 1, VIEW_UTF16 = 2, VIEW_HEX = 3 };
+enum { VIEW_ANSI = 0, VIEW_UTF8 = 1, VIEW_UTF16 = 2, VIEW_UTF16BE = 4, VIEW_EBCDIC = 5, VIEW_HEX = 3 };
 
 // The one digit table of the hexadecimal dumps, shared by the text builder
 // (BuildHexText) and the bold offset column (HexPaintGutter).
@@ -134,6 +200,15 @@ static const WCHAR s_szHexDigits[] = L"0123456789ABCDEF";
 //   - the job owns its buffers: whatever the UI does not adopt (ApplyLoad-
 //     Result detaches pBytes/pText) is released by the LoadJob destructor,
 //     so no path (cancel, OOM, exception mid-read) can leak them.
+
+// View-text blocks (AllocViewText/FreeViewText) are declared HERE, before the
+// LoadJob destructor uses them: their implementations live at the end of the
+// file and the thematic prototype block below, which the struct precedes.
+// (2.98 fix: a forward declaration here is what lets the destructor release
+// the worker's text with the right allocator — GlobalFree, not delete[].)
+WCHAR* AllocViewText(DWORD cch);
+void FreeViewText(WCHAR* psz);
+
 struct LoadJob
 {
     WCHAR  szPath[MAX_PATH] = {};               // file to load (bStdin uses stdin instead)
@@ -149,6 +224,9 @@ struct LoadJob
     bool   bReadError = false;                  // ReadFile failed midway (partial content shown)
     bool   bStreamTruncated = false;            // stdin stream longer than the view cap
     bool   bOOM = false;                        // out of memory while reading or decoding
+    ULONGLONG qwBase = 0;                       // file offset of the first byte to read (paged view)
+    bool   bKeepView = false;                   // page navigation: keep the view on screen (no re-detection)
+    bool   bTailJump = false;                   // scroll to the end once the page is applied (tail mode)
 
     // The single exit door for every failure path: a cancelled load, a job
     // freed without ApplyLoadResult ever running, an exception during the
@@ -156,7 +234,7 @@ struct LoadJob
     ~LoadJob()
     {
         delete[] pBytes;
-        delete[] pText;
+        FreeViewText(pText);             // the worker's text is HGLOBAL-backed since 2.98
     }
 };
 
@@ -196,11 +274,12 @@ HMENU GetViewSubMenu(HWND hWnd);
 void UpdateViewMenu(void);
 void SetView(int iNewView);
 void ApplyView(void);
-bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, WCHAR** ppText, DWORD* pcch);
+bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch);
 int DetectDefaultView(const BYTE* pBytes, DWORD cb);
 void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized); // deliver + own/free the buffer
 BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized); // DeliverTextToEdit wrapped in SEH
-WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, DWORD* pcch);
+void AdoptEmptyText(void);                      // swap in an empty block (EM_SETHANDLE, 2.98)
+WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch);
 bool IsBinaryData(const BYTE* pBytes, DWORD cb);
 bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb);
 WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull);  // 64-bit decimal, no CRT/wsprintf dependency
@@ -208,13 +287,54 @@ void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull); // decimal + reg
 LONG WINAPI UnexpectedFilter(EXCEPTION_POINTERS *pPointers);
 void AsciiToWide(WCHAR* pwDst, const char* pszSrc);
 void CompilerInfo(WCHAR* pszDst);
+void LaunchLoadJob(LoadJob* pJob);              // g_pJob + worker thread, shared by file loads and pages
+void OpenFileDlg(void);                         // File > Open... (common dialog)
+void LoadPage(ULONGLONG qwBase, bool bTailJump); // read [qwBase, +cap) of g_szCurrentFile
+void ChangePage(int iDir);                      // Ctrl+PgDn / Ctrl+PgUp: next / previous window
+void RefreshPage(bool bTailJump);              // F5: reload the page on screen
+void ToggleTail(void);
+void ToggleLineNums(void);
+void ToggleWrap(void);                          // recreates the edit control (styles are create-only)
+void RecreateEditControl(void);
+void GoToDialog(HWND hWnd);
+INT_PTR CALLBACK GoToProc(HWND, UINT, WPARAM, LPARAM);
+void GoToLine(ULONGLONG qwLine);                // line of the page on screen
+void GoToOffset(ULONGLONG qwOff);               // absolute byte offset: loads its page if needed
+void PositionAtOffset(ULONGLONG qwOff);         // caret on a byte of the current page
+bool LineAtOffset(ULONGLONG qwOff, int& riLine);
+void FindBytesDialog(HWND hWnd);
+INT_PTR CALLBACK FindBytesProc(HWND, UINT, WPARAM, LPARAM);
+void RunByteSearch(const BYTE* pPat, DWORD cbPat);
+unsigned __stdcall SearchThreadProc(void *pParameter);           // worker: scans 1 MB chunks
+void ViewClipboardAsFile(void);                 // File > View Clipboard as File
+void ListAlternateStreams(void);                // File > Alternate Data Streams...
+void ToggleBookmark(void);
+void NextBookmark(bool bForward);
+void ClearBookmarks(void);
+void StatusFlash(LPCWSTR pszText);              // one-shot status bar note (next update restores)
+int GutterWidth(void);                          // painted column width: hex offsets / line numbers
+void PaintGutter(void);
+void NumPaintGutter(void);
+BOOL ParseU64(LPCWSTR psz, ULONGLONG& rqw);      // decimal or 0x hex, no CRT dependency
+void JumpFilePage(bool bLast);                  // Ctrl+Home/End: first / last page of the file
+HMENU GetFileSubMenu(HWND hWnd);                // the File popup of the window's menu bar
+void AddRecentEntry(LPCWSTR pszEntry);          // MRU: promote/prepend + rebuild the menu
+void RebuildRecentMenu(void);                   // refill the Recent popup from g_szRecent
+void EnsureRecentMenu(void);                    // create the popup + its menu item, once
+void OpenRecentEntry(int iRecent);              // a Recent item was picked
+void BuildIniPath(void);                         // 4More.ini beside the executable
+void LoadSettings(void);                        // INI first: the command line overrides it
+void SaveSettings(void);                         // on exit
+WCHAR* AllocViewText(DWORD cch);                // 2.98: movable HGLOBAL block for EM_SETHANDLE
+void FreeViewText(WCHAR* psz);                  // its pair: GlobalUnlock + GlobalFree
+void TimingFlash(void);                          // /timing: per-phase ms on the status bar
 
-// Every text view is built from the FIRST CB_TEXT_MAX source bytes and the
+// Every text view is built from at most CB_TEXT_MAX source bytes and the
 // loader stops reading there too: a 300 MB text file would decode to a
 // ~600 MB string and then need the same again inside the edit control — past
-// 1 GB of buffers on the way to a 2 GB Win32 address space. Keeping both the
-// loaded bytes and the decoded view at the cap makes opening and view
-// switching fast on both Win32 and Win64; the user is told exactly what is
+// 1 GB of buffers on the way to a 2 GB Win32 address space. The bytes shown
+// are a PAGE (window) of the file (see LoadPage): the paged view walks files
+// of ANY size at this bounded cost, and the user is told exactly what is
 // being shown (notice + real total). Overridable for the audit bench.
 #ifndef CB_TEXT_MAX
 #define CB_TEXT_MAX (32 * 1024 * 1024)          // 32 MB of source bytes per text view
@@ -282,6 +402,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         LoadStringW(hInstance, IDC_MY4MORE, szWindowClass, MAX_LOADSTRING);
         MyRegisterClass(hInstance);
 
+        // Build the INI path before any setting is read; LoadSettings then
+        // restores whatever it finds, and the command-line parsing below
+        // overrides only what the user spelled out explicitly (INI first,
+        // switches win on conflict — the same convention as 4DOS/4NT).
+        BuildIniPath();
+        LoadSettings();
+
         // Perform application initialization:
         if (!InitInstance (hInstance, nCmdShow))
         {
@@ -336,7 +463,20 @@ bool InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
         hInst = hInstance; // Store instance handle in a global variable
 
-        HWND hWnd = CreateWindow(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+        // Restored placement (2.94): the INI position wins over CW_USEDEFAULT;
+        // a plain Show follows when nothing was persisted.
+        HWND hWnd = nullptr;
+        if (g_bWinPos)
+        {
+                hWnd = CreateWindow(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
+                        g_rcWinInit.left, g_rcWinInit.top,
+                        g_rcWinInit.right - g_rcWinInit.left, g_rcWinInit.bottom - g_rcWinInit.top,
+                        nullptr, nullptr, hInstance, nullptr);
+        }
+        else
+        {
+                hWnd = CreateWindow(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+        }
 
         if (!hWnd)
         {
@@ -378,6 +518,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                 UpdateStatusBar();
                                 break;
                         }
+                        // Recent files: a contiguous ID block, resolved before the
+                        // switch (they are dynamic items, no static case labels).
+                        if (wmId >= ID_FILE_RECENT_FIRST && wmId <= ID_FILE_RECENT_LAST)
+                        {
+                                OpenRecentEntry(wmId - ID_FILE_RECENT_FIRST);
+                                break;
+                        }
                         // Parse the menu selections:
                         switch (wmId)
                         {
@@ -387,27 +534,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                 case ID_EXIT:
                                         DestroyWindow(hWnd);
                                         break;
-                                case ID_UNDO:
-                                        if (SendMessage(hEdit, EM_CANUNDO, 0, 0))
-                                        {
-                                                SendMessage(hEdit, WM_UNDO, 0, 0);
-                                        }
-                                        else
-                                        {
-                                                MessageBox(hWndMain, L"Nothing to undo.", szTitle, MB_OK);
-                                        }
-                                        break;
-                                case ID_CUT:
-                                        SendMessage(hEdit, WM_CUT, 0, 0);
-                                        break;
+                                // ID_UNDO/ID_CUT/ID_PASTE/ID_CLEAR have no handlers: the
+                                // control is ES_READONLY, so those commands can never
+                                // apply (the menu carries them grayed out).
                                 case ID_COPY:
                                         SendMessage(hEdit, WM_COPY, 0, 0);
-                                        break;
-                                case ID_PASTE:
-                                        SendMessage(hEdit, WM_PASTE, 0, 0);
-                                        break;
-                                case ID_CLEAR:
-                                        SendMessage(hEdit, WM_CLEAR, 0, 0);
                                         break;
                                 case ID_SELECTALL:
                                         SendMessage(hEdit, EM_SETSEL, 0, -1);
@@ -419,11 +550,55 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                 case ID_FINDNEXT:
                                         SearchNext(hWnd, true);
                                         break;
+                                case ID_FILE_OPEN:
+                                        OpenFileDlg();
+                                        break;
+                                case ID_FILE_VIEWCLIP:
+                                        ViewClipboardAsFile();
+                                        break;
+                                case ID_FILE_ADS:
+                                        ListAlternateStreams();
+                                        break;
+                                case ID_SEARCH_GOTO:
+                                        GoToDialog(hWnd);
+                                        break;
+                                case ID_SEARCH_BYTES:
+                                        FindBytesDialog(hWnd);
+                                        break;
+                                case ID_EDIT_BOOKMARK:
+                                        ToggleBookmark();
+                                        break;
+                                case ID_EDIT_NEXTBOOKMARK:
+                                        NextBookmark(true);
+                                        break;
+                                case ID_EDIT_PREVBOOKMARK:
+                                        NextBookmark(false);
+                                        break;
+                                case ID_VIEW_NEXTPAGE:
+                                        ChangePage(1);
+                                        break;
+                                case ID_VIEW_PREVPAGE:
+                                        ChangePage(-1);
+                                        break;
+                                case ID_VIEW_REFRESH:
+                                        RefreshPage(false);
+                                        break;
+                                case ID_VIEW_TAIL:
+                                        ToggleTail();
+                                        break;
+                                case ID_VIEW_LINENUMS:
+                                        ToggleLineNums();
+                                        break;
+                                case ID_VIEW_WRAP:
+                                        ToggleWrap();
+                                        break;
                                 case ID_VIEW_ANSI:
                                 case ID_VIEW_UTF8:
                                 case ID_VIEW_UNICODE:
+                                case ID_VIEW_UTF16BE:
+                                case ID_VIEW_EBCDIC:
                                 case ID_VIEW_HEX:
-                                        // The four IDs are consecutive in resource.h: they map
+                                        // The six IDs are consecutive in resource.h: they map
                                         // 1:1 to VIEW_*. SetView rejects anything out of range.
                                         SetView(wmId - ID_VIEW_ANSI);
                                         break;
@@ -439,17 +614,59 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 case WM_CREATE:
                 {
                         hWndMain = hWnd;    // needed by ESC handling and View menu updates
-                        // ES_AUTOHSCROLL + WS_HSCROLL disable word wrap.
+                        // The command line is parsed FIRST: the /wrap switch decides the
+                        // styles of the edit control before it exists (they are create-only),
+                        // and /lines /tail /hex... set the startup state the same way.
+                        // GetCommandLineW + CommandLineToArgvW split the arguments exactly
+                        // like the shell does, on every toolchain this file is built with
+                        // (__targv does not even exist in MinGW-w64's headers).
+                        // Switches: /hex /utf8 /unicode /utf16be /ebcdic /ansi /tail /wrap
+                        // /lines (also accepted with -). The first non-switch argument is
+                        // the file to open; no file argument means the stdin pipe.
+                        LPCWSTR pszFileToLoad = L"";
+                        int cArgs = 0;
+                        LPWSTR* pArgs = CommandLineToArgvW(GetCommandLineW(), &cArgs);
+                        if (pArgs != nullptr)
+                        {
+                                for (int i = 1; i < cArgs; i++)
+                                {
+                                        LPCWSTR pszArg = pArgs[i];
+                                        if (pszArg[0] == L'/' || pszArg[0] == L'-')
+                                        {
+                                                if (!lstrcmpiW(pszArg + 1, L"hex"))                    { g_iForcedView = VIEW_HEX; }
+                                                else if (!lstrcmpiW(pszArg + 1, L"utf8"))             { g_iForcedView = VIEW_UTF8; }
+                                                else if (!lstrcmpiW(pszArg + 1, L"unicode") || !lstrcmpiW(pszArg + 1, L"utf16")) { g_iForcedView = VIEW_UTF16; }
+                                                else if (!lstrcmpiW(pszArg + 1, L"utf16be"))          { g_iForcedView = VIEW_UTF16BE; }
+                                                else if (!lstrcmpiW(pszArg + 1, L"ebcdic"))           { g_iForcedView = VIEW_EBCDIC; }
+                                                else if (!lstrcmpiW(pszArg + 1, L"ansi"))            { g_iForcedView = VIEW_ANSI; }
+                                                else if (!lstrcmpiW(pszArg + 1, L"tail"))            { g_bTail = true; }
+                                                else if (!lstrcmpiW(pszArg + 1, L"wrap"))            { g_bWrap = true; }
+                                                else if (!lstrcmpiW(pszArg + 1, L"lines"))           { g_bLineNums = true; }
+                                                else if (!lstrcmpiW(pszArg + 1, L"timing"))          { g_bTiming = true; }
+                                                // unknown switches are ignored: never punish a typo
+                                        }
+                                        else if (pszFileToLoad[0] == L'\0')
+                                        {
+                                                pszFileToLoad = pArgs[i];             // first non-switch argument
+                                        }
+                                }
+                        }
+                        // ES_AUTOHSCROLL + WS_HSCROLL disable word wrap (the default).
                         // This is the change that most accelerates loading large files in an EDIT
                         // control: without them, the control must calculate where each line breaks
                         // at the window width (10 million characters in a 20 MB file)
                         // and recalculates it on every WM_SIZE. Long lines get horizontal
-                        // scrolling instead. If you prefer to keep word wrap, remove these two
-                        // styles (and accept that loading will remain slow).
+                        // scrolling instead. View > Word Wrap turns them off and recreates the
+                        // control for those who prefer wrapped lines.
                         // ES_READONLY turns the edit control into a viewer: the text can be
                         // selected and copied, but never modified (no typing, Delete, Cut,
                         // Paste, Clear or Undo). The Edit menu grays out those commands.
-                        hEdit = CreateWindowEx(0, L"EDIT", NULL, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU) ID_EDITCHILD, hInst, NULL);
+                        DWORD dwEditStyle = WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY;
+                        if (!g_bWrap)
+                        {
+                                dwEditStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
+                        }
+                        hEdit = CreateWindowEx(0, L"EDIT", NULL, dwEditStyle, 0, 0, 0, 0, hWnd, (HMENU) ID_EDITCHILD, hInst, NULL);
                         SendMessage(hEdit, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
                         ApplyEditorFont();
                         SetWindowSubclass(hEdit, EditSubclassProc, 1, 0);
@@ -481,21 +698,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         // is a known way to blank the item captions on real Windows
                         // (fType=MFT_STRING without providing a new string), so that call
                         // pattern is gone on purpose.
-                        // The file to open comes from the command line, parsed with the
-                        // documented API pair instead of CRT internals (__targv does not
-                        // even exist in MinGW-w64's headers): GetCommandLineW +
-                        // CommandLineToArgvW split the arguments exactly like the shell
-                        // does, on every toolchain this file is built with.
-                        int cArgs = 0;
-                        LPWSTR* pArgs = CommandLineToArgvW(GetCommandLineW(), &cArgs);
+                        // The Recent popup must exist before the first file lands (an async
+                        // load can deliver while the menus are still pristine, and
+                        // AddRecentEntry only refills an existing popup).
+                        EnsureRecentMenu();
+                        // The file to open was picked out of the arguments above.
+                        LoadFile(pszFileToLoad[0] != L'\0' ? pszFileToLoad : L"");   // no file: stdin pipe
                         if (pArgs != nullptr)
                         {
-                                LoadFile(cArgs > 1 ? pArgs[1] : L"");   // no argument: try the stdin pipe
-                                LocalFree(pArgs);
+                                LocalFree(pArgs);           // after LoadFile: the async job copied the path
                         }
-                        else
+                        // /tail on the command line: arm the watcher as soon as the
+                        // window exists. The first load lands on WM_APP_LOADDONE.
+                        if (g_bTail)
                         {
-                                LoadFile(L"");                  // unreachable in practice: keep the stdin path alive
+                                SetTimer(hWnd, 1, 2000, nullptr);   // tail tick: 2 seconds
                         }
                         // With no file loaded LoadFile returns early without marking the
                         // menu: mark the default (ANSI) view anyway. An async load applies
@@ -508,12 +725,51 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         SetFocus(hEdit);
                         break;
                 case WM_KEYDOWN:
-                        // ESC closes the program even when the focus is on the main
-                        // window (the edit control covers its own ESC via the subclass).
+                        // ESC cancels an in-flight Find Bytes scan first (2.96);
+                        // with nothing to cancel it closes the program, as before.
+                        // The edit control covers its own ESC via the subclass.
                         if (wParam == VK_ESCAPE)
                         {
-                                PostMessage(hWnd, WM_CLOSE, 0, 0);
+                                if (g_bInByteSearch)
+                                {
+                                        InterlockedExchange(&g_bSearchCancel, 1);   // idempotent: worker checks per chunk
+                                }
+                                else
+                                {
+                                        PostMessage(hWnd, WM_CLOSE, 0, 0);
+                                }
                                 return(0);
+                        }
+                        break;
+                case WM_TIMER:
+                        // Tail File: watch the file on disk and refresh the page on
+                        // screen when the size changes. The whole check is one
+                        // GetFileAttributesExW per tick; the reload only happens on a
+                        // real change, so an idle tail costs nothing measurable.
+                        if (wParam == 1)
+                        {
+                                if (!g_bTail)
+                                {
+                                        KillTimer(hWnd, 1);
+                                        break;
+                                }
+                                if (g_bInByteSearch || g_pJob != nullptr || g_szCurrentFile[0] == L'\0')
+                                {
+                                        break;                  // busy or nothing to watch (stdin/clipboard)
+                                }
+                                WIN32_FILE_ATTRIBUTE_DATA fad;
+                                if (GetFileAttributesExW(g_szCurrentFile, GetFileExInfoStandard, &fad))
+                                {
+                                        ULONGLONG cbSize = ((ULONGLONG) fad.nFileSizeHigh << 32) | (ULONGLONG) fad.nFileSizeLow;
+                                        if (cbSize != g_cbFileTotal)
+                                        {
+                                                // The file grew or shrank: reload the window on
+                                                // screen. When it held the end of the file, follow
+                                                // the new end, like tail -f.
+                                                bool bFollowEnd = (g_qwBase + cbFile >= g_cbFileTotal);
+                                                LoadPage(g_qwBase, bFollowEnd);
+                                        }
+                                }
                         }
                         break;
                 case WM_DROPFILES:
@@ -551,6 +807,46 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                         CloseHandle(hThread);   // worker has posted its final message
                                 }
                                 ApplyLoadResult(pJob);          // adopts results and frees pJob
+                        }
+                        return(0);
+                }
+                case WM_APP_SEARCHPROGRESS:
+                {
+                        // Worker progress tick (~10/s): offset scanned so far. The
+                        // position arrives in g_qwSearchPos (the worker is done with
+                        // it by the time this message is processed, but re-reading it
+                        // here keeps one source of truth for the status bar).
+                        if (g_bInByteSearch)
+                        {
+                                WCHAR szPos[40];
+                                FormatU64Locale(szPos, 40, g_qwSearchPos);
+                                WCHAR szStatus[96];
+                                wsprintfW(szStatus, L"Searching... %s (ESC = cancel)", szPos);
+                                SendMessage(hStatusBar, SB_SETTEXTW, 0, (LPARAM) szStatus);
+                        }
+                        return(0);
+                }
+                case WM_APP_SEARCHDONE:
+                {
+                        // Worker finished: wParam = 1 (found), 0xFFFFFFFF (not found).
+                        if (g_hSearchThread != nullptr)
+                        {
+                                CloseHandle(g_hSearchThread);
+                                g_hSearchThread = nullptr;
+                        }
+                        g_bInByteSearch = false;            // re-open the gate before any dialog
+                        UpdateStatusBar(true);              // drop the "Searching..." text
+                        if (wParam == 1)
+                        {
+                                GoToOffset(g_qwSearchResult);        // loads its page if needed
+                        }
+                        else if (wParam == 0)
+                        {
+                                MessageBox(hWndMain, L"Search cancelled.", L"Find Bytes", MB_OK | MB_ICONINFORMATION);
+                        }
+                        else if (wParam == 0xFFFFFFFF)
+                        {
+                                MessageBox(hWndMain, L"Pattern not found.", L"Find Bytes", MB_OK | MB_ICONINFORMATION);
                         }
                         return(0);
                 }
@@ -600,6 +896,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         }
                         return(DefWindowProc(hWnd, message, wParam, lParam));
                 case WM_DESTROY:
+                        SaveSettings();                     // 2.94: while the window still exists
+                        KillTimer(hWnd, 1);            // tail watcher: never fire into a dying window
+                        ClearBookmarks();
                         if (hDlgFind != nullptr)
                         {
                                 DestroyWindow(hDlgFind);
@@ -633,6 +932,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                 g_pJob = nullptr;
                                 g_hLoadThread = nullptr;
                         }
+                        // Stop a Find Bytes worker too (2.96): signal, then give it a
+                        // bounded wait — a dying UI must not join an unbounded scan.
+                        if (g_hSearchThread != nullptr)
+                        {
+                                InterlockedExchange(&g_bSearchCancel, 1);
+                                WaitForSingleObject(g_hSearchThread, 5000);
+                                CloseHandle(g_hSearchThread);
+                                g_hSearchThread = nullptr;
+                        }
                         delete[] pFileBytes;        // raw bytes of the last loaded file
                         pFileBytes = nullptr;
                         DeleteObject(hFont);
@@ -664,15 +972,49 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
                         // all land here: no message whitelist to maintain, and the
                         // column only ever paints the ~40 offsets actually visible.
                         DefSubclassProc(hWnd, message, wParam, lParam);
-                        HexPaintGutter();
+                        PaintGutter();        // hex offsets or line numbers, whichever is active
                         return(0);
                 case WM_KEYDOWN:
                         if (wParam == VK_ESCAPE)
                         {
-                                // ESC closes the program. The Find and About dialogs keep
-                                // their usual ESC behavior: their messages never reach here.
-                                PostMessage(hWndMain, WM_CLOSE, 0, 0);
+                                // ESC cancels an in-flight Find Bytes scan first (2.96);
+                                // with nothing to cancel it closes the program, as always.
+                                // The Find and About dialogs keep their usual ESC
+                                // behavior: their messages never reach here.
+                                if (g_bInByteSearch)
+                                {
+                                        InterlockedExchange(&g_bSearchCancel, 1);
+                                }
+                                else
+                                {
+                                        PostMessage(hWndMain, WM_CLOSE, 0, 0);
+                                }
                                 return(0);
+                        }
+                        // Ctrl+Home / Ctrl+End: first / last page of the FILE (2.96).
+                        // The plain EDIT shortcuts only reach the ends of the page on
+                        // screen; a 20 GB file needs the pager's notion of first/last.
+                        if ((GetKeyState(VK_CONTROL) & 0x8000) && (wParam == VK_HOME || wParam == VK_END))
+                        {
+                                JumpFilePage(wParam == VK_END);
+                                return(0);
+                        }
+                        // Ctrl+Plus / Ctrl+Minus: grow / shrink the editor font (2.96).
+                        // Both rows count: main-row (= / _ next to Backspace) and the
+                        // numeric keypad's + / -. The OEM codes are layout-dependent;
+                        // the '=' and '_' literals keep the common US layout working.
+                        if (GetKeyState(VK_CONTROL) & 0x8000)
+                        {
+                                if (wParam == VK_OEM_PLUS || wParam == VK_ADD || wParam == L'=')
+                                {
+                                        ChangeEditorFont(1);
+                                        return(0);
+                                }
+                                if (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT || wParam == L'_')
+                                {
+                                        ChangeEditorFont(-1);
+                                        return(0);
+                                }
                         }
                         break;
                 // Keep the status bar updated when the caret can move.
@@ -808,7 +1150,7 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 // Single pass to detect and count: if the text is already normalized
 // (the usual case for Windows text files) the SAME buffer is returned
 // without copying anything. If expansion is needed, a new one is built with
-// the exact size; the caller must delete the returned pointer and, if it
+// the exact size; the caller must free the returned pointer with FreeViewText and, if it
 // differs from the original, the original too.
 WCHAR* NormalizeNewlines(WCHAR* pacText, int cch)
 {
@@ -836,7 +1178,7 @@ WCHAR* NormalizeNewlines(WCHAR* pacText, int cch)
                 return(pacText);        // already all CRLF: zero copies
         }
         // 2) Build with the exact known size.
-        WCHAR* pNorm = new WCHAR[cch + cExpand + 1];
+        WCHAR* pNorm = AllocViewText((DWORD) cch + (DWORD) cExpand + 1);
         int j = 0;
         for (int i = 0; i < cch; i++)
         {
@@ -872,11 +1214,18 @@ void ResetViewer(void)
         pFileBytes = nullptr;
         cbFile = 0;
         g_cbFileTotal = 0;
+        g_qwBase = 0;
+        g_szCurrentFile[0] = L'\0';
+        g_qwPendingGoto = (ULONGLONG) -1;
+        ClearBookmarks();            // page-relative line bookmarks die with their page
         iView = VIEW_ANSI;
         UpdateViewMenu();
         if (hEdit != nullptr)
         {
-                SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM) L"");
+                // 2.98: EM_SETHANDLE swap instead of WM_SETTEXT "" — this also
+                // RELEASES the adopted block of the previous view, which would
+                // otherwise stay owned by the control until its next text.
+                AdoptEmptyText();
         }
         LayoutEdit();                   // a hex offset column may have been active: back to x = 0
         if (hWndMain != nullptr)
@@ -896,6 +1245,10 @@ void LoadFile(const WCHAR *pacFilename)
         if (pacFilename == nullptr)
         {
                 return;
+        }
+        if (g_bInByteSearch)
+        {
+                return;             // a raw-file scan is using the UI: loads wait for it
         }
         if (g_pJob != nullptr)
         {
@@ -948,19 +1301,11 @@ LoadJob* BeginLoadJob(bool bStdin)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// File loads run on a worker thread so the window never freezes — the exact
-// "hang" seen when dragging files: everything used to run inside WM_DROPFILES
-// on the UI thread, and Windows declares the window "Not responding" after
-// five seconds without message processing.
-void StartAsyncLoad(const WCHAR *pacFilename)
+// The common tail of every async load (fresh file or page of the current one):
+// mark the job busy, start the worker, fall back to the inline path when no
+// thread is available. Called with a fully prepared job (path, base, flags).
+void LaunchLoadJob(LoadJob* pJob)
 {
-        LoadJob* pJob = BeginLoadJob(false);    // clears the old content too
-        if (pJob == nullptr)
-        {
-                return;                         // out of memory: BeginLoadJob already said so
-        }
-        lstrcpynW(pJob->szPath, pacFilename, MAX_PATH);
-
         g_pJob = pJob;                          // busy marker (cleared on WM_APP_LOADDONE / WM_DESTROY)
 
         uintptr_t hThread = _beginthreadex(nullptr, 0, LoadThreadProc, pJob, 0, nullptr);
@@ -977,6 +1322,24 @@ void StartAsyncLoad(const WCHAR *pacFilename)
         {
                 UpdateStatusBar();              // g_pJob is set: part 0 says "Loading..."
         }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// File loads run on a worker thread so the window never freezes — the exact
+// "hang" seen when dragging files: everything used to run inside WM_DROPFILES
+// on the UI thread, and Windows declares the window "Not responding" after
+// five seconds without message processing.
+void StartAsyncLoad(const WCHAR *pacFilename)
+{
+        LoadJob* pJob = BeginLoadJob(false);    // clears the old content too
+        if (pJob == nullptr)
+        {
+                return;                         // out of memory: BeginLoadJob already said so
+        }
+        lstrcpynW(pJob->szPath, pacFilename, MAX_PATH);
+        AddRecentEntry(pJob->szPath);           // MRU: remember what is being opened
+        LaunchLoadJob(pJob);
 }
 
 
@@ -1044,6 +1407,19 @@ void RunLoadJob(LoadJob *pJob)
                 {
                         cbOnDisk = (ULONGLONG) liSize.QuadPart;
                 }
+                // Paged view: every page starts at its own file offset. A base past
+                // the end of the file reads an empty window; the clamps below keep
+                // every length honest in that case.
+                if (pJob->qwBase != 0 && cbOnDisk > pJob->qwBase)
+                {
+                        LARGE_INTEGER liSeek;
+                        liSeek.QuadPart = (LONGLONG) pJob->qwBase;
+                        SetFilePointerEx(hFile, liSeek, nullptr, FILE_BEGIN);
+                }
+                else if (pJob->qwBase != 0)
+                {
+                        pJob->qwBase = 0;       // base past the end: page 0 is the honest answer
+                }
         }
 
         // Reading. Phase 1 buffers the detection window (<= 64 KB); phase 2
@@ -1056,6 +1432,7 @@ void RunLoadJob(LoadJob *pJob)
         bool bReadError = false;
         bool bTruncated = false;
         bool bCancelled = false;
+        ULONGLONG dwT0 = GetTickCount64();      // /timing: the read phase starts here
         // The raw buffer lives in the job (pJob->pBytes), never in a local
         // shadow: every way out of this function — success, cancel, OOM or
         // an exception mid-read — leaves it owned and freed by the job.
@@ -1063,9 +1440,15 @@ void RunLoadJob(LoadJob *pJob)
         {
                 // ---- Phase 1: the detection window -------------------------------------
                 DWORD cbHead = DETECT_WINDOW_BYTES;
-                if (!pJob->bStdin && cbOnDisk < (ULONGLONG) cbHead)
+                if (!pJob->bStdin)
                 {
-                        cbHead = (DWORD) cbOnDisk;
+                        // Never read past the end of the file, and never past the
+                        // end of what this page could hold (qwBase already consumed).
+                        ULONGLONG cbAvail = (cbOnDisk > pJob->qwBase) ? (cbOnDisk - pJob->qwBase) : 0;
+                        if (cbAvail < (ULONGLONG) cbHead)
+                        {
+                                cbHead = (DWORD) cbAvail;
+                        }
                 }
                 pJob->pBytes = new BYTE[cbHead];
                 cbAlloc = cbHead;
@@ -1090,8 +1473,17 @@ void RunLoadJob(LoadJob *pJob)
 
                 // The detected encoding is decided on whatever phase 1 brought
                 // in — also when it stopped early on a read error: the partial
-                // content still deserves its right view.
-                iDetected = DetectDefaultView(pJob->pBytes, cbTotal);
+                // content still deserves its right view. Page navigation
+                // (Next/Previous/Go To/Refresh) keeps the view on screen: the
+                // user chose it, the content of the same file did not change.
+                if (pJob->bKeepView)
+                {
+                        iDetected = pJob->iDetected;              // page of the current view
+                }
+                else
+                {
+                        iDetected = DetectDefaultView(pJob->pBytes, cbTotal);
+                }
                 DWORD cbCap = (iDetected == VIEW_HEX) ? CB_HEX_MAX : CB_TEXT_MAX;
 
                 // ---- Phase 2: only what the detected view can ever display -------------
@@ -1133,12 +1525,13 @@ void RunLoadJob(LoadJob *pJob)
                                         cbTotal += cbRead;
                                 }
                         }
-                        else if (cbOnDisk > (ULONGLONG) cbTotal)
+                        else if (cbOnDisk - pJob->qwBase > (ULONGLONG) cbTotal)
                         {
-                                // File: one exact allocation for min(size, cap), the
-                                // head copied in, the rest read in 4 MB chunks (fewer
-                                // system calls on large files; cancel still instant).
-                                ULONGLONG cbWant = (cbOnDisk < (ULONGLONG) cbCap) ? cbOnDisk : (ULONGLONG) cbCap;
+                                // File: one exact allocation for min(size left from the page
+                                // base, cap), the head copied in, the rest read in 4 MB chunks
+                                // (fewer system calls on large files; cancel still instant).
+                                ULONGLONG cbAvail = cbOnDisk - pJob->qwBase;
+                                ULONGLONG cbWant = (cbAvail < (ULONGLONG) cbCap) ? cbAvail : (ULONGLONG) cbCap;
                                 DWORD cbFinal = (DWORD) cbWant;
                                 if (cbFinal > cbTotal)
                                 {
@@ -1203,11 +1596,15 @@ void RunLoadJob(LoadJob *pJob)
         else if (cbAlloc > cbTotal)
         {
                 // Shrink an over-sized buffer (pipe growth or early EOF) to the
-                // exact data size.
-                BYTE* pExact = new BYTE[cbTotal];
-                CopyMemory(pExact, pJob->pBytes, cbTotal);
-                delete[] pJob->pBytes;
-                pJob->pBytes = pExact;
+                // exact data size. A failed allocation is no reason to lose
+                // the bytes already read: keep the bigger buffer instead.
+                BYTE* pExact = new (std::nothrow) BYTE[cbTotal];
+                if (pExact != nullptr)
+                {
+                        CopyMemory(pExact, pJob->pBytes, cbTotal);
+                        delete[] pJob->pBytes;
+                        pJob->pBytes = pExact;
+                }
         }
         pJob->cbFile = cbTotal;
         pJob->iDetected = iDetected;
@@ -1216,16 +1613,18 @@ void RunLoadJob(LoadJob *pJob)
         pJob->cbOnDisk = (!pJob->bStdin && cbOnDisk != 0) ? cbOnDisk : (ULONGLONG) cbTotal;
         pJob->bReadError = bReadError;
         pJob->bStreamTruncated = bTruncated;
+        g_msRead = GetTickCount64() - dwT0;     // /timing: raw read is done
 
-        // Decode the detected view now, on the worker: by the time the result
-        // lands, the UI only has to hand the ready text to the edit control.
-        // The buffers are bounded by BuildViewText (CB_TEXT_MAX / CB_HEX_MAX),
-        // so this can only fail on genuinely tight memory.
-        try
+                // Decode the detected view now, on the worker: by the time the result
+                // lands, the UI only has to hand the ready text to the edit control.
+                // The buffers are bounded by BuildViewText (CB_TEXT_MAX / CB_HEX_MAX),
+                // so this can only fail on genuinely tight memory.
+                ULONGLONG dwT1 = GetTickCount64();      // /timing: the decode phase starts here
+                try
         {
                 WCHAR* pText = nullptr;
                 DWORD cch = 0;
-                if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, &pText, &cch))
+                if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch))
                 {
                         pJob->pText = pText;
                         pJob->cchText = cch;
@@ -1235,6 +1634,7 @@ void RunLoadJob(LoadJob *pJob)
         {
                 pJob->bOOM = true;              // bytes stay loaded; the UI reports the failure
         }
+        g_msDecode = GetTickCount64() - dwT1;   // /timing: decode-to-text is done
 }
 
 
@@ -1247,7 +1647,23 @@ void ApplyLoadResult(LoadJob *pJob)
         pJob->pBytes = nullptr;
         cbFile = pJob->cbFile;                  // bytes actually loaded (bounded by the caps)
         g_cbFileTotal = pJob->cbOnDisk;         // REAL size: status bar + truncation notices
+        g_qwBase = pJob->qwBase;                 // file offset of the page now on screen
         iView = pJob->iDetected;
+        // The loaded file becomes "the current file": pages, refresh, tail and the
+        // raw-file byte search all work on it. A failed open leaves no file.
+        if (!pJob->bStdin && !pJob->bOpenFailed)
+        {
+                lstrcpynW(g_szCurrentFile, pJob->szPath, MAX_PATH);
+        }
+        // /hex /utf8... from the command line: apply to the first loaded file and
+        // retire the switch (the View menu stays the boss afterwards).
+        int iDeliveredView = pJob->iDetected;
+        if (!pJob->bOpenFailed && g_iForcedView >= VIEW_ANSI && g_iForcedView <= VIEW_EBCDIC)
+        {
+                iView = g_iForcedView;
+                g_iForcedView = -1;
+        }
+        ClearBookmarks();                        // page-relative line bookmarks die with the old page
         UpdateViewMenu();
 
         // Title bar: "4More - <full path>" (or "... - STDIN" for a pipe) while
@@ -1294,6 +1710,31 @@ void ApplyLoadResult(LoadJob *pJob)
         {
                 MessageBox(hWndMain, L"An unexpected error occurred while showing the file.", szTitle, MB_OK | MB_ICONERROR);
         }
+        if (bDelivered && iView != iDeliveredView)
+        {
+                // A forced view (/hex...) landed on a file detected otherwise: rebuild
+                // the shown text from the raw bytes of the requested view.
+                ShowViewSafely();
+        }
+        if (bDelivered)
+        {
+                if (pJob->bTailJump && hEdit != nullptr)
+                {
+                        // Tail: keep the new end of the file on screen, caret after it.
+                        LRESULT lrLen = SendMessage(hEdit, WM_GETTEXTLENGTH, 0, 0);
+                        SendMessage(hEdit, EM_SETSEL, (WPARAM) lrLen, (LPARAM) lrLen);
+                        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+                }
+                if (g_qwPendingGoto != (ULONGLONG) -1)
+                {
+                        // Go To / Find Bytes asked for a page that just landed: the
+                        // requested offset is inside it now.
+                        ULONGLONG qwGoto = g_qwPendingGoto;
+                        g_qwPendingGoto = (ULONGLONG) -1;
+                        PositionAtOffset(qwGoto);
+                }
+                TimingFlash();                  // /timing: the load path is complete
+        }
         delete pJob;
 }
 
@@ -1335,6 +1776,7 @@ void LoadFileSync(void)
         {
                 return;                         // out of memory: BeginLoadJob already said so
         }
+        AddRecentEntry(RECENT_STDIN);           // MRU: the pipe counts as a place
         RunJobSynchronously(pJob);
 }
 
@@ -1389,16 +1831,62 @@ WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull)
 
 /* -------------------------------------------------------------------------------------------- */
 // FormatU64Locale: the digits of U64ToWide plus the user's regional grouping
-// (GetNumberFormatEx, user default locale): the same 1234567 reads
+// (GetNumberFormatW, user default locale): the same 1234567 reads
 // "1.234.567" or "1,234,567" depending on where the viewer runs. Used by the
 // status bar and the truncation notices, which only rewrite themselves when
 // the value they show changes — the call stays out of every hot path. If the
 // API ever fails, the plain digits are kept: the number is never dropped.
+// 2.95: GetNumberFormatEx was replaced by the classic GetNumberFormatW with
+// an explicit NUMBERFMTW — the EX variant needs locale-name plumbing and its
+// null-format behavior is the less documented corner of the pair. Whole
+// numbers only: a file viewer counts whole bytes.
 void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull)
 {
         WCHAR szRaw[24];
         U64ToWide(szRaw, ull);
-        if (GetNumberFormatEx(LOCALE_NAME_USER_DEFAULT, 0, szRaw, nullptr, pszDst, cchDst) == 0)
+        NUMBERFMTW fmt = {};
+        fmt.NumDigits = 0;                      // no decimals
+        WCHAR szDecimal[8], szThousand[8], szGrouping[8];
+        if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SDECIMAL, szDecimal, 8) > 0)
+        {
+                fmt.lpDecimalSep = szDecimal;
+        }
+        else
+        {
+                fmt.lpDecimalSep = (LPWSTR) L".";
+        }
+        if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_STHOUSAND, szThousand, 8) > 0)
+        {
+                fmt.lpThousandSep = szThousand;
+        }
+        else
+        {
+                fmt.lpThousandSep = (LPWSTR) L",";
+        }
+        // LOCALE_SGROUPING spells groups right to left, ";"-terminated
+        // ("3;0" for es-ES/US, "12;0" for hi-IN): keep the digits up to the
+        // first ';' and let NUMBERFMTW do what it always did. 0 = a locale
+        // that answered nothing useful: group by thousands, like the whole
+        // world's default.
+        DWORD dwGrouping = 0;
+        int cGroup = GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SGROUPING, szGrouping, 8);
+        for (int i = 0; i < cGroup && szGrouping[i] != L'\0'; i++)
+        {
+                if (szGrouping[i] >= L'0' && szGrouping[i] <= L'9')
+                {
+                        dwGrouping = dwGrouping * 10 + (DWORD) (szGrouping[i] - L'0');
+                }
+                else
+                {
+                        break;                  // the ';' (or anything else) ends the useful part
+                }
+        }
+        if (dwGrouping == 0)
+        {
+                dwGrouping = 3;
+        }
+        fmt.Grouping = dwGrouping;
+        if (GetNumberFormatW(LOCALE_USER_DEFAULT, 0, szRaw, &fmt, pszDst, cchDst) == 0)
         {
                 lstrcpynW(pszDst, szRaw, cchDst);
         }
@@ -1487,6 +1975,10 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
         {
                 return(VIEW_UTF16);                     // UTF-16 LE con BOM
         }
+        if (cb >= 2 && pBytes[0] == 0xFE && pBytes[1] == 0xFF)
+        {
+                return(VIEW_UTF16BE);                   // UTF-16 BE con BOM
+        }
         DWORD cbWin = (cb < DETECT_WINDOW_BYTES) ? cb : DETECT_WINDOW_BYTES;
         if (LooksLikeUTF16Text(pBytes, cbWin))
         {
@@ -1508,17 +2000,19 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
 // separately, in bold, by the offset column (HexPaintGutter). That keeps this
 // buffer at 68 instead of 78 characters per line (WM_SETTEXT copies it and
 // Find walks it), and leaves the offsets out of Copy and Find.
-// The caller must delete[] the returned buffer. The dump is capped at
-// CB_HEX_MAX bytes; when cbAll (the real total) is bigger, a notice replaces
-// the final CRLF of the last line.
-WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, DWORD* pcch)
+// The caller must free the returned buffer with FreeViewText (2.98: it is
+// a movable global block, ready for EM_SETHANDLE). The dump shows the bytes of
+// the current page (qwBase..qwBase+CB_HEX_MAX at most); when the file holds
+// more bytes past that window, a notice replaces the final CRLF of the last
+// line. cbAll is the REAL total on disk, the notice cites the page range.
+WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch)
 {
-        if (cbAll < (ULONGLONG) cb)
+        if (cbAll < qwBase + (ULONGLONG) cb)
         {
-                cbAll = cb;                             // never cite a total smaller than what was handed in
+                cbAll = qwBase + (ULONGLONG) cb;        // never cite a total smaller than what was handed in
         }
         DWORD cbHexMax = CB_HEX_MAX;
-        bool bTruncated = (cbAll > (ULONGLONG) cbHexMax);
+        bool bTruncated = (qwBase + (ULONGLONG) cbHexMax < cbAll);
         DWORD cbUse = ((ULONGLONG) cb > (ULONGLONG) cbHexMax) ? cbHexMax : cb;
         DWORD cLines = (cbUse + 15) / 16;
         DWORD cchLine = 49 + 1 + 16 + 2;                // hex block + gap + ASCII + CRLF (no offset column)
@@ -1570,7 +2064,7 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, DWORD* pcch)
         static const HexPairs hp;
 #endif
 
-        WCHAR* pOut = new WCHAR[cLines * cchLine + 160];
+        WCHAR* pOut = AllocViewText(cLines * cchLine + 160);
         WCHAR* p = pOut;
         for (DWORD iLine = 0; iLine < cLines; iLine++)
         {
@@ -1654,11 +2148,12 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, DWORD* pcch)
         }
         if (bTruncated)
         {
-                WCHAR szShown[32], szTotal[32];
-                FormatU64Locale(szShown, _countof(szShown), cbUse);
+                WCHAR szFirst[32], szLast[32], szTotal[32];
+                FormatU64Locale(szFirst, _countof(szFirst), qwBase);
+                FormatU64Locale(szLast, _countof(szLast), qwBase + (ULONGLONG) cbUse);
                 FormatU64Locale(szTotal, _countof(szTotal), cbAll);
                 p -= 2;                                     // the notice replaces the final CRLF
-                p += wsprintfW(p, L"[Hex view truncated: showing the first %s of %s bytes]", szShown, szTotal);
+                p += wsprintfW(p, L"[Hex view: showing bytes %s-%s of %s]", szFirst, szLast, szTotal);
         }
         *p = L'\0';
         if (pcch != nullptr)
@@ -1671,15 +2166,16 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, DWORD* pcch)
 
 /* -------------------------------------------------------------------------------------------- */
 // Builds the text of any view from the raw bytes, with EVERY view bounded:
-//   - Hexadecimal: first CB_HEX_MAX bytes, notice appended by BuildHexText.
-//   - Text views: first CB_TEXT_MAX source bytes, then a truncation notice.
-// cbAll is the real total the notices must cite (on-disk size; it can exceed
-// cb because the loader stops at the caps). The bounds keep view switching
-// instant and the memory sane even for a huge file (in particular on Win32,
-// where address space is 2 GB): decode buffer <= 2 x CB_TEXT_MAX bytes worst
-// case, edit-control buffer the same. Returns false ONLY on out-of-memory
-// (bad_alloc); the caller reports it.
-bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, WCHAR** ppText, DWORD* pcch)
+//   - Hexadecimal: first CB_HEX_MAX bytes of the page, notice appended by BuildHexText.
+//   - Text views: first CB_TEXT_MAX source bytes of the page, then a truncation notice.
+// qwBase is the file offset of the FIRST byte of pBytes (the loaded page): the
+// notices cite absolute ranges. cbAll is the real total the notices must cite
+// (on-disk size; it can exceed qwBase+cb because the loader stops at the caps).
+// The bounds keep view switching instant and the memory sane even for a huge
+// file (in particular on Win32, where address space is 2 GB): decode buffer
+// <= 2 x CB_TEXT_MAX bytes worst case, edit-control buffer the same. Returns
+// false ONLY on out-of-memory (bad_alloc); the caller reports it.
+bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch)
 {
         *ppText = nullptr;
         *pcch = 0;
@@ -1691,11 +2187,15 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
                 cbAll = cb;                             // never cite a total smaller than what was handed in
         }
+        if (qwBase > cbAll)
+        {
+                qwBase = cbAll;                         // never cite a page past the end of the file
+        }
 
         if (iViewBuild == VIEW_HEX)
         {
                 DWORD cchHex = 0;
-                *ppText = BuildHexText(pBytes, cb, cbAll, &cchHex);
+                *ppText = BuildHexText(pBytes, cb, cbAll, qwBase, &cchHex);
                 *pcch = cchHex;
                 return(true);
         }
@@ -1718,9 +2218,9 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                 {
                         cbSrc = (int) CB_TEXT_MAX;
                 }
-                if (cbAll > (ULONGLONG) (cbSrc + (pSrc - (LPCCH) pBytes)))
+                if (qwBase + (ULONGLONG) (cbSrc + (pSrc - (LPCCH) pBytes)) < cbAll)
                 {
-                        bTruncated = true;              // more bytes on disk than this view covers
+                        bTruncated = true;              // more bytes on disk than this page covers
                 }
                 if (bTruncated)
                 {
@@ -1743,7 +2243,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         }
                 }
                 cbShown = (DWORD) (cbSrc + (pSrc - (LPCCH) pBytes));
-                pText = new WCHAR[cbSrc + 1 + 160];             // + notice room
+                pText = AllocViewText((DWORD) cbSrc + 1 + 160);       // + notice room
                 cch = 0;
                 if (cbSrc > 0)
                 {
@@ -1781,7 +2281,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                 {
                         cwch = (int) (CB_TEXT_MAX / 2);         // cut on a whole UTF-16 unit
                 }
-                if (cbAll > (ULONGLONG) (cwch * 2 + off))
+                if (qwBase + (ULONGLONG) (cwch * 2 + off) < cbAll)
                 {
                         bTruncated = true;
                 }
@@ -1794,7 +2294,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         }
                 }
                 cbShown = (DWORD) (cwch * 2 + off);
-                pText = new WCHAR[cwch + 1 + 160];
+                pText = AllocViewText((DWORD) cwch + 1 + 160);
 #if WCHAR_MAX <= 0xFFFF
                 // Native build (2-byte WCHAR, little-endian): the source bytes
                 // ARE the UTF-16 text, so the decode is one straight copy.
@@ -1808,6 +2308,108 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
 #endif
                 cch = cwch;
         }
+        else if (iViewBuild == VIEW_UTF16BE)            // Unicode big-endian, with or without BOM
+        {
+                // Mirror of the LE branch with the bytes of every unit swapped;
+                // everything stays on the RAW BYTES for the same portability
+                // reasons (see the LE branch above).
+                bool bBom = (cb >= 2 && pBytes[0] == 0xFE && pBytes[1] == 0xFF);
+                DWORD off = bBom ? 2 : 0;
+                int cwch = (int) ((cb - off) / 2);
+                if (cwch > (int) (CB_TEXT_MAX / 2))
+                {
+                        cwch = (int) (CB_TEXT_MAX / 2);
+                }
+                if (qwBase + (ULONGLONG) (cwch * 2 + off) < cbAll)
+                {
+                        bTruncated = true;
+                }
+                if (bTruncated && cwch > 0)
+                {
+                        WORD w = (WORD) (((WORD) pBytes[off + (DWORD) (cwch - 1) * 2] << 8) | (WORD) pBytes[off + (DWORD) (cwch - 1) * 2 + 1]);
+                        if (w >= 0xD800 && w <= 0xDBFF)
+                        {
+                                cwch--;                 // dangling high surrogate: drop it
+                        }
+                }
+                cbShown = (DWORD) (cwch * 2 + off);
+                pText = AllocViewText((DWORD) cwch + 1 + 160);
+                for (int i = 0; i < cwch; i++)
+                {
+                        pText[i] = (WCHAR) (((WCHAR) pBytes[off + (DWORD) i * 2] << 8) | (WCHAR) pBytes[off + (DWORD) i * 2 + 1]);
+                }
+                cch = cwch;
+        }
+        else if (iViewBuild == VIEW_EBCDIC)             // IBM mainframe text (CP37/500 graphic set)
+        {
+                // The classic EBCDIC tables (code pages 37 and 500 share the
+                // graphic cells used here): letters, digits and the punctuation
+                // cells of the US/international set; every unmapped byte shows
+                // U+FFFD. Built as a function-local static so C++11 makes the
+                // one-time fill thread-safe (the worker thread can arrive here).
+                struct EbcdicTable
+                {
+                        WCHAR w[256];
+                        EbcdicTable()
+                        {
+                                for (int i = 0; i < 256; i++)
+                                {
+                                        w[i] = 0xFFFD;   // unmapped: the replacement character
+                                }
+                                w[0x00] = 0x0000;        // NUL stays NUL (binary heuristics)
+                                w[0x40] = L' ';  w[0x4A] = 0x00A2; w[0x4B] = L'.';  w[0x4C] = L'<';
+                                w[0x4D] = L'(';  w[0x4E] = L'+';  w[0x4F] = L'|';  w[0x50] = L'&';
+                                w[0x5A] = L'!';  w[0x5B] = L'$';  w[0x5C] = L'*';  w[0x5D] = L')';
+                                w[0x5E] = L';';  w[0x5F] = 0x00AC; w[0x60] = L'-'; w[0x61] = L'/';
+                                w[0x6A] = 0x00A6; w[0x6B] = L',';  w[0x6C] = L'%'; w[0x6D] = L'_';
+                                w[0x6E] = L'>';  w[0x6F] = L'?';  w[0x70] = L' ';  w[0x7A] = L':';
+                                w[0x7B] = L'#';  w[0x7C] = L'@';  w[0x7D] = 0x0027; w[0x7E] = L'=';
+                                w[0x7F] = L'"';
+                                for (int i = 0; i < 9; i++)            // a-i
+                                {
+                                        w[0x81 + i] = (WCHAR) (L'a' + i);
+                                }
+                                for (int i = 0; i < 9; i++)            // j-r
+                                {
+                                        w[0x91 + i] = (WCHAR) (L'j' + i);
+                                }
+                                for (int i = 0; i < 8; i++)            // s-z
+                                {
+                                        w[0xA2 + i] = (WCHAR) (L's' + i);
+                                }
+                                for (int i = 0; i < 9; i++)            // A-I
+                                {
+                                        w[0xC1 + i] = (WCHAR) (L'A' + i);
+                                }
+                                for (int i = 0; i < 9; i++)            // J-R
+                                {
+                                        w[0xD1 + i] = (WCHAR) (L'J' + i);
+                                }
+                                for (int i = 0; i < 8; i++)            // S-Z
+                                {
+                                        w[0xE2 + i] = (WCHAR) (L'S' + i);
+                                }
+                                for (int i = 0; i < 10; i++)           // 0-9
+                                {
+                                        w[0xF0 + i] = (WCHAR) (L'0' + i);
+                                }
+                        }
+                };
+                static const EbcdicTable et;
+                int cbSrc = (int) cb;
+                if (cbSrc > (int) CB_TEXT_MAX)
+                {
+                        cbSrc = (int) CB_TEXT_MAX;
+                }
+                cbShown = (DWORD) cbSrc;
+                bTruncated = (qwBase + (ULONGLONG) cbShown < cbAll);
+                pText = AllocViewText((DWORD) cbSrc + 1 + 160);
+                for (int i = 0; i < cbSrc; i++)
+                {
+                        pText[i] = et.w[pBytes[i]];
+                }
+                cch = cbSrc;
+        }
         else                                            // ANSI (active code page)
         {
                 int cbSrc = (int) cb;
@@ -1816,8 +2418,8 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         cbSrc = (int) CB_TEXT_MAX;
                 }
                 cbShown = (DWORD) cbSrc;
-                bTruncated = (cbAll > (ULONGLONG) cbShown);
-                pText = new WCHAR[cbSrc + 1 + 160];
+                bTruncated = (qwBase + (ULONGLONG) cbShown < cbAll);
+                pText = AllocViewText((DWORD) cbSrc + 1 + 160);
                 cch = 0;
                 if (cbSrc > 0)                          // defensive symmetry with the UTF-8 path
                 {
@@ -1833,12 +2435,14 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
                 // Notice as a final paragraph; the +160 slack of the allocation
                 // holds it comfortably (wsprintfW is also capped at 1024 chars).
-                WCHAR szShown[32], szTotal[32];
-                FormatU64Locale(szShown, _countof(szShown), cbShown);
+                // The range is absolute: it names the page on screen.
+                WCHAR szFirst[32], szLast[32], szTotal[32];
+                FormatU64Locale(szFirst, _countof(szFirst), qwBase);
+                FormatU64Locale(szLast, _countof(szLast), qwBase + (ULONGLONG) cbShown);
                 FormatU64Locale(szTotal, _countof(szTotal), cbAll);
                 pText[cch++] = L'\r';
                 pText[cch++] = L'\n';
-                cch += wsprintfW(pText + cch, L"[Showing only the first %s of %s bytes]", szShown, szTotal);
+                cch += wsprintfW(pText + cch, L"[Showing bytes %s-%s of %s]", szFirst, szLast, szTotal);
         }
         pText[cch] = L'\0';
         *ppText = pText;
@@ -1848,24 +2452,74 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
 
 
 /* -------------------------------------------------------------------------------------------- */
-// Delivers a decoded text to the edit control with repainting disabled, and
-// OWNS the buffer: pText is freed here (NormalizeNewlines may build a second
-// buffer; both are freed). bPreNormalized skips the CRLF normalization and
-// its full scan — only the hex builder produces text that is CRLF-only by
-// construction. WM_SETTEXT is checked: if the control cannot take the text
-// (out of memory, usually on Win32), it is cleared and the user is told,
-// instead of leaving stale or half-delivered content on screen.
+// Swaps in an EMPTY block (2.98). The naive WM_SETTEXT "" would leave the
+// control owning the previous tens-of-megabytes buffer: EM_SETHANDLE is the
+// only copy-free way to replace the control's buffer, so even "empty" goes
+// through it — a 2-byte global block adopted by the control, and the old
+// block fetched with EM_GETHANDLE and freed on the spot.
+void AdoptEmptyText(void)
+{
+        if (hEdit == nullptr)
+        {
+                return;
+        }
+        HGLOBAL hNew = GlobalAlloc(GMEM_MOVEABLE, sizeof(WCHAR));   // just the L'\0'
+        if (hNew != nullptr)
+        {
+                WCHAR* pwsz = (WCHAR*) GlobalLock(hNew);
+                if (pwsz != nullptr)
+                {
+                        *pwsz = L'\0';
+                        GlobalUnlock(hNew);     // EM_SETHANDLE wants it unlocked
+                        HGLOBAL hOld = (HGLOBAL) SendMessage(hEdit, EM_GETHANDLE, 0, 0);
+                        SendMessage(hEdit, EM_SETHANDLE, (WPARAM) hNew, 0);
+                        if (hOld != nullptr && hOld != hNew)
+                        {
+                                GlobalFree(hOld);       // the control is done with it
+                        }
+                        return;
+                }
+                GlobalFree(hNew);              // lock failed: fall through to the copy
+        }
+        // No memory for even one WCHAR (or the lock failed): copying "" is the
+        // one case where WM_SETTEXT remains fine — it allocates nothing.
+        SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM) L"");
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Delivers a decoded text to the edit control, repainting disabled, and OWNS
+// the buffer either way: freed here, or handed to the control to own.
+//
+// 2.98 — zero-copy delivery via EM_SETHANDLE. WM_SETTEXT makes the control
+// COPY the whole text into a buffer it allocates itself: a 60 MB view costs
+// 120 MB of peak memory and one full memcpy on the UI thread, right after
+// the worker built the very same text. EM_SETHANDLE instead swaps the
+// control's buffer pointer for ours (built by AllocViewText as a movable
+// global block): no copy, no second allocation, and the control keeps the
+// block until the next swap frees it. The old block comes back through
+// EM_GETHANDLE and is freed right here — the documented pattern; whatever
+// handle the control answers with is, by definition, the one it is done
+// with, so no tracking global is needed.
+//
+// bPreNormalized skips the CRLF normalization and its full scan — only the
+// hex builder produces text that is CRLF-only by construction. The copy
+// path remains as the fallback (a block that is not HGLOBAL-backed, or an
+// empty delivery), keeping its refusal check: if the control cannot take
+// the text (out of memory, usually on Win32), it is cleared and the user
+// is told instead of leaving stale content on screen.
 void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized)
 {
         if (hEdit == nullptr)
         {
-                delete[] pText;
+                FreeViewText(pText);
                 return;
         }
         // The hex offset column appears/disappears with the view and content:
         // place the control before filling it, so the content repaints once,
         // at its final geometry.
         LayoutEdit();
+        ULONGLONG dwT0 = GetTickCount64();      // /timing: normalize + deliver start here
         WCHAR* pNorm = pText;
         if (pText != nullptr && cch > 0 && !bPreNormalized)
         {
@@ -1880,31 +2534,61 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized)
                         // (ApplyView's catch, the load path's SEH jacket) already
                         // report the failure; leaking the text on every retry was
                         // the one memory error left in the delivery chain.
-                        delete[] pText;
+                        FreeViewText(pText);
                         throw;
                 }
         }
+        g_msNormalize = GetTickCount64() - dwT0;       // /timing: normalization done
 
         SendMessage(hEdit, WM_SETREDRAW, FALSE, 0);
-        LRESULT lrSetText = SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM) (pNorm != nullptr ? (LPCWSTR) pNorm : L""));
+        bool bAdopted = false;
+        HGLOBAL hNew = nullptr;
+        if (pNorm != nullptr && cch > 0)
+        {
+                hNew = GlobalHandle(pNorm);    // nonzero only for AllocViewText blocks
+                if (hNew != nullptr)
+                {
+                        GlobalUnlock(hNew);     // EM_SETHANDLE wants an unlocked block
+                }
+        }
+        if (hNew != nullptr)
+        {
+                HGLOBAL hOld = (HGLOBAL) SendMessage(hEdit, EM_GETHANDLE, 0, 0);
+                SendMessage(hEdit, EM_SETHANDLE, (WPARAM) hNew, 0);
+                if (hOld != nullptr && hOld != hNew)
+                {
+                        GlobalFree(hOld);       // the control is done with it: our free
+                }
+                bAdopted = true;                // the control owns the block from here on
+                if (pNorm != pText)
+                {
+                        FreeViewText(pText);    // normalization built a second buffer
+                }
+        }
+        else
+        {
+                // Not adoptable (not HGLOBAL-backed, or nothing to show): the
+                // classic copy path, with its refusal check.
+                LRESULT lrSetText = SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM) (pNorm != nullptr ? (LPCWSTR) pNorm : L""));
+                if (lrSetText == 0 && IsWindow(hEdit))
+                {
+                        // The control refused the text. Empty it and say so: the status
+                        // bar must never describe content that is not on screen.
+                        SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM) L"");
+                        MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
+                }
+                if (pNorm != pText)
+                {
+                        FreeViewText(pNorm);
+                }
+                FreeViewText(pText);
+        }
         SendMessage(hEdit, EM_SETMODIFY, FALSE, 0);
         SendMessage(hEdit, EM_SETSEL, 0, 0);
         SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
         SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
         InvalidateRect(hEdit, nullptr, TRUE);
-        if (lrSetText == 0 && IsWindow(hEdit))
-        {
-                // The control refused the text. Empty it and say so: the status
-                // bar must never describe content that is not on screen.
-                SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM) L"");
-                MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
-        }
-
-        if (pNorm != pText)
-        {
-                delete[] pNorm;
-        }
-        delete[] pText;
+        g_msDeliver = GetTickCount64() - dwT0;         // /timing: delivery done
         // The content (and therefore the line/column meaning) changed: repaint
         // the whole status bar. UpdateStatusBar has no caches: it always writes
         // both parts, so the size shown can never be a stale "0 bytes".
@@ -1959,7 +2643,8 @@ HMENU GetViewSubMenu(HWND hWnd)
 
 /* -------------------------------------------------------------------------------------------- */
 // Marks the active view in the View menu (radio dot on one item, the rest
-// unmarked), so the menu always shows the encoding being displayed.
+// unmarked), so the menu always shows the encoding being displayed, and the
+// check state of the three toggles (Tail File, Line Numbers, Word Wrap).
 void UpdateViewMenu(void)
 {
         if (hWndMain == nullptr)
@@ -1969,7 +2654,10 @@ void UpdateViewMenu(void)
         HMENU hViewMenu = GetViewSubMenu(hWndMain);
         if (hViewMenu != nullptr)
         {
-                CheckMenuRadioItem(hViewMenu, ID_VIEW_ANSI, ID_VIEW_HEX, ID_VIEW_ANSI + iView, MF_BYCOMMAND);
+                CheckMenuRadioItem(hViewMenu, ID_VIEW_ANSI, ID_VIEW_EBCDIC, ID_VIEW_ANSI + iView, MF_BYCOMMAND);
+                CheckMenuItem(hViewMenu, ID_VIEW_TAIL, MF_BYCOMMAND | (g_bTail ? MF_CHECKED : MF_UNCHECKED));
+                CheckMenuItem(hViewMenu, ID_VIEW_LINENUMS, MF_BYCOMMAND | (g_bLineNums ? MF_CHECKED : MF_UNCHECKED));
+                CheckMenuItem(hViewMenu, ID_VIEW_WRAP, MF_BYCOMMAND | (g_bWrap ? MF_CHECKED : MF_UNCHECKED));
         }
 }
 
@@ -1978,7 +2666,7 @@ void UpdateViewMenu(void)
 // Switches the active view, updates the menu mark and rebuilds the content.
 void SetView(int iNewView)
 {
-        if (iNewView < VIEW_ANSI || iNewView > VIEW_HEX)
+        if (iNewView < VIEW_ANSI || iNewView > VIEW_EBCDIC)
         {
                 return;                                 // never trust an out-of-range command ID
         }
@@ -1988,6 +2676,7 @@ void SetView(int iNewView)
         }
         iView = iNewView;
         UpdateViewMenu();
+        ClearBookmarks();               // line numbers do not survive a view switch
         if (ShowViewSafely())
         {
                 return;
@@ -2027,8 +2716,9 @@ void ApplyView(void)
         if (pFileBytes == nullptr || cbFile == 0)
         {
                 // Nothing loaded: an empty buffer for every view (and no offset
-                // column — LayoutEdit puts the control back at x = 0).
-                SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM) L"");
+                // column — LayoutEdit puts the control back at x = 0). The
+                // EM_SETHANDLE swap releases the old adopted block too.
+                AdoptEmptyText();
                 LayoutEdit();
                 UpdateStatusBar();
                 return;
@@ -2038,11 +2728,12 @@ void ApplyView(void)
         {
                 WCHAR* pText = nullptr;
                 DWORD cch = 0;
-                if (BuildViewText(iView, pFileBytes, cbFile, g_cbFileTotal, &pText, &cch))
+                if (BuildViewText(iView, pFileBytes, cbFile, g_cbFileTotal, g_qwBase, &pText, &cch))
                 {
                         // Hex text is CRLF-only by construction: skip the full
                         // normalization scan of up to ~41M characters.
                         DeliverTextToEdit(pText, (int) cch, iView == VIEW_HEX); // takes ownership of pText
+                        TimingFlash();          // /timing: view switches are measured too
                 }
                 SetCursor(hcurOld);
         }
@@ -2186,13 +2877,13 @@ void ChangeEditorFont(int iStep)
 /* -------------------------------------------------------------------------------------------- */
 // Line height and character advance of the editor font, measured from the font
 // itself so the offset column always steps on the same line grid as the edit
-// control. Also derives the column width (8 digits + a character of air on
-// each side). Zero on any failure: every user checks iHexLineH / iGutterW.
+// control. No column width is derived here (2.95): GutterWidth() owns that —
+// it widens with the offsets actually being painted, not a fixed 8 digits.
+// Zero on any failure: every user checks iHexLineH.
 void UpdateHexMetrics(void)
 {
         iHexLineH = 0;
         iHexCharW = 0;
-        iGutterW = 0;
         if (hFont == nullptr || hEdit == nullptr)
         {
                 return;
@@ -2216,7 +2907,6 @@ void UpdateHexMetrics(void)
                 {
                         iHexCharW = 1;
                 }
-                iGutterW = 10 * iHexCharW + 6;          // 8 digits + air, multiples of the character grid
         }
         SelectObject(hdc, hOld);
         ReleaseDC(hEdit, hdc);
@@ -2245,7 +2935,7 @@ void LayoutEdit(void)
         {
                 iHeight -= rc.bottom;                   // leave the status bar visible
         }
-        int x = (iView == VIEW_HEX && cbFile > 0 && iGutterW > 0) ? iGutterW : 0;
+        int x = GutterWidth();                  // hex offsets, line numbers, or nothing
         if (iWidth < x)
         {
                 iWidth = x;                             // never a negative width
@@ -2274,12 +2964,16 @@ void LayoutEdit(void)
 // so stale columns are impossible.
 void HexPaintGutter(void)
 {
-        if (hWndMain == nullptr || hEdit == nullptr || hFont == nullptr ||
-            iGutterW <= 0 || iHexLineH <= 0)
+        if (hWndMain == nullptr || hEdit == nullptr || hFont == nullptr || iHexLineH <= 0)
         {
                 return;
         }
         if (iView != VIEW_HEX || pFileBytes == nullptr || cbFile == 0)
+        {
+                return;
+        }
+        int iW = GutterWidth();                 // the one width (LayoutEdit uses the same)
+        if (iW <= 0)
         {
                 return;
         }
@@ -2298,7 +2992,7 @@ void HexPaintGutter(void)
         RECT rcGutter;
         rcGutter.left = 0;
         rcGutter.top = 0;
-        rcGutter.right = iGutterW;
+        rcGutter.right = iW;
         rcGutter.bottom = rcEdit.bottom;
         FillRect(hdc, &rcGutter, GetSysColorBrush(COLOR_WINDOW));
         HGDIOBJ hOldFont = SelectObject(hdc, (hFontHexBold != nullptr) ? hFontHexBold : hFont);
@@ -2312,13 +3006,26 @@ void HexPaintGutter(void)
         int y = 0;
         for (int iLine = iFirst; iLine < (int) cLines && y + iHexLineH <= rcEdit.bottom; iLine++)
         {
-                WCHAR szOffset[8];
-                DWORD off = (DWORD) iLine * 16;
-                for (int iShift = 28, i = 0; iShift >= 0; iShift -= 4, i++)
+                // ABSOLUTE file offset: in the paged view the page on screen may
+                // start anywhere in a multi-gigabyte file, and the column must
+                // still name the byte it describes (V-style, variable width,
+                // right-aligned on the character grid).
+                ULONGLONG qwOff = g_qwBase + (ULONGLONG) iLine * 16;
+                WCHAR szOffset[20];
+                int cDigits = 0;
+                do
                 {
-                        szOffset[i] = s_szHexDigits[(off >> iShift) & 0x0F];
+                        szOffset[cDigits++] = s_szHexDigits[qwOff & 0x0F];
+                        qwOff >>= 4;
+                } while (qwOff != 0);
+                // reverse in place
+                for (int i = 0; i < cDigits / 2; i++)
+                {
+                        WCHAR wch = szOffset[i];
+                        szOffset[i] = szOffset[cDigits - 1 - i];
+                        szOffset[cDigits - 1 - i] = wch;
                 }
-                TextOutW(hdc, iHexCharW, y, szOffset, 8);
+                TextOutW(hdc, iW - 6 - cDigits * iHexCharW, y, szOffset, cDigits);
                 y += iHexLineH;
         }
         SelectObject(hdc, hOldFont);
@@ -2483,4 +3190,1667 @@ void SearchNext(HWND hWnd, bool bShowError)
                 wsprintfW(szText, L"Cannot find \"%s\".", szFind);
                 MessageBox(hWnd, szText, L"Find", MB_OK | MB_ICONINFORMATION);
         }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// File > Open...: the documented common dialog (comdlg32, already linked).
+// The path it returns goes through the same LoadFile door as drag & drop and
+// the command line: async load, caps, detection, everything identical.
+void OpenFileDlg(void)
+{
+        WCHAR szFile[MAX_PATH];
+        szFile[0] = L'\0';
+        OPENFILENAMEW ofn;
+        ZeroMemory(&ofn, sizeof(ofn));
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hWndMain;
+        ofn.lpstrFilter = L"All files (*.*)\0*.*\0\0";
+        ofn.lpstrFile = szFile;
+        ofn.nMaxFile = _countof(szFile);
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_EXPLORER;
+        if (GetOpenFileNameW(&ofn))
+        {
+                LoadFile(szFile);       // LoadFile refuses work while a load is in flight
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// The paged view. The bytes on screen are a WINDOW of the file: at most
+// CB_TEXT_MAX source bytes (CB_HEX_MAX in hexadecimal) starting at g_qwBase.
+// Loading another page is the same async job as a fresh file, with two
+// differences: the worker seeks to qwBase first, and the view on screen is
+// kept (no re-detection: the file did not change, the user is walking it).
+// This is the V-style answer to 100 GB files on top of the EDIT control: any
+// file of ANY size opens in a bounded window, and the pages walk the whole
+// file at constant memory.
+void LoadPage(ULONGLONG qwBase, bool bTailJump)
+{
+        if (g_pJob != nullptr)
+        {
+                return;                         // one load at a time
+        }
+        if (g_bInByteSearch)
+        {
+                return;                         // a raw-file scan owns the UI right now
+        }
+        if (g_szCurrentFile[0] == L'\0')
+        {
+                return;                         // stdin / clipboard / nothing: no pages
+        }
+        WCHAR szPath[MAX_PATH];
+        lstrcpynW(szPath, g_szCurrentFile, MAX_PATH);
+        int iKeepView = iView;
+        ULONGLONG cbTotal = g_cbFileTotal;
+        LoadJob* pJob = BeginLoadJob(false);     // clears the viewer (also g_szCurrentFile)
+        if (pJob == nullptr)
+        {
+                return;                         // out of memory: BeginLoadJob already said so
+        }
+        lstrcpynW(pJob->szPath, szPath, MAX_PATH);
+        // Clamp the base into the file (the size is from the load that is on
+        // screen; a file that shrank below it is caught by the open/size path).
+        if (cbTotal > 0 && qwBase >= cbTotal)
+        {
+                DWORD cbPage = (iKeepView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
+                qwBase = (cbTotal > (ULONGLONG) cbPage) ? (cbTotal - (ULONGLONG) cbPage) : 0;
+        }
+        if (iKeepView == VIEW_HEX)
+        {
+                qwBase = (qwBase / 16) * 16;     // hex pages start 16-byte aligned
+        }
+        pJob->qwBase = qwBase;
+        pJob->iDetected = iKeepView;            // keep the view the user is reading
+        pJob->bKeepView = true;
+        pJob->bTailJump = bTailJump;
+        LaunchLoadJob(pJob);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// View > Next Page (Ctrl+PgDn) / Previous Page (Ctrl+PgUp): the window moves
+// one page forward or backward. Next advances by the bytes actually shown
+// (so a short last-but-one page still reaches the end); Previous steps a full
+// page back, never before offset 0. At the ends of the file: a beep, no jump.
+void ChangePage(int iDir)
+{
+        if (g_szCurrentFile[0] == L'\0' || pFileBytes == nullptr || cbFile == 0)
+        {
+                return;                         // nothing to page through
+        }
+        DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
+        ULONGLONG qwBase;
+        if (iDir > 0)
+        {
+                qwBase = g_qwBase + cbFile;              // the bytes shown move on
+                if (qwBase >= g_cbFileTotal)
+                {
+                        MessageBeep(MB_ICONASTERISK);   // the last page is on screen
+                        return;
+                }
+        }
+        else
+        {
+                if (g_qwBase == 0)
+                {
+                        MessageBeep(MB_ICONASTERISK);   // the first page is on screen
+                        return;
+                }
+                qwBase = (g_qwBase > (ULONGLONG) cbPage) ? (g_qwBase - (ULONGLONG) cbPage) : 0;
+        }
+        LoadPage(qwBase, false);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Ctrl+Home / Ctrl+End (2.96): the first / last PAGE of the FILE. The plain
+// EDIT shortcuts only reach the ends of the page on screen; here the pager
+// jumps like V: the first page is a plain load of offset 0, the last page is
+// the final window of the file, aligned to its end.
+void JumpFilePage(bool bLast)
+{
+        if (g_szCurrentFile[0] == L'\0' || pFileBytes == nullptr || cbFile == 0)
+        {
+                return;                         // nothing to jump through
+        }
+        DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
+        if (!bLast)
+        {
+                LoadPage(0, false);             // first page, top of file
+                return;
+        }
+        // Last page: load the final window of the file. LoadPage(bTailJump=
+        // true) lands the caret on the last line, tail style.
+        ULONGLONG qwBase = (g_cbFileTotal > (ULONGLONG) cbPage) ? (g_cbFileTotal - (ULONGLONG) cbPage) : 0;
+        if (g_qwBase == qwBase)
+        {
+                // Already on the last page: just walk the caret to the very
+                // end — a reload would redraw the same bytes for nothing.
+                int cchText = (int) SendMessage(hEdit, WM_GETTEXTLENGTH, 0, 0);
+                SendMessage(hEdit, EM_SETSEL, (WPARAM) cchText, (LPARAM) cchText);
+                SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+                return;
+        }
+        LoadPage(qwBase, true);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// View > Refresh (F5): reload the page on screen, exactly as it is (same
+// base, same view). The file may have changed underneath (log rotated, file
+// rewritten); the tail timer uses the same door when it detects a change.
+void RefreshPage(bool bTailJump)
+{
+        if (g_szCurrentFile[0] == L'\0')
+        {
+                MessageBox(hWndMain, L"There is no file loaded to refresh (piped input and the clipboard cannot be reloaded).", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        LoadPage(g_qwBase, bTailJump);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// View > Tail File (Ctrl+T): watch the current file every 2 seconds; when its
+// size changes, reload the page on screen and (on the last page) follow the
+// new end, like tail -f. The tick is one GetFileAttributesExW; a reload only
+// happens on a real change.
+void ToggleTail(void)
+{
+        g_bTail = !g_bTail;
+        UpdateViewMenu();                       // paints the check mark
+        if (g_bTail)
+        {
+                if (hWndMain != nullptr)
+                {
+                        SetTimer(hWndMain, 1, 2000, nullptr);
+                }
+                if (g_szCurrentFile[0] != L'\0' && g_cbFileTotal > 0)
+                {
+                        // Start from the END of the file, like a tail tool.
+                        DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
+                        ULONGLONG qwBase = (g_cbFileTotal > (ULONGLONG) cbPage) ? (g_cbFileTotal - (ULONGLONG) cbPage) : 0;
+                        LoadPage(qwBase, true);
+                }
+        }
+        else if (hWndMain != nullptr)
+        {
+                KillTimer(hWndMain, 1);
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// One-shot note in the position part of the status bar: the next caret move
+// or file change restores the Line/Column text (UpdateStatusBar rewrites it).
+void StatusFlash(LPCWSTR pszText)
+{
+        if (hStatusBar != nullptr)
+        {
+                SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM) pszText);
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Bookmarks (V-style navigation): page-relative line numbers, kept sorted.
+// They survive scrolling and resizing; they die with the page (a new page or
+// a view switch renumbers every line, so stale lines would point elsewhere).
+void ClearBookmarks(void)
+{
+        delete[] g_pBookmarks;
+        g_pBookmarks = nullptr;
+        g_cBookmarks = 0;
+        g_cBookmarksMax = 0;
+}
+
+void ToggleBookmark(void)
+{
+        if (hEdit == nullptr)
+        {
+                return;
+        }
+        DWORD dwEnd = 0;
+        SendMessage(hEdit, EM_GETSEL, 0, (LPARAM) &dwEnd);
+        DWORD iLine = (DWORD) SendMessage(hEdit, EM_LINEFROMCHAR, dwEnd, 0);
+        // Present at the caret line? Remove it.
+        for (int i = 0; i < g_cBookmarks; i++)
+        {
+                if (g_pBookmarks[i] == iLine)
+                {
+                        MoveMemory(g_pBookmarks + i, g_pBookmarks + i + 1, (size_t) (g_cBookmarks - i - 1) * sizeof(DWORD));
+                        g_cBookmarks--;
+                        StatusFlash(L"Bookmark cleared.");
+                        return;
+                }
+        }
+        // Absent: add it, keeping the array sorted.
+        if (g_cBookmarks == g_cBookmarksMax)
+        {
+                int cNew = g_cBookmarksMax + 16;
+                DWORD* pNew = new (std::nothrow) DWORD[cNew];
+                if (pNew == nullptr)
+                {
+                        return;                 // out of memory: stay quiet, keep the app alive
+                }
+                if (g_cBookmarks > 0)
+                {
+                        CopyMemory(pNew, g_pBookmarks, (size_t) g_cBookmarks * sizeof(DWORD));
+                }
+                delete[] g_pBookmarks;
+                g_pBookmarks = pNew;
+                g_cBookmarksMax = cNew;
+        }
+        int iIns = 0;
+        while (iIns < g_cBookmarks && g_pBookmarks[iIns] < iLine)
+        {
+                iIns++;
+        }
+        MoveMemory(g_pBookmarks + iIns + 1, g_pBookmarks + iIns, (size_t) (g_cBookmarks - iIns) * sizeof(DWORD));
+        g_pBookmarks[iIns] = iLine;
+        g_cBookmarks++;
+        StatusFlash(L"Bookmark set.");
+}
+
+void NextBookmark(bool bForward)
+{
+        if (hEdit == nullptr)
+        {
+                return;
+        }
+        if (g_cBookmarks == 0)
+        {
+                MessageBeep(MB_ICONASTERISK);    // nothing to jump to
+                return;
+        }
+        DWORD dwEnd = 0;
+        SendMessage(hEdit, EM_GETSEL, 0, (LPARAM) &dwEnd);
+        DWORD iLine = (DWORD) SendMessage(hEdit, EM_LINEFROMCHAR, dwEnd, 0);
+        int iPick = -1;
+        if (bForward)
+        {
+                for (int i = 0; i < g_cBookmarks; i++)
+                {
+                        if (g_pBookmarks[i] > iLine)
+                        {
+                                iPick = i;
+                                break;
+                        }
+                }
+                if (iPick == -1)
+                {
+                        iPick = 0;               // wrap around to the first
+                }
+        }
+        else
+        {
+                for (int i = g_cBookmarks - 1; i >= 0; i--)
+                {
+                        if (g_pBookmarks[i] < iLine)
+                        {
+                                iPick = i;
+                                break;
+                        }
+                }
+                if (iPick == -1)
+                {
+                        iPick = g_cBookmarks - 1; // wrap around to the last
+                }
+        }
+        LRESULT lrIdx = SendMessage(hEdit, EM_LINEINDEX, (WPARAM) g_pBookmarks[iPick], 0);
+        if (lrIdx != -1)
+        {
+                SendMessage(hEdit, EM_SETSEL, (WPARAM) lrIdx, (LPARAM) lrIdx);
+                SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+                SetFocus(hEdit);
+                UpdateStatusBar();
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Search > Go To... (Ctrl+G): a line of the page shown, or an ABSOLUTE byte
+// offset of the file (0x prefix = hexadecimal). An offset that lives in
+// another page loads that page first and positions when it lands (the same
+// WM_APP_LOADDONE path applies the pending goto).
+void GoToDialog(HWND hWnd)
+{
+        DialogBox(hInst, MAKEINTRESOURCE(IDD_GOTO), hWnd, GoToProc);
+}
+
+INT_PTR CALLBACK GoToProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+        UNREFERENCED_PARAMETER(lParam);
+        switch (message)
+        {
+                case WM_INITDIALOG:
+                        CheckRadioButton(hDlg, IDC_GOTO_LINE, IDC_GOTO_OFFS, IDC_GOTO_LINE);
+                        SetDlgItemTextW(hDlg, IDC_GOTO_EDIT, L"1");
+                        SendDlgItemMessageW(hDlg, IDC_GOTO_EDIT, EM_SETSEL, 0, -1);
+                        return (INT_PTR) TRUE;
+                case WM_COMMAND:
+                        if (LOWORD(wParam) == IDOK)
+                        {
+                                WCHAR szValue[80];
+                                GetDlgItemTextW(hDlg, IDC_GOTO_EDIT, szValue, _countof(szValue));
+                                ULONGLONG qwVal = 0;
+                                if (!ParseU64(szValue, qwVal))
+                                {
+                                        MessageBoxW(hDlg, L"Enter a non-negative number (a 0x prefix means hexadecimal).", L"Go To", MB_OK | MB_ICONWARNING);
+                                        return (INT_PTR) TRUE;
+                                }
+                                bool bLine = (IsDlgButtonChecked(hDlg, IDC_GOTO_LINE) == BST_CHECKED);
+                                EndDialog(hDlg, 1);
+                                if (bLine)
+                                {
+                                        GoToLine(qwVal);
+                                }
+                                else
+                                {
+                                        GoToOffset(qwVal);
+                                }
+                                return (INT_PTR) TRUE;
+                        }
+                        if (LOWORD(wParam) == IDCANCEL)
+                        {
+                                EndDialog(hDlg, 0);
+                                return (INT_PTR) TRUE;
+                        }
+                        break;
+        }
+        return (INT_PTR) FALSE;
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Line of the page shown: the edit control indexes lines directly
+// (EM_LINEINDEX), so this is a clamp, a selection and a scroll.
+void GoToLine(ULONGLONG qwLine)
+{
+        if (hEdit == nullptr)
+        {
+                return;
+        }
+        int cLines = (int) SendMessage(hEdit, EM_GETLINECOUNT, 0, 0);
+        if (cLines <= 0)
+        {
+                return;                         // nothing on screen
+        }
+        if (qwLine < 1)
+        {
+                qwLine = 1;
+        }
+        if (qwLine > (ULONGLONG) cLines)
+        {
+                qwLine = (ULONGLONG) cLines;
+        }
+        LRESULT lrIdx = SendMessage(hEdit, EM_LINEINDEX, (WPARAM) (qwLine - 1), 0);
+        if (lrIdx == -1)
+        {
+                return;
+        }
+        SendMessage(hEdit, EM_SETSEL, (WPARAM) lrIdx, (LPARAM) lrIdx);
+        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+        SetFocus(hEdit);
+        UpdateStatusBar();
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// ABSOLUTE byte offset: inside the page on screen, position now; in another
+// page, load it (the page that owns the offset) and let WM_APP_LOADDONE
+// position the caret through g_qwPendingGoto.
+void GoToOffset(ULONGLONG qwOff)
+{
+        if (g_szCurrentFile[0] == L'\0')
+        {
+                MessageBox(hWndMain, L"There is no file loaded.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        if (g_pJob != nullptr)
+        {
+                MessageBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        if (g_cbFileTotal == 0)
+        {
+                return;
+        }
+        if (qwOff >= g_cbFileTotal)
+        {
+                qwOff = g_cbFileTotal - 1;      // past the end: the last byte
+        }
+        if (qwOff >= g_qwBase && qwOff < g_qwBase + (ULONGLONG) cbFile)
+        {
+                PositionAtOffset(qwOff);        // the offset is already on screen
+                return;
+        }
+        DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
+        ULONGLONG qwBase = (qwOff / (ULONGLONG) cbPage) * (ULONGLONG) cbPage;
+        g_qwPendingGoto = qwOff;                // consumed in ApplyLoadResult
+        LoadPage(qwBase, false);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Counts the newlines of the CURRENT PAGE up to a byte offset (the offset
+// must live inside [g_qwBase, g_qwBase+cbFile]). Byte-oriented for the 1-byte
+// encodings, word-oriented for UTF-16 (both endiannesses). The line count
+// matches what the edit control shows: NormalizeNewlines expands lone \r and
+// \n to CRLF without changing the count.
+bool LineAtOffset(ULONGLONG qwOff, int& riLine)
+{
+        if (pFileBytes == nullptr || qwOff < g_qwBase || qwOff > g_qwBase + (ULONGLONG) cbFile)
+        {
+                return(false);
+        }
+        DWORD cbRel = (DWORD) (qwOff - g_qwBase);
+        if (cbRel > cbFile)
+        {
+                cbRel = cbFile;
+        }
+        int iLine = 0;
+        if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+        {
+                DWORD cw = cbRel / 2;
+                for (DWORD i = 0; i < cw; i++)
+                {
+                        DWORD b0 = pFileBytes[i * 2], b1 = pFileBytes[i * 2 + 1];
+                        WORD w = (iView == VIEW_UTF16) ? (WORD) (b0 | (WORD) (b1 << 8)) : (WORD) ((WORD) (b0 << 8) | b1);
+                        if (w == 0x0A)
+                        {
+                                iLine++;
+                        }
+                        else if (w == 0x0D)
+                        {
+                                iLine++;
+                                if (i + 1 < cw)
+                                {
+                                        DWORD c0 = pFileBytes[(i + 1) * 2], c1 = pFileBytes[(i + 1) * 2 + 1];
+                                        WORD wNext = (iView == VIEW_UTF16) ? (WORD) (c0 | (WORD) (c1 << 8)) : (WORD) ((WORD) (c0 << 8) | c1);
+                                        if (wNext == 0x0A)
+                                        {
+                                                i++;    // CRLF counts as ONE line break
+                                        }
+                                }
+                        }
+                }
+        }
+        else                                    // ANSI, UTF-8, EBCDIC: byte-oriented
+        {
+                for (DWORD i = 0; i < cbRel; i++)
+                {
+                        BYTE b = pFileBytes[i];
+                        if (b == 0x0A)
+                        {
+                                iLine++;
+                        }
+                        else if (b == 0x0D)
+                        {
+                                iLine++;
+                                if (i + 1 < cbRel && pFileBytes[i + 1] == 0x0A)
+                                {
+                                        i++;    // CRLF counts as ONE line break
+                                }
+                        }
+                }
+        }
+        riLine = iLine;
+        return(true);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Places the caret on a byte of the page on screen. In the hex view the
+// position is EXACT: the dump layout is fixed (68 characters per line, byte
+// N of a line at column 3N, plus the gap past the 8th pair), so the offset
+// maps 1:1 to a character of the control. In the text views the caret goes to
+// the line that contains the offset (LineAtOffset), which is the navigation
+// that makes sense there.
+void PositionAtOffset(ULONGLONG qwOff)
+{
+        if (hEdit == nullptr || pFileBytes == nullptr)
+        {
+                return;
+        }
+        if (qwOff < g_qwBase || qwOff >= g_qwBase + (ULONGLONG) cbFile)
+        {
+                return;                         // not on screen: the page was not loaded for it
+        }
+        if (iView == VIEW_HEX)
+        {
+                DWORD cbRel = (DWORD) (qwOff - g_qwBase);
+                DWORD iLine = cbRel / 16;
+                DWORD iByte = cbRel % 16;
+                DWORD cchLine = 49 + 1 + 16 + 2;                // same arithmetic as BuildHexText
+                DWORD iCol = iByte * 3 + ((iByte >= 8) ? 1 : 0);
+                DWORD iPos = iLine * cchLine + iCol;
+                SendMessage(hEdit, EM_SETSEL, (WPARAM) iPos, (LPARAM) iPos);
+                SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+        }
+        else
+        {
+                int iLine = 0;
+                if (LineAtOffset(qwOff, iLine))
+                {
+                        LRESULT lrIdx = SendMessage(hEdit, EM_LINEINDEX, (WPARAM) iLine, 0);
+                        if (lrIdx == -1)
+                        {
+                                lrIdx = 0;      // defensive: the line does not exist
+                        }
+                        SendMessage(hEdit, EM_SETSEL, (WPARAM) lrIdx, (LPARAM) lrIdx);
+                        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+                }
+        }
+        SetFocus(hEdit);
+        UpdateStatusBar();
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Search > Find Bytes in File... (Ctrl+Shift+F): search the RAW FILE on disk
+// (not the page on screen) for a text pattern (as its UTF-8 bytes) or a hex
+// pattern. The found offset jumps to its page, like Go To. The scan reads the
+// file in 1 MB chunks with a pattern-wide overlap so a match straddling the
+// chunk border is not missed.
+void FindBytesDialog(HWND hWnd)
+{
+        DialogBox(hInst, MAKEINTRESOURCE(IDD_FINDBYTES), hWnd, FindBytesProc);
+}
+
+INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+        UNREFERENCED_PARAMETER(lParam);
+        switch (message)
+        {
+                case WM_INITDIALOG:
+                        SetDlgItemTextW(hDlg, IDC_BYTES_EDIT, g_szBytesPattern);
+                        CheckDlgButton(hDlg, IDC_BYTES_HEX, g_bBytesHex ? BST_CHECKED : BST_UNCHECKED);
+                        SendDlgItemMessageW(hDlg, IDC_BYTES_EDIT, EM_SETSEL, 0, -1);
+                        return (INT_PTR) TRUE;
+                case WM_COMMAND:
+                        if (LOWORD(wParam) == IDOK)
+                        {
+                                WCHAR szPat[_countof(g_szBytesPattern)];
+                                GetDlgItemTextW(hDlg, IDC_BYTES_EDIT, szPat, _countof(szPat));
+                                if (szPat[0] == L'\0')
+                                {
+                                        MessageBoxW(hDlg, L"Enter a pattern.", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                                        return (INT_PTR) TRUE;
+                                }
+                                bool bHex = (IsDlgButtonChecked(hDlg, IDC_BYTES_HEX) == BST_CHECKED);
+                                BYTE bPat[128];
+                                DWORD cbPat = 0;
+                                if (bHex)
+                                {
+                                        // Hex digits in pairs; spaces, commas, semicolons and
+                                        // dashes are ignored anywhere between the digits.
+                                        int cDigits = 0;
+                                        BYTE bCur = 0;
+                                        bool bOverflow = false;
+                                        for (int i = 0; szPat[i] != L'\0'; i++)
+                                        {
+                                                WCHAR wch = szPat[i];
+                                                int d;
+                                                if (wch == L' ' || wch == L',' || wch == L';' || wch == L'-')
+                                                {
+                                                        continue;
+                                                }
+                                                if (wch >= L'0' && wch <= L'9')
+                                                {
+                                                        d = (int) (wch - L'0');
+                                                }
+                                                else if (wch >= L'A' && wch <= L'F')
+                                                {
+                                                        d = (int) (wch - L'A' + 10);
+                                                }
+                                                else if (wch >= L'a' && wch <= L'f')
+                                                {
+                                                        d = (int) (wch - L'a' + 10);
+                                                }
+                                                else
+                                                {
+                                                        MessageBoxW(hDlg, L"The hex pattern may only contain digits 0-9 and letters A-F.", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                                                        return (INT_PTR) TRUE;
+                                                }
+                                                if (cDigits == 0)
+                                                {
+                                                        bCur = (BYTE) d;
+                                                        cDigits = 1;
+                                                }
+                                                else
+                                                {
+                                                        if (cbPat < _countof(bPat))
+                                                        {
+                                                                bPat[cbPat++] = (BYTE) ((bCur << 4) | (BYTE) d);
+                                                        }
+                                                        else
+                                                        {
+                                                                bOverflow = true;
+                                                        }
+                                                        cDigits = 0;
+                                                }
+                                        }
+                                        if (bOverflow)
+                                        {
+                                                MessageBoxW(hDlg, L"The pattern is too long (128 bytes maximum).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                                                return (INT_PTR) TRUE;
+                                        }
+                                        if (cDigits != 0)
+                                        {
+                                                MessageBoxW(hDlg, L"The hex pattern needs an even number of digits.", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                                                return (INT_PTR) TRUE;
+                                        }
+                                }
+                                else
+                                {
+                                        // Plain text: search its UTF-8 bytes (ASCII included
+                                        // verbatim); the ANSI code page is the fallback.
+                                        int cb = WideCharToMultiByte(CP_UTF8, 0, szPat, -1, (LPSTR) bPat, (int) sizeof(bPat) - 1, nullptr, nullptr);
+                                        if (cb <= 0)
+                                        {
+                                                cb = WideCharToMultiByte(CP_ACP, 0, szPat, -1, (LPSTR) bPat, (int) sizeof(bPat) - 1, nullptr, nullptr);
+                                        }
+                                        cbPat = (cb > 0) ? (DWORD) (cb - 1) : 0;   // without the terminator
+                                }
+                                if (cbPat == 0)
+                                {
+                                        MessageBoxW(hDlg, L"Enter a pattern.", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                                        return (INT_PTR) TRUE;
+                                }
+                                lstrcpynW(g_szBytesPattern, szPat, _countof(g_szBytesPattern));  // dialog default next time
+                                g_bBytesHex = bHex;
+                                EndDialog(hDlg, 1);
+                                RunByteSearch(bPat, cbPat);
+                                return (INT_PTR) TRUE;
+                        }
+                        if (LOWORD(wParam) == IDCANCEL)
+                        {
+                                EndDialog(hDlg, 0);
+                                return (INT_PTR) TRUE;
+                        }
+                        break;
+        }
+        return (INT_PTR) FALSE;
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+void RunByteSearch(const BYTE* pPat, DWORD cbPat)
+{
+        if (g_szCurrentFile[0] == L'\0')
+        {
+                MessageBox(hWndMain, L"There is no file loaded: piped input and the clipboard cannot be searched on disk.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        if (g_pJob != nullptr)
+        {
+                MessageBox(hWndMain, L"Still loading the file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        if (g_bInByteSearch)
+        {
+                return;                         // one search at a time (the gate reopens on WM_APP_SEARCHDONE)
+        }
+        // The pattern dies with the dialog call: copy it to the worker's slot.
+        // The dialog already bounds it, but a flat copy keeps the worker simple.
+        g_cbSearchPat = cbPat;
+        CopyMemory(g_abSearchPat, pPat, cbPat);
+        InterlockedExchange(&g_bSearchCancel, 0);
+        g_qwSearchPos = 0;
+        g_qwSearchResult = (ULONGLONG) -1;
+        g_bInByteSearch = true;                // blocks loads and the tail timer
+        uintptr_t uThread = _beginthreadex(nullptr, 0, SearchThreadProc, nullptr, 0, nullptr);
+        if (uThread == 0)
+        {
+                g_bInByteSearch = false;        // could not start: say so and stay alive
+                MessageBox(hWndMain, L"Not enough memory to start the search.", szTitle, MB_OK | MB_ICONWARNING);
+        }
+        else
+        {
+                g_hSearchThread = (HANDLE) uThread;
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Worker thread of Find Bytes (2.96): scans the WHOLE file on disk in 1 MB
+// chunks with a (cbPat-1)-byte overlap so a match can straddle a border. The
+// UI thread is never touched from here: progress goes out as
+// WM_APP_SEARCHPROGRESS (~10 per second) and the outcome as
+// WM_APP_SEARCHDONE — wParam 1 = found (offset in g_qwSearchResult),
+// 0xFFFFFFFF = not found, 0 = cancelled. ESC or a closing window sets
+// g_bSearchCancel, checked once per chunk: the stop is prompt, not instant,
+// and for a viewer that is the right trade. No queue pumping here — the UI
+// thread owns its queue again, so windows stay alive while this runs.
+unsigned __stdcall SearchThreadProc(void *pParameter)
+{
+        UNREFERENCED_PARAMETER(pParameter);
+        HANDLE hFile = CreateFileW(g_szCurrentFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE)
+        {
+                PostMessage(hWndMain, WM_APP_SEARCHDONE, 0xFFFFFFFF, 0);   // could not open: not found
+                return(0);
+        }
+        const DWORD CB_CHUNK = (1 << 20);              // 1 MB
+        const DWORD cbPat = g_cbSearchPat;
+        DWORD cbOverlap = (cbPat > 1) ? cbPat - 1 : 0;
+        BYTE* pBuf = new (std::nothrow) BYTE[CB_CHUNK + cbOverlap];
+        if (pBuf == nullptr)
+        {
+                CloseHandle(hFile);
+                PostMessage(hWndMain, WM_APP_SEARCHDONE, 0xFFFFFFFF, 0);   // OOM: report as not found
+                return(0);
+        }
+        ULONGLONG qwBase = 0;                         // file offset of pBuf[0]
+        DWORD cbKeep = 0;                             // valid bytes kept at the head of pBuf
+        bool bFound = false, bCancel = false;
+        ULONGLONG qwNextPost = GetTickCount64() + 100;
+        while (!bFound && !bCancel)
+        {
+                DWORD cbRead = 0;
+                if (!ReadFile(hFile, pBuf + cbKeep, CB_CHUNK, &cbRead, nullptr) || cbRead == 0)
+                {
+                        break;                         // EOF (or read error): the scan is over
+                }
+                DWORD cbHave = cbKeep + cbRead;
+                for (DWORD i = 0; i + cbPat <= cbHave; i++)
+                {
+                        if (pBuf[i] == g_abSearchPat[0] && (cbPat == 1 || memcmp(pBuf + i, g_abSearchPat, cbPat) == 0))
+                        {
+                                g_qwSearchResult = qwBase + (ULONGLONG) i;
+                                bFound = true;
+                                break;
+                        }
+                }
+                if (!bFound)
+                {
+                        // Keep the tail a match could straddle, past the chunk border.
+                        cbKeep = (cbHave > cbOverlap) ? cbOverlap : cbHave;
+                        if (cbKeep > 0)
+                        {
+                                MoveMemory(pBuf, pBuf + cbHave - cbKeep, cbKeep);
+                        }
+                        qwBase += (ULONGLONG) (cbHave - cbKeep);
+                        g_qwSearchPos = qwBase;
+                }
+                // Progress at ~10 Hz: PostMessage is cheap and the UI thread
+                // repaints at its own pace, decoupled from the scan speed.
+                ULONGLONG qwNow = GetTickCount64();
+                if (qwNow >= qwNextPost)
+                {
+                        PostMessage(hWndMain, WM_APP_SEARCHPROGRESS, 0, 0);
+                        qwNextPost = qwNow + 100;
+                }
+                // The single cancel check per chunk (ESC handler or WM_DESTROY).
+                bCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
+        }
+        delete[] pBuf;
+        CloseHandle(hFile);
+        PostMessage(hWndMain, WM_APP_SEARCHDONE, bFound ? 1 : (bCancel ? 0 : 0xFFFFFFFF), 0);
+        return(0);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// File > View Clipboard as File (V parity: the clipboard can be viewed as if
+// it were a file). The text is wrapped as raw UTF-16 LE bytes with a BOM, so
+// it enters the SAME pipeline as a loaded file: every view (UTF-16, UTF-8,
+// ANSI, hex) re-decodes it from pFileBytes, and the caps keep the memory
+// bounded. No path is set: pages, refresh and the raw-file search are file
+// features and stay politely disabled.
+void ViewClipboardAsFile(void)
+{
+        if (hWndMain == nullptr)
+        {
+                return;
+        }
+        if (!OpenClipboard(hWndMain))
+        {
+                MessageBox(hWndMain, L"Could not open the clipboard.", szTitle, MB_OK | MB_ICONWARNING);
+                return;
+        }
+        BYTE* pClip = nullptr;                 // synthesized raw bytes: BOM + UTF-16 LE text
+        DWORD cbClip = 0;
+        HGLOBAL hMem = (HGLOBAL) GetClipboardData(CF_UNICODETEXT);
+        const WCHAR* pwsz = (hMem != nullptr) ? (const WCHAR*) GlobalLock(hMem) : nullptr;
+        if (pwsz != nullptr)
+        {
+                SIZE_T cbMem = GlobalSize(hMem);
+                int cch = (int) (cbMem / sizeof(WCHAR));
+                for (int i = 0; i < cch; i++)
+                {
+                        if (pwsz[i] == L'\0')
+                        {
+                                cch = i;
+                                break;              // GlobalSize can over-report: trust the NUL
+                        }
+                }
+                if (cch > (int) (CB_TEXT_MAX / 2))
+                {
+                        cch = (int) (CB_TEXT_MAX / 2);       // the text cap applies here too
+                }
+                if (cch < 0)
+                {
+                        cch = 0;
+                }
+                pClip = new (std::nothrow) BYTE[2 + (size_t) cch * 2];
+                if (pClip != nullptr)
+                {
+                        pClip[0] = 0xFF;
+                        pClip[1] = 0xFE;              // BOM: the bytes are a valid UTF-16 LE file
+                        if (cch > 0)
+                        {
+                                CopyMemory(pClip + 2, pwsz, (size_t) cch * 2);
+                        }
+                        cbClip = 2 + (DWORD) ((size_t) cch * 2);
+                }
+                GlobalUnlock(hMem);
+        }
+        else
+        {
+                // CF_TEXT / CF_OEMTEXT: widen it with the ANSI code page.
+                HGLOBAL hAnsi = (HGLOBAL) GetClipboardData(CF_TEXT);
+                const char* psz = (hAnsi != nullptr) ? (const char*) GlobalLock(hAnsi) : nullptr;
+                if (psz != nullptr)
+                {
+                        SIZE_T cbMem = GlobalSize(hAnsi);
+                        int cbSrc = (int) cbMem;
+                        for (int i = 0; i < cbSrc; i++)
+                        {
+                                if (psz[i] == '\0')
+                                {
+                                        cbSrc = i;
+                                        break;
+                                }
+                        }
+                        if (cbSrc > (int) CB_TEXT_MAX)
+                        {
+                                cbSrc = (int) CB_TEXT_MAX;
+                        }
+                        if (cbSrc < 0)
+                        {
+                                cbSrc = 0;
+                        }
+                        int cch = MultiByteToWideChar(CP_ACP, 0, psz, cbSrc, nullptr, 0);
+                        if (cch > (int) (CB_TEXT_MAX / 2))
+                        {
+                                cch = (int) (CB_TEXT_MAX / 2);
+                        }
+                        if (cch > 0)
+                        {
+                                pClip = new (std::nothrow) BYTE[2 + (size_t) cch * 2];
+                                if (pClip != nullptr)
+                                {
+                                        pClip[0] = 0xFF;
+                                        pClip[1] = 0xFE;
+                                        MultiByteToWideChar(CP_ACP, 0, psz, cbSrc, (LPWSTR) (pClip + 2), cch);
+                                        cbClip = 2 + (DWORD) ((size_t) cch * 2);
+                                }
+                        }
+                        GlobalUnlock(hAnsi);
+                }
+        }
+        CloseClipboard();
+        if (pClip == nullptr)
+        {
+                MessageBox(hWndMain, L"The clipboard holds no text to view.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        ResetViewer();                         // clears whatever was on screen (and the current file)
+        pFileBytes = pClip;
+        cbFile = cbClip;
+        g_cbFileTotal = cbClip;
+        iView = VIEW_UTF16;
+        UpdateViewMenu();
+        WCHAR szFull[MAX_LOADSTRING + 32];
+        wsprintfW(szFull, L"%s - CLIPBOARD", szTitle);
+        SetWindowTextW(hWndMain, szFull);
+        AddRecentEntry(RECENT_CLIPBOARD);       // MRU: the clipboard counts as a place
+        try
+        {
+                WCHAR* pText = nullptr;
+                DWORD cch = 0;
+                if (BuildViewText(VIEW_UTF16, pFileBytes, cbFile, g_cbFileTotal, 0, &pText, &cch))
+                {
+                        DeliverTextSafely(pText, (int) cch, false); // owns and frees pText
+                }
+        }
+        catch (const std::bad_alloc&)
+        {
+                MessageBox(hWndMain, L"Not enough memory to show the clipboard.", szTitle, MB_OK | MB_ICONERROR);
+                ResetViewer();
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// File > Alternate Data Streams... (V parity): NTFS keeps "invisible" files
+// attached to a file; Windows gives no way to list them. FindFirstStreamW
+// (Vista+) is resolved dynamically: every toolchain compiles this file and
+// older systems get a clear "not available" instead of a load error. A stream
+// can then be opened with File > Open... typing <file>:<stream> as the name.
+void ListAlternateStreams(void)
+{
+        if (g_szCurrentFile[0] == L'\0')
+        {
+                MessageBox(hWndMain, L"Load a file first: alternate streams belong to a file.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        typedef HANDLE (WINAPI *PFN_FindFirstStreamW)(LPCWSTR, DWORD, LPVOID, DWORD);
+        typedef BOOL (WINAPI *PFN_FindNextStreamW)(HANDLE, LPVOID);
+        HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
+        PFN_FindFirstStreamW pfnFFS = (hK32 != nullptr) ? (PFN_FindFirstStreamW) GetProcAddress(hK32, "FindFirstStreamW") : nullptr;
+        PFN_FindNextStreamW pfnFNS = (hK32 != nullptr) ? (PFN_FindNextStreamW) GetProcAddress(hK32, "FindNextStreamW") : nullptr;
+        if (pfnFFS == nullptr || pfnFNS == nullptr)
+        {
+                MessageBox(hWndMain, L"Listing alternate data streams is not available on this system (Windows Vista or later is required).", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        struct STREAM_DATA { LARGE_INTEGER StreamSize; WCHAR cStreamName[MAX_PATH + 36]; };        // WIN32_FIND_STREAM_DATA
+        STREAM_DATA sd;
+        HANDLE hFind = pfnFFS(g_szCurrentFile, 0 /* FindStreamInfoStandard */, &sd, 0);
+        if (hFind == INVALID_HANDLE_VALUE)
+        {
+                MessageBox(hWndMain, L"The file has no alternate data streams, or its file system does not support them (NTFS does).", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        WCHAR szList[4096];
+        WCHAR szLine[420];
+        lstrcpynW(szList, L"Alternate data streams of this file:\r\n", _countof(szList));
+        int cStreams = 0;
+        for (;;)
+        {
+                if (sd.cStreamName[0] == L':' && sd.cStreamName[1] != L':')
+                {
+                        // A named stream: ":name:$DATA". Drop the $DATA tail for the list.
+                        WCHAR szName[MAX_PATH + 40];
+                        lstrcpynW(szName, sd.cStreamName, _countof(szName));
+                        LPWSTR pszTag = StrStrIW(szName, L":$DATA");
+                        if (pszTag != nullptr)
+                        {
+                                *pszTag = L'\0';
+                        }
+                        WCHAR szSize[32];
+                        FormatU64Locale(szSize, _countof(szSize), (ULONGLONG) sd.StreamSize.QuadPart);
+                        wsprintfW(szLine, L"%s  -  %s bytes\r\n", szName, szSize);
+                        if (lstrlenW(szList) + lstrlenW(szLine) + 200 < (int) _countof(szList))
+                        {
+                                lstrcatW(szList, szLine);
+                                cStreams++;
+                        }
+                        else
+                        {
+                                lstrcatW(szList, L"... (more streams omitted)\r\n");
+                                break;
+                        }
+                }
+                if (!pfnFNS(hFind, &sd))
+                {
+                        break;                  // no more streams
+                }
+        }
+        FindClose(hFind);
+        if (cStreams == 0)
+        {
+                MessageBox(hWndMain, L"The file has no alternate data streams (only the default stream exists).", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        lstrcatW(szList, L"\r\nTo view a stream, use File > Open... and type\r\nthe full path as:  <file>:<stream name>");
+        MessageBoxW(hWndMain, szList, szTitle, MB_OK | MB_ICONINFORMATION);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// View > Line Numbers: the same trick as the hex offset column. The numbers
+// live OUTSIDE the edit control's buffer (no copy, no Find hits, no Copy
+// noise): the gutter is painted on the parent window after every paint of the
+// control, right-aligned on the character grid, one number per visible line.
+// The numbers are lines of the PAGE on screen (the paged view starts anywhere
+// in the file; counting newlines from offset 0 would be a scan of everything
+// before the page and is deliberately not done).
+void ToggleLineNums(void)
+{
+        g_bLineNums = !g_bLineNums;
+        UpdateViewMenu();                       // paints the check mark
+        LayoutEdit();                           // the control shifts right of the column
+        if (hEdit != nullptr)
+        {
+                InvalidateRect(hEdit, nullptr, TRUE);   // its WM_PAINT repaints the column
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// The width of the painted column (LayoutEdit and the painters must agree):
+// hex offsets in the hex view (8 digits + air), line numbers in the text
+// views when enabled (enough digits for the lines of the page + air). Zero
+// when no column exists.
+int GutterWidth(void)
+{
+        if (cbFile == 0 || iHexCharW <= 0 || hEdit == nullptr)
+        {
+                return(0);
+        }
+        if (iView == VIEW_HEX)
+        {
+                // 2.95: as many digits as the LAST offset of the page really
+                // needs (V-style), not a fixed 8: a 20 GB file shows 10-digit
+                // offsets, a small file keeps the classic 8.
+                ULONGLONG qwLast = g_qwBase + cbFile - 1;
+                int cDigits = 8;
+                while (qwLast >= 16)
+                {
+                        qwLast >>= 4;
+                        cDigits++;
+                }
+                return((cDigits + 2) * iHexCharW + 6);
+        }
+        if (g_bLineNums)
+        {
+                int cLines = (int) SendMessage(hEdit, EM_GETLINECOUNT, 0, 0);
+                int cDigits = 4;                        // minimum column: 4 digits
+                while (cLines >= 10000)
+                {
+                        cLines /= 10;
+                        cDigits++;
+                }
+                return((cDigits + 2) * iHexCharW + 6);
+        }
+        return(0);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Chooses which column to paint after the edit control painted itself:
+// the hex offsets of the hex view, the line numbers of the text views.
+void PaintGutter(void)
+{
+        if (iView == VIEW_HEX)
+        {
+                HexPaintGutter();
+        }
+        else if (g_bLineNums && cbFile > 0)
+        {
+                NumPaintGutter();
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// The line-number column, twin of HexPaintGutter: painted on the parent
+// window, aligned to the first visible line of the control and its line
+// grid, one number per visible line, in the bold twin of the editor font.
+void NumPaintGutter(void)
+{
+        if (hWndMain == nullptr || hEdit == nullptr || hFont == nullptr)
+        {
+                return;
+        }
+        int iW = GutterWidth();
+        if (iW <= 0 || iHexLineH <= 0)
+        {
+                return;
+        }
+        RECT rcEdit;
+        if (!GetClientRect(hEdit, &rcEdit) || rcEdit.bottom <= 0)
+        {
+                return;
+        }
+        HDC hdc = GetDC(hWndMain);
+        if (hdc == nullptr)
+        {
+                return;
+        }
+        RECT rcGutter;
+        rcGutter.left = 0;
+        rcGutter.top = 0;
+        rcGutter.right = iW;
+        rcGutter.bottom = rcEdit.bottom;
+        FillRect(hdc, &rcGutter, GetSysColorBrush(COLOR_WINDOW));
+        HGDIOBJ hOldFont = SelectObject(hdc, (hFontHexBold != nullptr) ? hFontHexBold : hFont);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+        int cLines = (int) SendMessage(hEdit, EM_GETLINECOUNT, 0, 0);
+        int iFirst = (int) SendMessage(hEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+        int y = 0;
+        for (int iLine = iFirst; iLine < cLines && y + iHexLineH <= rcEdit.bottom; iLine++)
+        {
+                WCHAR szNum[24];
+                WCHAR* pEnd = U64ToWide(szNum, (ULONGLONG) (iLine + 1));
+                int cch = (int) (pEnd - szNum);
+                TextOutW(hdc, iW - 6 - cch * iHexCharW, y, szNum, cch);        // right-aligned
+                y += iHexLineH;
+        }
+        SelectObject(hdc, hOldFont);
+        ReleaseDC(hWndMain, hdc);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// View > Word Wrap: the wrap is a pair of styles (WS_HSCROLL + ES_AUTOHSCROLL
+// off), and edit styles are chosen at creation, so the control is recreated.
+// The content ALWAYS comes back from the raw bytes of the page (ApplyView),
+// so no text is copied across controls.
+void RecreateEditControl(void)
+{
+        if (hWndMain == nullptr)
+        {
+                return;
+        }
+        if (hEdit != nullptr)
+        {
+                // 2.98: swap in the tiny empty block first. DestroyWindow would
+                // free the control's buffer itself, tens of MB at a time; handing
+                // it a 2-byte block makes the destroy trivial and frees the big
+                // one HERE, on our clock, instead of inside the destroy.
+                AdoptEmptyText();
+                DestroyWindow(hEdit);           // the subclass removes itself on WM_DESTROY
+                hEdit = nullptr;
+        }
+        DWORD dwStyle = WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY;
+        if (!g_bWrap)
+        {
+                dwStyle |= WS_HSCROLL | ES_AUTOHSCROLL;         // no wrap: horizontal scrolling
+        }
+        hEdit = CreateWindowEx(0, L"EDIT", L"", dwStyle, 0, 0, 0, 0, hWndMain, (HMENU) ID_EDITCHILD, hInst, nullptr);
+        if (hEdit == nullptr)
+        {
+                return;                        // without a control there is nothing to show
+        }
+        SendMessage(hEdit, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
+        SetWindowSubclass(hEdit, EditSubclassProc, 1, 0);
+        if (hFont != nullptr)
+        {
+                SendMessage(hEdit, WM_SETFONT, (WPARAM) hFont, MAKELPARAM(TRUE, 0));
+        }
+        UpdateHexMetrics();                    // measures through the (new) control
+        ApplyView();                           // rebuilds the text of the page from the raw bytes
+}
+
+void ToggleWrap(void)
+{
+        g_bWrap = !g_bWrap;
+        ClearBookmarks();                      // wrapped lines renumber everything
+        UpdateViewMenu();                      // paints the check mark
+        RecreateEditControl();
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// ParseU64: decimal, or hexadecimal with a 0x/0X prefix. No CRT dependency
+// (the toolchains differ); leading and trailing spaces are tolerated. FALSE
+// on anything that is not a plain non-negative number.
+BOOL ParseU64(LPCWSTR psz, ULONGLONG& rqw)
+{
+        while (*psz == L' ')
+        {
+                psz++;
+        }
+        bool bHex = false;
+        if (psz[0] == L'0' && (psz[1] == L'x' || psz[1] == L'X'))
+        {
+                bHex = true;
+                psz += 2;
+        }
+        ULONGLONG qw = 0;
+        int c = 0;
+        while (*psz != L'\0')
+        {
+                WCHAR wch = *psz++;
+                int d;
+                if (wch >= L'0' && wch <= L'9')
+                {
+                        d = (int) (wch - L'0');
+                }
+                else if (wch >= L'A' && wch <= L'F')
+                {
+                        d = (int) (wch - L'A' + 10);
+                }
+                else if (wch >= L'a' && wch <= L'f')
+                {
+                        d = (int) (wch - L'a' + 10);
+                }
+                else if (wch == L' ' && *psz == L'\0')
+                {
+                        break;                 // trailing space: tolerated
+                }
+                else
+                {
+                        return(FALSE);
+                }
+                if (!bHex && d > 9)
+                {
+                        return(FALSE);         // hex letters without the 0x prefix
+                }
+                qw = bHex ? (qw << 4) + (ULONGLONG) d : (qw * 10) + (ULONGLONG) d;
+                c++;
+                if (c > 20)
+                {
+                        return(FALSE);         // absurd: refuse instead of wrapping
+                }
+        }
+        if (c == 0)
+        {
+                return(FALSE);                 // empty (or a bare 0x): nothing to parse
+        }
+        rqw = qw;
+        return(TRUE);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// View-text block pair (2.98). AllocViewText hands back a LOCKED pointer into
+// a movable global block: exactly what EM_SETHANDLE adopts. Every builder of
+// view text (NormalizeNewlines, BuildHexText, BuildViewText) allocates
+// through this pair now, so the delivery is copy-free end to end.
+// The control frees nothing on its own while the block is in its care: the
+// NEXT swap (DeliverTextToEdit / AdoptEmptyText) is what frees the previous
+// block, and DestroyWindow frees whatever tiny block is current. A failed
+// allocation answers nullptr, the same contract the old new[] paths had.
+WCHAR* AllocViewText(DWORD cch)
+{
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, ((SIZE_T) cch + 1) * sizeof(WCHAR));
+        if (hMem == nullptr)
+        {
+                return(nullptr);
+        }
+        WCHAR* pwsz = (WCHAR*) GlobalLock(hMem);
+        if (pwsz == nullptr)
+        {
+                GlobalFree(hMem);              // allocated but un-lockable: do not leak it
+                return(nullptr);
+        }
+        pwsz[0] = L'\0';                       // empty until the caller fills it
+        return(pwsz);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Frees what AllocViewText handed out (nullptr-safe). Every block this
+// program frees by hand goes through here; the ones the EDIT control adopted
+// are freed by the next EM_SETHANDLE swap, never by this pair.
+void FreeViewText(WCHAR* psz)
+{
+        if (psz == nullptr)
+        {
+                return;
+        }
+        HGLOBAL hMem = GlobalHandle(psz);
+        if (hMem == nullptr)
+        {
+                return;                         // not ours: refuse instead of freeing garbage
+        }
+        GlobalUnlock(hMem);
+        GlobalFree(hMem);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// /timing (2.98): one status-bar flash with the four phases of the last
+// load. The point is not the absolute numbers but their SHAPE: if "deliver"
+// still dominates after the EM_SETHANDLE change, the remaining cost is the
+// EDIT control's own line indexing, and the next step is an on-demand pane
+// (2.99 candidate) instead of more memcpy tuning. U64ToWide writes the
+// digits (wsprintfW's 64-bit support varies by toolchain, so no %I64u here).
+void TimingFlash(void)
+{
+        if (!g_bTiming)
+        {
+                return;
+        }
+        WCHAR szRead[24], szDecode[24], szNorm[24], szDeliver[24];
+        U64ToWide(szRead, g_msRead);
+        U64ToWide(szDecode, g_msDecode);
+        U64ToWide(szNorm, g_msNormalize);
+        U64ToWide(szDeliver, g_msDeliver);
+        WCHAR szStatus[160];
+        wsprintfW(szStatus, L"read %s | decode %s | CRLF %s | deliver %s ms", szRead, szDecode, szNorm, szDeliver);
+        StatusFlash(szStatus);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Private profile helpers: the INI keeps every durable setting in plain
+// "key = value" lines, writable by hand and trivial to read back.
+static long ProfileLong(LPCWSTR pszKey, long lDefault)
+{
+        return(GetPrivateProfileIntW(L"4More", pszKey, lDefault, g_szIniPath));
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// The INI lives beside the executable (like 4DOS/4NT), not in a roaming
+// profile: a viewer is per-installation state, and a portable directory
+// carries its own INI. An empty path (no GetModuleFileNameW) simply disables
+// persistence: LoadSettings reads nothing, SaveSettings writes nothing.
+void BuildIniPath(void)
+{
+        g_szIniPath[0] = L'\0';
+        WCHAR szExe[MAX_PATH];
+        DWORD cch = GetModuleFileNameW(nullptr, szExe, MAX_PATH);
+        if (cch == 0 || cch >= MAX_PATH)
+        {
+                return;                         // no path, no persistence
+        }
+        WCHAR* pchSlash = nullptr;
+        for (WCHAR* p = szExe; *p != L'\0'; p++)
+        {
+                if (*p == L'\\' || *p == L'/')
+                {
+                        pchSlash = p;
+                }
+        }
+        if (pchSlash == nullptr)
+        {
+                return;                         // a bare name with no directory: skip
+        }
+        *(pchSlash + 1) = L'\0';                 // keep the directory, drop the file name
+        lstrcpynW(g_szIniPath, szExe, MAX_PATH);
+        lstrcatW(g_szIniPath, L"4More.ini");
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Startup: read the INI BEFORE the command line is parsed, so an explicit
+// switch always wins. Every value is validated: a hand-edited INI is part of
+// the supported surface, and garbage must degrade, never crash. FontSize
+// snaps to the nearest table entry; the window rect is checked against a
+// real monitor, so a detached second screen does not reopen the program in
+// the void. A missing INI answers the defaults and takes a microsecond.
+void LoadSettings(void)
+{
+        if (g_szIniPath[0] == L'\0')
+        {
+                return;
+        }
+        // Font: the INI holds a point size; snap to the table's nearest.
+        long lFont = ProfileLong(L"FontSize", 12);
+        int iBest = 0;
+        long lBestDist = 0x7FFFFFFF;
+        for (int i = 0; i < _countof(g_iFontSizes); i++)
+        {
+                long lDist = lFont - (0 - (long) g_iFontSizes[i]);
+                if (lDist < 0)
+                {
+                        lDist = -lDist;
+                }
+                if (lDist < lBestDist)
+                {
+                        lBestDist = lDist;
+                        iBest = i;
+                }
+        }
+        g_iFontIndex = iBest;
+        g_bLineNums = (ProfileLong(L"LineNumbers", 0) != 0);
+        g_bWrap = (ProfileLong(L"WordWrap", 0) != 0);
+        g_bTail = (ProfileLong(L"Tail", 0) != 0);
+        // Window placement: all four edges must be present AND land on a
+        // monitor that exists right now.
+        long lLeft = ProfileLong(L"WinLeft", INI_WINPOS_INVALID);
+        long lTop = ProfileLong(L"WinTop", INI_WINPOS_INVALID);
+        long lRight = ProfileLong(L"WinRight", INI_WINPOS_INVALID);
+        long lBottom = ProfileLong(L"WinBottom", INI_WINPOS_INVALID);
+        if (lLeft != INI_WINPOS_INVALID && lTop != INI_WINPOS_INVALID &&
+            lRight != INI_WINPOS_INVALID && lBottom != INI_WINPOS_INVALID)
+        {
+                RECT rc = { (LONG) lLeft, (LONG) lTop, (LONG) lRight, (LONG) lBottom };
+                RECT rcDesk;
+                SystemParametersInfoW(SPI_GETWORKAREA, 0, &rcDesk, 0);
+                RECT rcInter;
+                if (rc.right - rc.left >= 200 && rc.bottom - rc.top >= 100 &&
+                    IntersectRect(&rcInter, &rc, &rcDesk) &&
+                    MonitorFromRect(&rc, MONITOR_DEFAULTTONULL) != nullptr)
+                {
+                        g_rcWinInit = rc;
+                        g_bWinPos = true;
+                }
+        }
+        g_bWinMax = (ProfileLong(L"Maximized", 0) != 0);
+        // Recent files: keys "1".."10"; an empty (or missing) key ends the walk.
+        g_cRecent = 0;
+        for (int i = 0; i < RECENT_MAX; i++)
+        {
+                WCHAR szKey[8];
+                wsprintfW(szKey, L"%d", i + 1);
+                GetPrivateProfileStringW(L"Recent", szKey, L"", g_szRecent[i], MAX_PATH, g_szIniPath);
+                if (g_szRecent[i][0] == L'\0')
+                {
+                        break;
+                }
+                g_cRecent++;
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Exit: write everything back, then clear the Recent keys beyond the count
+// so a hand-removed entry does not resurrect from a stale "5" line.
+void SaveSettings(void)
+{
+        if (g_szIniPath[0] == L'\0' || hWndMain == nullptr)
+        {
+                return;
+        }
+        WCHAR szVal[24];
+        wsprintfW(szVal, L"%d", 0 - g_iFontSizes[g_iFontIndex]);       // positive point size
+        WritePrivateProfileStringW(L"4More", L"FontSize", szVal, g_szIniPath);
+        WritePrivateProfileStringW(L"4More", L"LineNumbers", g_bLineNums ? L"1" : L"0", g_szIniPath);
+        WritePrivateProfileStringW(L"4More", L"WordWrap", g_bWrap ? L"1" : L"0", g_szIniPath);
+        WritePrivateProfileStringW(L"4More", L"Tail", g_bTail ? L"1" : L"0", g_szIniPath);
+        // Placement: GetWindowPlacement reports the RESTORED rect even while
+        // maximized, which is exactly what the next start should restore.
+        WINDOWPLACEMENT wp = {};
+        wp.length = sizeof(wp);
+        if (GetWindowPlacement(hWndMain, &wp))
+        {
+                RECT rc = wp.rcNormalPosition;
+                wsprintfW(szVal, L"%d", (int) rc.left);
+                WritePrivateProfileStringW(L"4More", L"WinLeft", szVal, g_szIniPath);
+                wsprintfW(szVal, L"%d", (int) rc.top);
+                WritePrivateProfileStringW(L"4More", L"WinTop", szVal, g_szIniPath);
+                wsprintfW(szVal, L"%d", (int) rc.right);
+                WritePrivateProfileStringW(L"4More", L"WinRight", szVal, g_szIniPath);
+                wsprintfW(szVal, L"%d", (int) rc.bottom);
+                WritePrivateProfileStringW(L"4More", L"WinBottom", szVal, g_szIniPath);
+                WritePrivateProfileStringW(L"4More", L"Maximized", (wp.showCmd == SW_SHOWMAXIMIZED) ? L"1" : L"0", g_szIniPath);
+        }
+        for (int i = 0; i < RECENT_MAX; i++)
+        {
+                WCHAR szKey[8];
+                wsprintfW(szKey, L"%d", i + 1);
+                if (i < g_cRecent && g_szRecent[i][0] != L'\0')
+                {
+                        WritePrivateProfileStringW(L"Recent", szKey, g_szRecent[i], g_szIniPath);
+                }
+                else
+                {
+                        WritePrivateProfileStringW(L"Recent", szKey, nullptr, g_szIniPath);
+                }
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// The File popup of the main menu bar: the one that owns ID_FILE_OPEN.
+// Every menu the program owns is reachable from the bar, so a linear walk
+// of the submenus is both correct and instant.
+HMENU GetFileSubMenu(HWND hWnd)
+{
+        HMENU hBar = GetMenu(hWnd);
+        if (hBar == nullptr)
+        {
+                return(nullptr);
+        }
+        int cMenus = GetMenuItemCount(hBar);
+        for (int i = 0; i < cMenus; i++)
+        {
+                HMENU hSub = GetSubMenu(hBar, i);
+                if (hSub != nullptr)
+                {
+                        MENUITEMINFOW mii = {};
+                        mii.cbSize = sizeof(mii);
+                        mii.fMask = MIIM_ID;
+                        // uItem is a command ID here (fByPosition = FALSE):
+                        // TRUE means "this submenu carries the Open command".
+                        if (GetMenuItemInfoW(hSub, ID_FILE_OPEN, FALSE, &mii) && mii.wID == ID_FILE_OPEN)
+                        {
+                                return(hSub);
+                        }
+                }
+        }
+        // Fallback (never expected): the first popup is File.
+        return(GetSubMenu(hBar, 0));
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Creates the Recent popup and its menu entry, once, at WM_CREATE. After
+// this, AddRecentEntry only refills it. Inserted right before Exit with a
+// separator, in File-menu tradition; "(empty)" grays out until a first
+// file makes the list real.
+void EnsureRecentMenu(void)
+{
+        if (hWndMain == nullptr || g_hRecentMenu != nullptr)
+        {
+                return;
+        }
+        HMENU hFile = GetFileSubMenu(hWndMain);
+        if (hFile == nullptr)
+        {
+                return;
+        }
+        g_hRecentMenu = CreatePopupMenu();
+        if (g_hRecentMenu == nullptr)
+        {
+                return;
+        }
+        int cItems = GetMenuItemCount(hFile);
+        int iExit = -1;
+        for (int i = 0; i < cItems; i++)
+        {
+                MENUITEMINFOW mii = {};
+                mii.cbSize = sizeof(mii);
+                mii.fMask = MIIM_ID;
+                if (GetMenuItemInfoW(hFile, i, TRUE, &mii) && mii.wID == ID_EXIT)
+                {
+                        iExit = i;
+                        break;
+                }
+        }
+        if (iExit < 0)
+        {
+                iExit = cItems;                 // no Exit found: append at the end
+        }
+        InsertMenuW(hFile, iExit, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
+        InsertMenuW(hFile, iExit + 1, MF_BYPOSITION | MF_POPUP, (UINT_PTR) g_hRecentMenu, L"Recent &Files");
+        RebuildRecentMenu();
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Refills the Recent popup from g_szRecent (called whenever the list moves):
+// a digit hotkey + the file NAME only — paths are long, and a menu is not
+// the place to render them (the status bar already shows the full path).
+void RebuildRecentMenu(void)
+{
+        if (g_hRecentMenu == nullptr)
+        {
+                return;
+        }
+        int cOld = GetMenuItemCount(g_hRecentMenu);
+        for (int i = 0; i < cOld; i++)
+        {
+                DeleteMenu(g_hRecentMenu, 0, MF_BYPOSITION);
+        }
+        if (g_cRecent == 0)
+        {
+                AppendMenuW(g_hRecentMenu, MF_STRING | MF_GRAYED, 0, L"(empty)");
+                return;
+        }
+        for (int i = 0; i < g_cRecent; i++)
+        {
+                // The menu shows the NAME only (after the last slash): a path
+                // would overflow the menu long before item 10; the status bar
+                // names the full file the moment it is opened.
+                const WCHAR* pszName = g_szRecent[i];
+                for (const WCHAR* p = pszName; *p != L'\0'; p++)
+                {
+                        if (*p == L'\\' || *p == L'/')
+                        {
+                                pszName = p + 1;
+                        }
+                }
+                WCHAR szItem[MAX_PATH + 8];
+                wsprintfW(szItem, (i == 9) ? L"1&0  %s" : L"&%d  %s", i + 1, pszName);
+                AppendMenuW(g_hRecentMenu, MF_STRING, ID_FILE_RECENT_FIRST + i, szItem);
+        }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// The MRU core: promote an existing entry to the top, or prepend a new one.
+// No directory churn, no dedupe storm: at most RECENT_MAX entries, one
+// lstrcmpiW each — MAX_PATH-bounded work that never grows with the file.
+void AddRecentEntry(LPCWSTR pszEntry)
+{
+        if (pszEntry == nullptr || pszEntry[0] == L'\0' || g_hRecentMenu == nullptr)
+        {
+                return;                         // nothing to remember (or nowhere to show it)
+        }
+        // Promote in place when the entry is already somewhere in the list.
+        int iHit = -1;
+        for (int i = 0; i < g_cRecent; i++)
+        {
+                if (lstrcmpiW(g_szRecent[i], pszEntry) == 0)
+                {
+                        iHit = i;
+                        break;
+                }
+        }
+        if (iHit == 0)
+        {
+                return;                         // already the most recent: nothing to do
+        }
+        if (iHit < 0)
+        {
+                // A NEW entry: make room by shifting everything down. The last
+                // slot of a full list is where the oldest dies.
+                iHit = (g_cRecent < RECENT_MAX) ? g_cRecent : RECENT_MAX - 1;
+                g_cRecent = (g_cRecent < RECENT_MAX) ? (g_cRecent + 1) : RECENT_MAX;
+        }
+        // Shift [iHit-1 .. 0] down one slot, then the new entry sits at [0].
+        for (int i = iHit; i > 0; i--)
+        {
+                lstrcpynW(g_szRecent[i], g_szRecent[i - 1], MAX_PATH);
+        }
+        lstrcpynW(g_szRecent[0], pszEntry, MAX_PATH);
+        RebuildRecentMenu();
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// A Recent item was picked: the two synthetic entries open their viewer
+// paths again (clipboard re-reads the CURRENT clipboard, as V does), the
+// plain stdin entry explains why it cannot come back (a pipe is gone once
+// the writer is), and a real path is a plain load.
+void OpenRecentEntry(int iRecent)
+{
+        if (iRecent < 0 || iRecent >= g_cRecent)
+        {
+                return;
+        }
+        LPCWSTR pszEntry = g_szRecent[iRecent];
+        if (lstrcmpiW(pszEntry, RECENT_CLIPBOARD) == 0)
+        {
+                ViewClipboardAsFile();
+                return;
+        }
+        if (lstrcmpiW(pszEntry, RECENT_STDIN) == 0)
+        {
+                MessageBox(hWndMain, L"The piped input of a previous session cannot be reopened.\nUse the pipe again (4More < file.txt) or pick a file.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
+        LoadFile(pszEntry);
 }

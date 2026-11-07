@@ -6,6 +6,8 @@
 #define IDD_MY4MORE_DIALOG              102
 #define IDS_APP_TITLE                   103
 #define IDD_ABOUTBOX                    103
+#define IDD_GOTO                        129
+#define IDD_FINDBYTES                   130
 #define ID_ABOUT                        104
 #define ID_EXIT                         105
 #define IDI_MY4MORE                     107
@@ -13,22 +15,44 @@
 #define IDC_MY4MORE                     109
 #define IDR_MAINFRAME                   128
 #define ID_COPY                         32771
-#define ID_CUT                          32772
-#define ID_PASTE                        32773
 #define ID_SELECTALL                    32774
-#define ID_CLEAR                        32781
-#define ID_UNDO                         32782
 #define ID_FIND                         32783
 #define ID_FINDNEXT                     32784
+// The view IDs must stay consecutive: ID_VIEW_ANSI + iView is the command ID
+// of every view, in the same order as the VIEW_* enum in 4More.cpp.
 #define ID_VIEW_ANSI                    32785
 #define ID_VIEW_UTF8                    32786
 #define ID_VIEW_UNICODE                 32787
-#define ID_VIEW_HEX                     32788
-#define ID_VIEW_FONTPLUS                32789
-#define ID_VIEW_FONTMINUS               32790
+#define ID_VIEW_HEX                    32788
+#define ID_VIEW_UTF16BE                 32789
+#define ID_VIEW_EBCDIC                  32790
+#define ID_FILE_OPEN                    32791
+#define ID_FILE_VIEWCLIP                32792
+#define ID_FILE_ADS                     32793
+#define ID_EDIT_BOOKMARK                32794
+#define ID_EDIT_NEXTBOOKMARK            32795
+#define ID_EDIT_PREVBOOKMARK            32796
+#define ID_SEARCH_GOTO                  32797
+#define ID_SEARCH_BYTES                 32798
+#define ID_VIEW_NEXTPAGE                32799
+#define ID_VIEW_PREVPAGE                32800
+#define ID_VIEW_REFRESH                 32801
+#define ID_VIEW_TAIL                    32802
+#define ID_VIEW_LINENUMS                32803
+#define ID_VIEW_WRAP                    32804
+#define ID_VIEW_FONTPLUS                32805
+#define ID_VIEW_FONTMINUS               32806
+// Recent Files (2.96): bloque contiguo de 10 IDs dinámicos, resuelto antes del switch WM_COMMAND (no hay case estático para ellos).
+#define ID_FILE_RECENT_FIRST            32807
+#define ID_FILE_RECENT_LAST             (ID_FILE_RECENT_FIRST + 9)
 #define IDC_ABOUT_VERSION               1101
 #define IDC_ABOUT_BUILD                 1102
 #define IDC_ABOUT_COMPILER              1103
+#define IDC_GOTO_LINE                   1104
+#define IDC_GOTO_OFFS                   1105
+#define IDC_GOTO_EDIT                   1106
+#define IDC_BYTES_EDIT                  1107
+#define IDC_BYTES_HEX                   1108
 #define IDC_STATIC                      -1
 
 // Next default values for new objects
@@ -36,9 +60,9 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
-#define _APS_NEXT_RESOURCE_VALUE        129
-#define _APS_NEXT_COMMAND_VALUE         32791
-#define _APS_NEXT_CONTROL_VALUE         1104
+#define _APS_NEXT_RESOURCE_VALUE        131
+#define _APS_NEXT_COMMAND_VALUE         32817
+#define _APS_NEXT_CONTROL_VALUE         1109
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

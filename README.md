@@ -2,6 +2,9 @@
 
 **A fast, read-only file viewer for Windows.** Plain Win32 API, no MFC, no runtime dependencies — one small executable that opens files of *any* size instantly: from a 100-byte note to a 100-gigabyte log.
 
+<img width="1426" height="746" alt="image" src="https://github.com/user-attachments/assets/c715f80d-efa7-48c0-926d-8bac9b434eb8" />
+
+
 4More shows text (ANSI, UTF-8, UTF-16 LE/BE, EBCDIC) and hexadecimal dumps of any file, keeps its memory strictly bounded, and never blocks the window while reading. It is a *viewer*: content can be selected and copied, but never modified.
 
 ```

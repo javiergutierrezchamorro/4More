@@ -1,6 +1,55 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.02
+   Build 3.03
+
+   Novedades de la revisión 3.03 (REVISIÓN EXTERNA: ATAJOS, TAIL Y CORRECCIÓN):
+   - LOS ACELERADORES NO LLEGABAN. El bucle de mensajes llamaba a
+     TranslateAccelerator con msg.hwnd — el control EDIT, que es quien
+     tiene el foco siempre — así que el WM_COMMAND traducido se enviaba
+     AL EDIT y moría en su DefSubclassProc: Ctrl+G no abría Go To,
+     Ctrl+PgDn/PgUp no paginaban, Ctrl+O, Ctrl+F, F3, F2, Ctrl+Shift+F,
+     Ctrl+T... NADA respondía con el foco en el visor. Ahora se traduce
+     contra la ventana principal, como pide el patrón clásico del bucle.
+   - PGDN/PGUP A SECAS. El menú anuncia PgDn/PgUp y las teclas las
+     atiende el subclass con semántica de pager: la página en pantalla
+     se desplaza mientras pueda y en su último/primer lleno de pantalla
+     carga la página siguiente/anterior del fichero (Ctrl+PgDn/
+     Ctrl+PgUp siguen valiendo como salto directo). Los aceleradores
+     VK_NEXT/VK_PRIOR salen de la tabla: interceptaban la tecla antes
+     de que el subclass pudiera desplazarse.
+   - TAIL: la última página no enseñaba NUNCA los datos que llegaban.
+     El temporizador recargaba la MISMA ventana; con la página llena,
+     los bytes que entraban más allá del tope quedaban fuera para
+     siempre. Ahora, si se sigue el final y la página está llena, la
+     recarga se reancla al nuevo final del fichero, como tail -f.
+   - 3 CORRECCIONES: FICHERO VACÍO abría con el aviso "Not enough
+     memory" (el descriptor marcaba OOM cuando lo que pasaba es que no
+     había texto QUE decodificar: cbFile==0 no es falta de memoria).
+     ITEM 10 DE RECIENTES: su formato "1&0  %s" se alimentaba con DOS
+     argumentos y wsprintfW consumía el int del número como puntero del
+     %s: al entrar el décimo fichero en la lista, el proceso moría al
+     construir el menú. PORTAPAPELES ANSI: un texto CF_TEXT de más de
+     ~16M caracteres pedía a MultiByteToWideChar más de lo que cabía en
+     el buffer: la conversión fallaba y se mostraban bytes SIN
+     INICIALIZAR como si fueran el portapapeles (el límite de bytes se
+     aplica antes de medir y un fallo de conversión ya no fabrica
+     contenido).
+   - CREATEFILE: se abre con FILE_SHARE_WRITE y FILE_SHARE_DELETE
+     además de FILE_SHARE_READ: un visor no puede impedir que el logger
+     siga escribiendo el log que se está viendo ("in use" era la queja
+     típica sobre logs vivos). Sobre MÁS velocidad: FILE_FLAG_SEQUENTIAL_
+     SCAN ya estaba; el peldaño siguiente (FILE_FLAG_NO_BUFFERING)
+     exige lecturas alineadas al sector y mata las recargas pequeñas del
+     tail: no compensa. El ancho real de lectura es el chunk de 4 MB.
+   - LIMPIEZA Y RENDIMIENTO: el subclass pierde la rama Ctrl+Plus/
+     Ctrl+Minus (la tabla de aceleradores intercepta la tecla antes de
+     que llegue: rama muerta desde que existe el acelerador); el Go To
+     pierde ES_NUMBER (bloqueaba teclear el 0x que el propio cartel
+     anuncia; ParseU64 es quien valida de verdad); DeliverTextToEdit
+     coloca el control DENTRO del bloque WM_SETREDRAW(FALSE): una
+     entrega produce UN repintado, no dos; BuildHexText escribe el
+     hueco central fuera del bucle de parejas (ocho comparaciones
+     menos por cada línea del dump).
 
    Novedades de la revisión 3.02 (REVISIÓN EXTERNA: CORRECCIÓN Y RENDIMIENTO):
    - 4 CORRECCIONES: /TAIL NO SALTABA AL FINAL. El switch armaba el
@@ -193,7 +242,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.02"
+#define APP_VERSION L"3.03"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -393,7 +442,7 @@ void CompilerInfo(WCHAR* pszDst);
 void LaunchLoadJob(LoadJob* pJob);              // g_pJob + worker thread, shared by file loads and pages
 void OpenFileDlg(void);                         // File > Open... (common dialog)
 bool LoadPage(ULONGLONG qwBase, bool bTailJump); // 3.02: read [qwBase, +cap); FALSE = rejected (busy or searching)
-void ChangePage(int iDir);                      // Ctrl+PgDn / Ctrl+PgUp: next / previous window
+void ChangePage(int iDir);                      // PgDn / PgUp (plain or with Ctrl): next / previous page
 void RefreshPage(bool bTailJump);              // F5: reload the page on screen
 void ToggleTail(void);
 void ToggleLineNums(void);
@@ -523,7 +572,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         MSG msg;
         while (GetMessage(&msg, nullptr, 0, 0))
         {
-                if ((hDlgFind == nullptr || !IsDialogMessage(hDlgFind, &msg)) && !TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
+                // 3.03: the accelerators translate against the MAIN window. They
+                // used to translate against msg.hwnd — the EDIT control, which
+                // owns the focus — so the translated WM_COMMAND was sent INTO the
+                // edit and died there: Ctrl+G, the page keys, Ctrl+O/F/F3... none
+                // of them ever fired while the viewer had the focus (always).
+                if ((hDlgFind == nullptr || !IsDialogMessage(hDlgFind, &msg)) && !TranslateAccelerator(hWndMain, hAccelTable, &msg))
                 {
                         TranslateMessage(&msg);
                         DispatchMessage(&msg);
@@ -880,9 +934,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                         {
                                                 // The file grew or shrank: reload the window on
                                                 // screen. When it held the end of the file, follow
-                                                // the new end, like tail -f.
+                                                // the new end, like tail -f. 3.03: following the end
+                                                // RE-ANCHORS the window when the page is FULL — the
+                                                // old reload of the same base read the same capped
+                                                // window forever, so the bytes arriving past the cap
+                                                // never reached the screen.
                                                 bool bFollowEnd = (g_qwBase + cbFile >= g_cbFileTotal);
-                                                LoadPage(g_qwBase, bFollowEnd);
+                                                ULONGLONG cbPageCap = (iView == VIEW_HEX) ? (ULONGLONG) CB_HEX_MAX : (ULONGLONG) CB_TEXT_MAX;
+                                                ULONGLONG qwBase = g_qwBase;
+                                                if (bFollowEnd && cbFile >= cbPageCap)
+                                                {
+                                                        qwBase = (cbSize > cbPageCap) ? (cbSize - cbPageCap) : 0;
+                                                }
+                                                LoadPage(qwBase, bFollowEnd);
                                         }
                                 }
                         }
@@ -1123,25 +1187,41 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
                                 JumpFilePage(wParam == VK_END);
                                 return(0);
                         }
-                        // Ctrl+Plus / Ctrl+Minus: grow / shrink the editor font (2.96).
-                        // Both rows count: main-row (= / _ next to Backspace) and the
-                        // numeric keypad's + / -. 3.02: the L'=' / L'_' comparisons are
-                        // gone: WM_KEYDOWN's wParam is a VK code, never a character,
-                        // so those two branches could never fire (dead since 2.96).
-                        // The OEM codes are layout-dependent; US layouts answer
-                        // VK_OEM_PLUS / VK_OEM_MINUS, which is what fires here.
-                        if (GetKeyState(VK_CONTROL) & 0x8000)
+                        // 3.03: PgDn / PgUp, the pager keys. The menu shortcuts are
+                        // PLAIN PgDn / PgUp (the accelerator entries are gone: they
+                        // intercepted the keys before this proc could ever see them).
+                        // Plain keys: the page on screen scrolls while it can; at its
+                        // last/first screenful the NEXT/PREVIOUS page of the FILE
+                        // loads, pager style. With Ctrl held: an immediate page
+                        // change, no scroll first. The font +/- keys are NOT here
+                        // anymore: the accelerator table answers them first (the
+                        // branch was dead code since the accelerator exists).
+                        if (wParam == VK_NEXT || wParam == VK_PRIOR)
                         {
-                                if (wParam == VK_OEM_PLUS || wParam == VK_ADD)
+                                int iDir = (wParam == VK_NEXT) ? 1 : -1;
+                                bool bPageNow = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                                if (!bPageNow && g_szCurrentFile[0] != L'\0')   // stdin/clipboard: no pages, EDIT scrolls
                                 {
-                                        ChangeEditorFont(1);
+                                        SCROLLINFO si;
+                                        si.cbSize = sizeof(si);
+                                        si.fMask = SIF_POS | SIF_RANGE | SIF_PAGE;
+                                        if (GetScrollInfo(hWnd, SB_VERT, &si))
+                                        {
+                                                int iMaxTop = si.nMax - (int) si.nPage + 1;   // last scrollable top line
+                                                if (iMaxTop < 0)
+                                                {
+                                                        iMaxTop = 0;
+                                                }
+                                                // mid-page: the EDIT scrolls one screenful
+                                                bPageNow = (iDir > 0) ? (si.nPos >= iMaxTop) : (si.nPos <= 0);
+                                        }
+                                }
+                                if (bPageNow)
+                                {
+                                        ChangePage(iDir);
                                         return(0);
                                 }
-                                if (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT)
-                                {
-                                        ChangeEditorFont(-1);
-                                        return(0);
-                                }
+                                break;          // stdin/clipboard, or mid-page: the EDIT scrolls
                         }
                         break;
                 // Keep the status bar updated when the caret can move.
@@ -1580,7 +1660,14 @@ void RunLoadJob(LoadJob *pJob)
         }
         else
         {
-                hFile = CreateFile(pJob->szPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+                // 3.03: FILE_SHARE_WRITE | FILE_SHARE_DELETE join the read share:
+                // a viewer must not lock out the program that is still writing
+                // the log being watched (the classic "in use" on live logs).
+                // About speed: FILE_FLAG_SEQUENTIAL_SCAN (read-ahead) is already
+                // on and the reads below run in 4 MB chunks; FILE_FLAG_NO_BUFFERING
+                // would demand sector-aligned reads and evict the small tail
+                // re-reads from the cache: it does not pay off for a viewer.
+                hFile = CreateFileW(pJob->szPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
                 if (hFile == INVALID_HANDLE_VALUE)
                 {
                         pJob->bOpenFailed = true;
@@ -1870,7 +1957,15 @@ void RunLoadJob(LoadJob *pJob)
                         if (pNorm == nullptr)
                         {
                                 FreeViewText(pText);   // OOM in the CRLF pass: report it, keep the bytes
-                                pJob->bOOM = true;
+                                // 3.03: an EMPTY page (empty file, failed open) also lands
+                                // here with pText == nullptr — that is not out of memory,
+                                // it is just nothing to decode. Marking OOM made every
+                                // empty file open with a "Not enough memory" error over
+                                // an empty viewer.
+                                if (pJob->cbFile > 0)
+                                {
+                                        pJob->bOOM = true;
+                                }
                         }
                         else
                         {
@@ -2453,15 +2548,22 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
                         // single per-byte bounds check.
                         const BYTE* q = pBytes + off;
 #if !defined(NO_HEX_PAIR_LUT)
-                        for (int iPair = 0; iPair < 8; iPair++)
+                        // 3.03: the gap between the two halves is written once,
+                        // outside the loop: eight per-pair comparisons off every
+                        // full line (the common case, ~524k lines per hex page).
+                        for (int iPair = 0; iPair < 4; iPair++)
                         {
-                                if (iPair == 4)
-                                {
-                                        *p++ = L' ';    // gap between the two 8-byte halves
-                                }
                                 WORD w;
                                 memcpy(&w, q + iPair * 2, 2);           // two bytes, in order
                                 memcpy(p, hp.sz[w], 6 * sizeof(WCHAR)); // "XX XX " in one store
+                                p += 6;
+                        }
+                        *p++ = L' ';    // gap between the two 8-byte halves
+                        for (int iPair = 4; iPair < 8; iPair++)
+                        {
+                                WORD w;
+                                memcpy(&w, q + iPair * 2, 2);
+                                memcpy(p, hp.sz[w], 6 * sizeof(WCHAR));
                                 p += 6;
                         }
 #else
@@ -2938,10 +3040,6 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized)
                 FreeViewText(pText);
                 return;
         }
-        // The hex offset column appears/disappears with the view and content:
-        // place the control before filling it, so the content repaints once,
-        // at its final geometry.
-        LayoutEdit();
         ULONGLONG dwT0 = GetTickCount64();      // /timing: normalize + deliver start here
         WCHAR* pNorm = pText;
         if (pText != nullptr && cch > 0 && !bPreNormalized)
@@ -2964,6 +3062,12 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized)
         }
 
         SendMessage(hEdit, WM_SETREDRAW, FALSE, 0);
+        // 3.03: the hex offset column appears/disappears with the view and
+        // content: the control is placed INSIDE the redraw lock, so the new
+        // geometry and the new content repaint together — one paint per
+        // delivery instead of two (the old order painted the OLD text at the
+        // new geometry first, then the new text again).
+        LayoutEdit();
         HGLOBAL hNew = nullptr;
         if (pNorm != nullptr && cch > 0)
         {
@@ -3612,7 +3716,7 @@ bool LoadPage(ULONGLONG qwBase, bool bTailJump)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// View > Next Page (Ctrl+PgDn) / Previous Page (Ctrl+PgUp): the window moves
+// View > Next Page (PgDn) / Previous Page (PgUp): the window moves
 // one page forward or backward. Next advances by the bytes actually shown
 // (so a short last-but-one page still reaches the end); Previous steps a full
 // page back, never before offset 0. At the ends of the file: a beep, no jump.
@@ -4330,7 +4434,7 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
 unsigned __stdcall SearchThreadProc(void *pParameter)
 {
         UNREFERENCED_PARAMETER(pParameter);
-        HANDLE hFile = CreateFileW(g_szCurrentFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        HANDLE hFile = CreateFileW(g_szCurrentFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
         if (hFile == INVALID_HANDLE_VALUE)
         {
                 PostMessage(hWndMain, WM_APP_SEARCHDONE, 0xFFFFFFFF, 0);   // could not open: not found
@@ -4480,19 +4584,23 @@ void ViewClipboardAsFile(void)
                                         break;
                                 }
                         }
-                        if (cbSrc > (int) CB_TEXT_MAX)
+                        // 3.03: the BYTE cap lands BEFORE measuring the conversion.
+                        // ANSI never yields more characters than bytes (SBCS maps
+                        // 1:1, DBCS folds pairs), so cch below always fits. The old
+                        // order measured the FULL conversion and clamped the RESULT:
+                        // converting up to 32 MB into a 16 M-character buffer then
+                        // failed with ERROR_INSUFFICIENT_BUFFER, cbClip was written
+                        // anyway, and the viewer displayed UNINITIALIZED bytes as if
+                        // they were the clipboard text.
+                        if (cbSrc > (int) (CB_TEXT_MAX / 2))
                         {
-                                cbSrc = (int) CB_TEXT_MAX;
+                                cbSrc = (int) (CB_TEXT_MAX / 2);
                         }
                         if (cbSrc < 0)
                         {
                                 cbSrc = 0;
                         }
                         int cch = MultiByteToWideChar(CP_ACP, 0, psz, cbSrc, nullptr, 0);
-                        if (cch > (int) (CB_TEXT_MAX / 2))
-                        {
-                                cch = (int) (CB_TEXT_MAX / 2);
-                        }
                         if (cch > 0)
                         {
                                 pClip = new (std::nothrow) BYTE[2 + (size_t) cch * 2];
@@ -4500,8 +4608,16 @@ void ViewClipboardAsFile(void)
                                 {
                                         pClip[0] = 0xFF;
                                         pClip[1] = 0xFE;
-                                        MultiByteToWideChar(CP_ACP, 0, psz, cbSrc, (LPWSTR) (pClip + 2), cch);
-                                        cbClip = 2 + (DWORD) ((size_t) cch * 2);
+                                        int cchOut = MultiByteToWideChar(CP_ACP, 0, psz, cbSrc, (LPWSTR) (pClip + 2), cch);
+                                        if (cchOut > 0)
+                                        {
+                                                cbClip = 2 + (DWORD) ((size_t) cchOut * 2);
+                                        }
+                                        else
+                                        {
+                                                delete[] pClip;         // conversion failed: never show garbage
+                                                pClip = nullptr;
+                                        }
                                 }
                         }
                         GlobalUnlock(hAnsi);
@@ -5289,7 +5405,19 @@ void RebuildRecentMenu(void)
                         }
                 }
                 WCHAR szItem[MAX_PATH + 8];
-                wsprintfW(szItem, (i == 9) ? L"1&0  %s" : L"&%d  %s", i + 1, pszName);
+                // 3.03: format and arguments paired by hand. The old one-liner
+                // handed "1&0  %s" TWO arguments: wsprintfW consumed the INT of
+                // the item number as the %s pointer — the tenth entry in the
+                // list dereferenced address 10 and killed the process while the
+                // menu was being built.
+                if (i == 9)
+                {
+                        wsprintfW(szItem, L"1&0  %s", pszName);
+                }
+                else
+                {
+                        wsprintfW(szItem, L"&%d  %s", i + 1, pszName);
+                }
                 AppendMenuW(g_hRecentMenu, MF_STRING, ID_FILE_RECENT_FIRST + i, szItem);
         }
 }

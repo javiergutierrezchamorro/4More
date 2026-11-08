@@ -1,11 +1,15 @@
-﻿// 4More.rc — recursos del visor (Build 3.02)
+﻿// 4More.rc — recursos del visor (Build 3.03)
 //
-// 3.02: SIN CAMBIOS DE RECURSOS. La versión del About la rellena el
-// programa en ejecución desde APP_VERSION (4More.cpp), y este .rc no
-// lleva VERSIONINFO ni ninguna versión incrustada: lo único que pide
-// el bump (3.01 a 3.02) es este encabezado. El resto del fichero
-// queda como estaba; compilar junto al 4More.cpp 3.02 (APP_VERSION ya
-// dice "3.02") y el About lo mostrará solo.
+// 3.03: Next/Previous Page anuncian PgDn/PgUp (las teclas las atiende
+// el subclass del EDIT con semántica de pager: la página se desplaza
+// mientras pueda y en su borde carga la página siguiente/anterior del
+// fichero; Ctrl+PgDn/Ctrl+PgUp siguen valiendo como salto directo).
+// Los aceleradores VK_NEXT/VK_PRIOR SALEN de la tabla: interceptaban
+// la tecla antes de que el subclass pudiera desplazarse. El Go To
+// pierde ES_NUMBER: bloqueaba teclear el 0x que el propio cartel
+// anuncia (ParseU64 valida de verdad). El resto del fichero queda
+// como estaba; compilar junto al 4More.cpp 3.03 (APP_VERSION ya dice
+// "3.03") y el About lo mostrará solo.
 //
 // Sin ficheros del asistente de Visual Studio (2.97): ni targetver.h ni
 // afxres.h, que no forman parte del SDK. Sólo windows.h + resource.h:
@@ -89,8 +93,8 @@ BEGIN
         MENUITEM "&EBCDIC",                             ID_VIEW_EBCDIC
         MENUITEM "&Hexadecimal",                        ID_VIEW_HEX
         MENUITEM SEPARATOR
-        MENUITEM "&Next Page\tCtrl+PgDn",               ID_VIEW_NEXTPAGE
-        MENUITEM "&Previous Page\tCtrl+PgUp",           ID_VIEW_PREVPAGE
+        MENUITEM "&Next Page\tPgDn",                    ID_VIEW_NEXTPAGE
+        MENUITEM "&Previous Page\tPgUp",                ID_VIEW_PREVPAGE
         MENUITEM "&Refresh\tF5",                        ID_VIEW_REFRESH
         MENUITEM "&Tail File\tCtrl+T",                  ID_VIEW_TAIL
         MENUITEM "&Line Numbers",                       ID_VIEW_LINENUMS
@@ -123,10 +127,15 @@ BEGIN
     VK_F2,          ID_EDIT_PREVBOOKMARK,   VIRTKEY, CONTROL, NOINVERT
     VK_F3,          ID_FINDNEXT,             VIRTKEY, NOINVERT
     VK_F5,          ID_VIEW_REFRESH,        VIRTKEY, NOINVERT
-    VK_NEXT,        ID_VIEW_NEXTPAGE,       VIRTKEY, CONTROL, NOINVERT
-    VK_PRIOR,       ID_VIEW_PREVPAGE,       VIRTKEY, CONTROL, NOINVERT
-    // Fuente: fila principal (= / _) y numpad (+ / -). El subclass del
-    // control EDIT atiende los mismos VK_* directamente (2.96).
+    // 3.03: VK_NEXT / VK_PRIOR (con o sin CONTROL) ya NO están aquí: un
+    // acelerador intercepta la tecla en el bucle de mensajes, ANTES de
+    // que el subclass del EDIT pueda decidir si toca desplazar la página
+    // en pantalla o cargar la siguiente. Son teclas del pager, no
+    // comandos: las atiende el subclass (el menú View > Next/Previous
+    // Page sigue funcionando por ratón, vía WM_COMMAND).
+    // Fuente: fila principal (= / _) y numpad (+ / -), sólo por la tabla:
+    // el acelerador responde SIEMPRE que el foco esté en el programa,
+    // así que la rama gemela del subclass se retiró en 3.03 (rama muerta).
     VK_ADD,         ID_VIEW_FONTPLUS,       VIRTKEY, CONTROL, NOINVERT
     VK_SUBTRACT,    ID_VIEW_FONTMINUS,      VIRTKEY, CONTROL, NOINVERT
     VK_OEM_PLUS,    ID_VIEW_FONTPLUS,       VIRTKEY, CONTROL, NOINVERT
@@ -171,7 +180,7 @@ BEGIN
     LTEXT           "Go to:", IDC_STATIC, 12, 12, 40, 8
     CONTROL         "&Line", IDC_GOTO_LINE, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 60, 10, 40, 10
     CONTROL         "&Offset", IDC_GOTO_OFFS, "Button", BS_AUTORADIOBUTTON, 110, 10, 48, 10
-    EDITTEXT         IDC_GOTO_EDIT, 12, 28, 240, 14, ES_AUTOHSCROLL | ES_NUMBER
+    EDITTEXT         IDC_GOTO_EDIT, 12, 28, 240, 14, ES_AUTOHSCROLL
     LTEXT           "Line: 1..N of the page on screen. Offset: absolute byte (0x... hex accepted).", IDC_STATIC, 12, 48, 240, 16
     DEFPUSHBUTTON   "&Go", IDOK, 152, 70, 50, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 206, 70, 50, 14

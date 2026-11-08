@@ -1,4 +1,12 @@
-﻿// 4More.rc — recursos del visor (Build 3.01)
+﻿// 4More.rc — recursos del visor (Build 3.02)
+//
+// 3.02: SIN CAMBIOS DE RECURSOS. La versión del About la rellena el
+// programa en ejecución desde APP_VERSION (4More.cpp), y este .rc no
+// lleva VERSIONINFO ni ninguna versión incrustada: lo único que pide
+// el bump (3.01 a 3.02) es este encabezado. El resto del fichero
+// queda como estaba; compilar junto al 4More.cpp 3.02 (APP_VERSION ya
+// dice "3.02") y el About lo mostrará solo.
+//
 // Sin ficheros del asistente de Visual Studio (2.97): ni targetver.h ni
 // afxres.h, que no forman parte del SDK. Sólo windows.h + resource.h:
 // compila con rc.exe (MSVC) y con windres (MinGW-w64). Guardar en UTF-8
@@ -49,7 +57,7 @@ BEGIN
     BEGIN
         MENUITEM "&Open...\tCtrl+O",                    ID_FILE_OPEN
         MENUITEM "&View Clipboard as File",             ID_FILE_VIEWCLIP
-        MENUITEM "&Alternate Data Streams...",         ID_FILE_ADS
+        MENUITEM "&Alternate Data Streams...",          ID_FILE_ADS
         MENUITEM SEPARATOR
         // Recent Files (2.96) se inserta aquí en ejecución: EnsureRecentMenu
         // añade separador + popup antes de Exit.
@@ -83,12 +91,12 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "&Next Page\tCtrl+PgDn",               ID_VIEW_NEXTPAGE
         MENUITEM "&Previous Page\tCtrl+PgUp",           ID_VIEW_PREVPAGE
-        MENUITEM "&Refresh\tF5",                         ID_VIEW_REFRESH
+        MENUITEM "&Refresh\tF5",                        ID_VIEW_REFRESH
         MENUITEM "&Tail File\tCtrl+T",                  ID_VIEW_TAIL
-        MENUITEM "&Line Numbers",                        ID_VIEW_LINENUMS
-        MENUITEM "&Word Wrap",                           ID_VIEW_WRAP
+        MENUITEM "&Line Numbers",                       ID_VIEW_LINENUMS
+        MENUITEM "&Word Wrap",                          ID_VIEW_WRAP
         MENUITEM SEPARATOR
-        MENUITEM "Font &+\tCtrl++",                      ID_VIEW_FONTPLUS
+        MENUITEM "Font &+\tCtrl++",                     ID_VIEW_FONTPLUS
         MENUITEM "Font &-\tCtrl+-",                      ID_VIEW_FONTMINUS
     END
     POPUP "&Help"

@@ -1,6 +1,37 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.01
+   Build 3.02
+
+   Novedades de la revisión 3.02 (REVISIÓN EXTERNA: CORRECCIÓN Y RENDIMIENTO):
+   - 4 CORRECCIONES: /TAIL NO SALTABA AL FINAL. El switch armaba el
+     temporizador pero nada aplicaba bTailJump a la primera carga: el
+     fichero abría en la página 0 y el tail la recargaba para siempre
+     (el README prometía "jumps to the end when a file loads"). Ahora la
+     primera carga que aterriza consume un salto a la última página.
+     GOTO HUÉRFANO: un Go To rechazado durante un Find Bytes dejaba
+     g_qwPendingGoto armado y la siguiente página que sí cargara
+     posicionaba el caret en un offset pedido minutos antes (LoadPage
+     ahora responde si aceptó el trabajo y el goto sólo se arma entonces).
+     AVISO HEX: el "[Hex view: showing bytes...]" iba pegado a la última
+     línea del dump (el p -= 2 le quitaba su CRLF); ahora es párrafo
+     propio, como en las vistas de texto. PARSEU64: 19-20 dígitos
+     desbordaban en silencio el 2^64; ahora se rechazan.
+   - RENDIMIENTO: STDIN ASÍNCRONO (la carga del pipe corría DENTRO de
+     WM_CREATE: "type enorme.log | 4more" mantenía la ventana sin existir
+     hasta el EOF, el mismo cuelgue que la carga asíncrona de ficheros
+     resolvió en 2.93); la DECISIÓN CRLF corre sobre los BYTES crudos con
+     memchr (en ANSI/UTF-8 cada \r/\n es 1 byte = 1 carácter y los bytes
+     de continuación UTF-8 nunca colisionan: mismo cExpand, media memoria
+     y escaneo SIMD del CRT; EBCDIC ya no paga la pasada: su tabla nunca
+     produce \r ni \n); LineAtOffset usa la misma cadena de memchr que
+     Find Bytes (Go To y los saltos de Find Bytes, ~3x); el dump hex
+     activa la LUT de pares también en Win32 (786 KB constantes no
+     comprometen los 2 GB) y su columna ASCII va por tabla de 256; el
+     gutter sale con UN PolyTextOut en vez de ~40-160 TextOutW por
+     repintado.
+   - LIMPIEZA: teclas muertas del subclass (wParam == '=' / '_', códigos
+     que ningún layout produce para esas teclas); SDKDDKVer.h fuera del
+     .h (llegaba después de windows.h, donde ya no hace nada).
 
    Novedades de la revisión 3.01 (PIPE Y CTRL+INICIO/FIN):
    - STDIN: EOF DE PIPE. "type fichero | 4more64" terminaba en "Could not
@@ -162,7 +193,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.01"
+#define APP_VERSION L"3.02"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -200,6 +231,7 @@ ULONGLONG g_qwBase = 0;                         // file offset of the FIRST byte
 bool g_bLineNums = false;                       // View > Line Numbers: text gutter, painted like the hex one
 bool g_bWrap = false;                           // View > Word Wrap: edit styles are create-only, so this recreates the control
 bool g_bTail = false;                           // View > Tail File: 2 s timer, reload on change, jump to the end
+bool g_bTailJumpFirst = false;                  // 3.02: /tail o INI: la PRIMERA carga de un fichero salta a su última página
 int g_iForcedView = -1;                         // /hex /utf8... initial view from the command line (first load only)
 DWORD* g_pBookmarks = nullptr;                  // bookmarked lines (page-relative), kept sorted
 int g_cBookmarks = 0, g_cBookmarksMax = 0;
@@ -322,7 +354,7 @@ LRESULT CALLBACK EditSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PT
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void LoadFile(const WCHAR *pacFilename);
 LoadJob* BeginLoadJob(bool bStdin);            // shared setup of both load paths
-void LoadFileSync(void);                       // stdin path (startup), synchronous by nature
+void LoadFileSync(void);                       // stdin path (startup); 3.02: async like the file loads
 void StartAsyncLoad(const WCHAR *pacFilename);  // file path: worker thread + WM_APP_LOADDONE
 unsigned __stdcall LoadThreadProc(void *pParameter);
 void RunLoadJob(LoadJob *pJob);                 // open+read+detect+decode; no UI calls from here
@@ -344,7 +376,7 @@ HMENU GetViewSubMenu(HWND hWnd);
 void UpdateViewMenu(void);
 void SetView(int iNewView);
 void ApplyView(void);
-bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch);
+bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr);   // 3.02: los dos últimos responden la ventana de BYTES que se decodificó
 int DetectDefaultView(const BYTE* pBytes, DWORD cb);
 void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized); // deliver + own/free the buffer
 BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized); // DeliverTextToEdit wrapped in SEH
@@ -360,7 +392,7 @@ void AsciiToWide(WCHAR* pwDst, const char* pszSrc);
 void CompilerInfo(WCHAR* pszDst);
 void LaunchLoadJob(LoadJob* pJob);              // g_pJob + worker thread, shared by file loads and pages
 void OpenFileDlg(void);                         // File > Open... (common dialog)
-void LoadPage(ULONGLONG qwBase, bool bTailJump); // read [qwBase, +cap) of g_szCurrentFile
+bool LoadPage(ULONGLONG qwBase, bool bTailJump); // 3.02: read [qwBase, +cap); FALSE = rejected (busy or searching)
 void ChangePage(int iDir);                      // Ctrl+PgDn / Ctrl+PgUp: next / previous window
 void RefreshPage(bool bTailJump);              // F5: reload the page on screen
 void ToggleTail(void);
@@ -733,6 +765,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                         }
                                 }
                         }
+                        g_bTailJumpFirst = g_bTail;
                         // ES_AUTOHSCROLL + WS_HSCROLL disable word wrap (the default).
                         // This is the change that most accelerates loading large files in an EDIT
                         // control: without them, the control must calculate where each line breaks
@@ -1092,16 +1125,19 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
                         }
                         // Ctrl+Plus / Ctrl+Minus: grow / shrink the editor font (2.96).
                         // Both rows count: main-row (= / _ next to Backspace) and the
-                        // numeric keypad's + / -. The OEM codes are layout-dependent;
-                        // the '=' and '_' literals keep the common US layout working.
+                        // numeric keypad's + / -. 3.02: the L'=' / L'_' comparisons are
+                        // gone: WM_KEYDOWN's wParam is a VK code, never a character,
+                        // so those two branches could never fire (dead since 2.96).
+                        // The OEM codes are layout-dependent; US layouts answer
+                        // VK_OEM_PLUS / VK_OEM_MINUS, which is what fires here.
                         if (GetKeyState(VK_CONTROL) & 0x8000)
                         {
-                                if (wParam == VK_OEM_PLUS || wParam == VK_ADD || wParam == L'=')
+                                if (wParam == VK_OEM_PLUS || wParam == VK_ADD)
                                 {
                                         ChangeEditorFont(1);
                                         return(0);
                                 }
-                                if (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT || wParam == L'_')
+                                if (wParam == VK_OEM_MINUS || wParam == VK_SUBTRACT)
                                 {
                                         ChangeEditorFont(-1);
                                         return(0);
@@ -1472,6 +1508,51 @@ unsigned __stdcall LoadThreadProc(void *pParameter)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// 3.02 (O2): CRLF expansion preview, straight on the RAW BYTES. Valid only for
+// the 1-byte-per-character views (ANSI, UTF-8): there a \r or \n byte IS one
+// character, and UTF-8 continuation bytes (>= 0x80) never collide with them
+// (Windows DBCS trail bytes never go below 0x40 either). UTF-16 keeps the
+// WCHAR pass, EBCDIC never needs it (its table maps the CR/LF cells to
+// U+FFFD). Answers the same cExpand NormalizeNewlines would compute: lone \r
+// and lone \n each cost one character, \r\n costs nothing. Two memchr chains
+// let the CRT scan with its SIMD loops instead of a per-byte walk.
+static int CountCRLFExpansion(const BYTE* pBytes, DWORD cb)
+{
+        int cExpand = 0;
+        const BYTE* p = pBytes;
+        const BYTE* pEnd = pBytes + cb;
+        for (;;)
+        {
+                const BYTE* pCr = (const BYTE*) memchr(p, 0x0D, (size_t) (pEnd - p));
+                if (pCr == nullptr)
+                {
+                        break;                          // no more CR
+                }
+                if (pCr + 1 == pEnd || pCr[1] != 0x0A)
+                {
+                        cExpand++;                      // lone \r expands to CRLF
+                }
+                p = pCr + 1;
+        }
+        p = pBytes;
+        for (;;)
+        {
+                const BYTE* pLf = (const BYTE*) memchr(p, 0x0A, (size_t) (pEnd - p));
+                if (pLf == nullptr)
+                {
+                        break;                          // no more LF
+                }
+                if (pLf == pBytes || pLf[-1] != 0x0D)
+                {
+                        cExpand++;                      // lone \n expands to CRLF
+                }
+                p = pLf + 1;
+        }
+        return(cExpand);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
 // Real load, in two phases:
 //   1) read only the first DETECT_WINDOW_BYTES and decide the encoding on
 //      them (DetectDefaultView);
@@ -1758,12 +1839,29 @@ void RunLoadJob(LoadJob *pJob)
         {
                 WCHAR* pText = nullptr;
                 DWORD cch = 0;
-                if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch))
+                DWORD dwSrcOff = 0, dwSrcLen = 0;       // 3.02: raw window the decode covered (O2)
+                if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen))
                 {
                         WCHAR* pNorm = pText;
                         int cchNorm = (int) cch;
                         g_msNormalize = 0;      // hex adopts directly: no CRLF pass anywhere
-                        if (pJob->iDetected != VIEW_HEX && pText != nullptr && cch > 0)
+                        // 3.02: the CRLF pass only runs when it can change
+                        // something. EBCDIC never needs it (its table maps the
+                        // CR/LF cells to U+FFFD: no \r or \n survives the decode)
+                        // and ANSI/UTF-8 ask the memchr preview (O2) whether any
+                        // lone \r or \n exists before paying the full pass.
+                        bool bNeedNorm = true;
+                        if (pJob->iDetected == VIEW_EBCDIC)
+                        {
+                                bNeedNorm = false;               // the decode never produced \r or \n
+                        }
+                        else if ((pJob->iDetected == VIEW_ANSI || pJob->iDetected == VIEW_UTF8) &&
+                                 dwSrcLen > 0 &&
+                                 CountCRLFExpansion(pJob->pBytes + dwSrcOff, dwSrcLen) == 0)
+                        {
+                                bNeedNorm = false;               // already all CRLF: deliver as is
+                        }
+                        if (bNeedNorm && pJob->iDetected != VIEW_HEX && pText != nullptr && cch > 0)
                         {
                                 ULONGLONG dwT2 = GetTickCount64();      // /timing: the CRLF pass runs here
                                 pNorm = NormalizeNewlines(pText, (int) cch, &cchNorm);
@@ -1874,6 +1972,16 @@ void ApplyLoadResult(LoadJob *pJob)
         }
         if (bDelivered)
         {
+                if (g_bTailJumpFirst)
+                {
+                        g_bTailJumpFirst = false;
+                        if (g_bTail && !pJob->bStdin && !pJob->bOpenFailed && g_szCurrentFile[0] != L'\0')
+                        {
+                                DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
+                                ULONGLONG qwBase = (g_cbFileTotal > (ULONGLONG) cbPage) ? (g_cbFileTotal - (ULONGLONG) cbPage) : 0;
+                                LoadPage(qwBase, true);
+                        }
+                }
                 if (pJob->bTailJump && hEdit != nullptr)
                 {
                         // Tail: keep the new end of the file on screen, caret after it.
@@ -1923,8 +2031,12 @@ void RunJobSynchronously(LoadJob *pJob)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// stdin pipe (and redirection) at startup: no window to freeze yet, no path
-// to cancel, so the job runs on the calling thread.
+// stdin pipe (and redirection) at startup. 3.02 (O1): the job now goes through
+// the SAME async path as a file load: "type enorme.log | 4more" used to run the
+// whole read inside WM_CREATE, so the window did not exist until the pipe hit
+// EOF — exactly the freeze the async file loads already fixed for drops. The
+// content lands through WM_APP_LOADDONE like any other load, and
+// LaunchLoadJob carries the no-threads fallback inline.
 void LoadFileSync(void)
 {
         LoadJob* pJob = BeginLoadJob(true);     // clears the old content too
@@ -1933,7 +2045,7 @@ void LoadFileSync(void)
                 return;                         // out of memory: BeginLoadJob already said so
         }
         AddRecentEntry(RECENT_STDIN);           // MRU: the pipe counts as a place
-        RunJobSynchronously(pJob);
+        LaunchLoadJob(pJob);
 }
 
 
@@ -2287,12 +2399,13 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
         };
         static const HexDigits hd;
 
-#if defined(_WIN64) || defined(FORCE_HEX_PAIR_LUT)
-        // Win64 only (measured, see README): one table lookup covers TWO bytes
-        // ("XX XX "), halving the loads and stores of the hot loop — the 8 MB
-        // worst case dumps 25% faster. The table costs 65536 x 12 read-only
-        // bytes (768 KB) and one-time init, a trade made for the 64-bit build
-        // alone: the 32-bit build keeps the compact per-byte table above.
+#if !defined(NO_HEX_PAIR_LUT)
+        // One table lookup covers TWO bytes ("XX XX "), halving the loads and
+        // stores of the hot loop (measured, see README: the 8 MB worst case
+        // dumps 25% faster). The table costs 65536 x 12 read-only bytes
+        // (768 KB) and one-time init. 3.02: enabled on Win32 too — 786 KB of
+        // constant data do not compromise the 2 GB address space, so the
+        // define NO_HEX_PAIR_LUT remains as the only opt-out.
         struct HexPairs
         {
                 WCHAR sz[65536][6];
@@ -2314,6 +2427,21 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
         static const HexPairs hp;
 #endif
 
+        // 3.02: the ASCII column of both loops goes through a 256-entry table:
+        // one load per byte instead of compare-and-select, same output.
+        struct AsciiMap
+        {
+                WCHAR w[256];
+                AsciiMap()
+                {
+                        for (int i = 0; i < 256; i++)
+                        {
+                                w[i] = (i >= 0x20 && i < 0x7F) ? (WCHAR) i : L'.';
+                        }
+                }
+        };
+        static const AsciiMap am;
+
         WCHAR* pOut = AllocViewText(cLines * cchLine + 160);
         WCHAR* p = pOut;
         for (DWORD iLine = 0; iLine < cLines; iLine++)
@@ -2324,7 +2452,7 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
                         // Full line: the common case by far, written without a
                         // single per-byte bounds check.
                         const BYTE* q = pBytes + off;
-#if defined(_WIN64) || defined(FORCE_HEX_PAIR_LUT)
+#if !defined(NO_HEX_PAIR_LUT)
                         for (int iPair = 0; iPair < 8; iPair++)
                         {
                                 if (iPair == 4)
@@ -2352,8 +2480,7 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
                         *p++ = L' ';
                         for (int i = 0; i < 16; i++)
                         {
-                                BYTE b = q[i];
-                                *p++ = (b >= 0x20 && b < 0x7F) ? (WCHAR) b : L'.';
+                                *p++ = am.w[q[i]];              // 3.02: LUT, sin compare-and-select
                         }
                 }
                 else
@@ -2382,15 +2509,7 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
                         *p++ = L' ';
                         for (int i = 0; i < 16; i++)
                         {
-                                if (off + (DWORD) i < cbUse)
-                                {
-                                        BYTE b = pBytes[off + i];
-                                        *p++ = (b >= 0x20 && b < 0x7F) ? (WCHAR) b : L'.';
-                                }
-                                else
-                                {
-                                        *p++ = L' ';
-                                }
+                                *p++ = (off + (DWORD) i < cbUse) ? am.w[pBytes[off + i]] : L' ';   // 3.02: LUT
                         }
                 }
                 *p++ = L'\r';
@@ -2402,7 +2521,12 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
                 FormatU64Locale(szFirst, _countof(szFirst), qwBase);
                 FormatU64Locale(szLast, _countof(szLast), qwBase + (ULONGLONG) cbUse);
                 FormatU64Locale(szTotal, _countof(szTotal), cbAll);
-                p -= 2;                                     // the notice replaces the final CRLF
+                // 3.02: the notice is a paragraph of its own, like the text views.
+                // It used to REPLACE the final CRLF, ending glued to the last
+                // dump line ("...MZ......[Hex view: ...]"); the +160 slack of the
+                // allocation covers the kept CRLF with room to spare.
+                *p++ = L'\r';
+                *p++ = L'\n';
                 p += wsprintfW(p, L"[Hex view: showing bytes %s-%s of %s]", szFirst, szLast, szTotal);
         }
         *p = L'\0';
@@ -2425,10 +2549,18 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
 // file (in particular on Win32, where address space is 2 GB): decode buffer
 // <= 2 x CB_TEXT_MAX bytes worst case, edit-control buffer the same. Returns
 // false ONLY on out-of-memory (bad_alloc); the caller reports it.
-bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch)
+bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen)
 {
         *ppText = nullptr;
         *pcch = 0;
+        if (pdwSrcOff != nullptr)
+        {
+                *pdwSrcOff = 0;                 // 3.02: window of source bytes the decode covered
+        }
+        if (pdwSrcLen != nullptr)
+        {
+                *pdwSrcLen = 0;
+        }
         if (pBytes == nullptr || cb == 0)
         {
                 return(true);                           // empty file: empty view
@@ -2493,6 +2625,14 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         }
                 }
                 cbShown = (DWORD) (cbSrc + (pSrc - (LPCCH) pBytes));
+                if (pdwSrcOff != nullptr)
+                {
+                        *pdwSrcOff = (DWORD) (pSrc - (LPCCH) pBytes);        // the BOM, when present
+                }
+                if (pdwSrcLen != nullptr)
+                {
+                        *pdwSrcLen = (DWORD) cbSrc;
+                }
                 pText = AllocViewText((DWORD) cbSrc + 1 + 160);       // + notice room
                 cch = 0;
                 if (cbSrc > 0)
@@ -2544,6 +2684,14 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         }
                 }
                 cbShown = (DWORD) (cwch * 2 + off);
+                if (pdwSrcOff != nullptr)
+                {
+                        *pdwSrcOff = off;                       // the BOM, when present
+                }
+                if (pdwSrcLen != nullptr)
+                {
+                        *pdwSrcLen = (DWORD) (cwch * 2);
+                }
                 pText = AllocViewText((DWORD) cwch + 1 + 160);
 #if WCHAR_MAX <= 0xFFFF
                 // Native build (2-byte WCHAR, little-endian): the source bytes
@@ -2583,6 +2731,14 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         }
                 }
                 cbShown = (DWORD) (cwch * 2 + off);
+                if (pdwSrcOff != nullptr)
+                {
+                        *pdwSrcOff = off;                       // the BOM, when present
+                }
+                if (pdwSrcLen != nullptr)
+                {
+                        *pdwSrcLen = (DWORD) (cwch * 2);
+                }
                 pText = AllocViewText((DWORD) cwch + 1 + 160);
                 for (int i = 0; i < cwch; i++)
                 {
@@ -2653,6 +2809,14 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                 }
                 cbShown = (DWORD) cbSrc;
                 bTruncated = (qwBase + (ULONGLONG) cbShown < cbAll);
+                if (pdwSrcOff != nullptr)
+                {
+                        *pdwSrcOff = 0;
+                }
+                if (pdwSrcLen != nullptr)
+                {
+                        *pdwSrcLen = cbShown;
+                }
                 pText = AllocViewText((DWORD) cbSrc + 1 + 160);
                 for (int i = 0; i < cbSrc; i++)
                 {
@@ -2669,6 +2833,14 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                 }
                 cbShown = (DWORD) cbSrc;
                 bTruncated = (qwBase + (ULONGLONG) cbShown < cbAll);
+                if (pdwSrcOff != nullptr)
+                {
+                        *pdwSrcOff = 0;
+                }
+                if (pdwSrcLen != nullptr)
+                {
+                        *pdwSrcLen = cbShown;
+                }
                 pText = AllocViewText((DWORD) cbSrc + 1 + 160);
                 cch = 0;
                 if (cbSrc > 0)                          // defensive symmetry with the UTF-8 path
@@ -3395,19 +3567,19 @@ void OpenFileDlg(void)
 // This is the V-style answer to 100 GB files on top of the EDIT control: any
 // file of ANY size opens in a bounded window, and the pages walk the whole
 // file at constant memory.
-void LoadPage(ULONGLONG qwBase, bool bTailJump)
+bool LoadPage(ULONGLONG qwBase, bool bTailJump)
 {
         if (g_pJob != nullptr)
         {
-                return;                         // one load at a time
+                return(false);                  // one load at a time
         }
         if (g_bInByteSearch)
         {
-                return;                         // a raw-file scan owns the UI right now
+                return(false);                  // a raw-file scan owns the UI right now
         }
         if (g_szCurrentFile[0] == L'\0')
         {
-                return;                         // stdin / clipboard / nothing: no pages
+                return(false);                  // stdin / clipboard / nothing: no pages
         }
         WCHAR szPath[MAX_PATH];
         lstrcpynW(szPath, g_szCurrentFile, MAX_PATH);
@@ -3416,7 +3588,7 @@ void LoadPage(ULONGLONG qwBase, bool bTailJump)
         LoadJob* pJob = BeginLoadJob(false);     // clears the viewer (also g_szCurrentFile)
         if (pJob == nullptr)
         {
-                return;                         // out of memory: BeginLoadJob already said so
+                return(false);                  // out of memory: BeginLoadJob already said so
         }
         lstrcpynW(pJob->szPath, szPath, MAX_PATH);
         // Clamp the base into the file (the size is from the load that is on
@@ -3435,6 +3607,7 @@ void LoadPage(ULONGLONG qwBase, bool bTailJump)
         pJob->bKeepView = true;
         pJob->bTailJump = bTailJump;
         LaunchLoadJob(pJob);
+        return(true);
 }
 
 
@@ -3803,6 +3976,13 @@ void GoToOffset(ULONGLONG qwOff)
                 MessageBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
                 return;
         }
+        if (g_bInByteSearch)
+        {
+                // 3.02: LoadPage rechazaría en silencio el trabajo; sin este aviso
+                // el usuario no sabe por qué el Go To no hace nada.
+                MessageBox(hWndMain, L"A raw-file search is running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
         if (g_cbFileTotal == 0)
         {
                 return;
@@ -3818,8 +3998,18 @@ void GoToOffset(ULONGLONG qwOff)
         }
         DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
         ULONGLONG qwBase = (qwOff / (ULONGLONG) cbPage) * (ULONGLONG) cbPage;
-        g_qwPendingGoto = qwOff;                // consumed in ApplyLoadResult
-        LoadPage(qwBase, false);
+        // 3.02: el goto diferido se arma SOLO si la página se aceptó. Antes un
+        // LoadPage rechazado (Find Bytes en marcha) dejaba g_qwPendingGoto
+        // huérfano y la siguiente página que sí cargara posicionaba el caret en
+        // un offset pedido minutos antes.
+        if (LoadPage(qwBase, false))
+        {
+                g_qwPendingGoto = qwOff;        // consumed in ApplyLoadResult
+        }
+        else
+        {
+                g_qwPendingGoto = (ULONGLONG) -1;       // refused: nothing stays pending
+        }
 }
 
 
@@ -3869,21 +4059,35 @@ bool LineAtOffset(ULONGLONG qwOff, int& riLine)
         }
         else                                    // ANSI, UTF-8, EBCDIC: byte-oriented
         {
-                for (DWORD i = 0; i < cbRel; i++)
+                // 3.02 (O3): the same memchr chain Find Bytes already uses, in
+                // place of the per-byte walk (Go To and every Find Bytes hit
+                // pass here). Equivalent to the old loop: every \n counts one
+                // line break, and a \r NOT followed by \n counts one too, so
+                // CRLF stays ONE break.
+                const BYTE* p = pFileBytes;
+                const BYTE* pEnd = pFileBytes + cbRel;
+                for (;;)
                 {
-                        BYTE b = pFileBytes[i];
-                        if (b == 0x0A)
+                        const BYTE* pLf = (const BYTE*) memchr(p, 0x0A, (size_t) (pEnd - p));
+                        if (pLf == nullptr)
                         {
-                                iLine++;
+                                break;
                         }
-                        else if (b == 0x0D)
+                        iLine++;                        // \n: a line break (half of CRLF or alone)
+                        p = pLf + 1;
+                }
+                for (;;)
+                {
+                        const BYTE* pCr = (const BYTE*) memchr(p, 0x0D, (size_t) (pEnd - p));
+                        if (pCr == nullptr)
                         {
-                                iLine++;
-                                if (i + 1 < cbRel && pFileBytes[i + 1] == 0x0A)
-                                {
-                                        i++;    // CRLF counts as ONE line break
-                                }
+                                break;
                         }
+                        if (pCr + 1 == pEnd || pCr[1] != 0x0A)
+                        {
+                                iLine++;                // lone \r: its own line break
+                        }
+                        p = pCr + 1;
                 }
         }
         riLine = iLine;
@@ -4040,6 +4244,15 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                                         int cb = WideCharToMultiByte(CP_UTF8, 0, szPat, -1, (LPSTR) bPat, (int) sizeof(bPat) - 1, nullptr, nullptr);
                                         if (cb <= 0)
                                         {
+                                                // 3.02: a pattern that does not FIT is not a
+                                                // conversion failure. Falling back to the ANSI code
+                                                // page would silently search for DIFFERENT bytes
+                                                // than the ones typed (accents/emoji): say so instead.
+                                                if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+                                                {
+                                                        MessageBoxW(hDlg, L"The pattern is too long (127 bytes maximum in UTF-8).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                                                        return (INT_PTR) TRUE;
+                                                }
                                                 cb = WideCharToMultiByte(CP_ACP, 0, szPat, -1, (LPSTR) bPat, (int) sizeof(bPat) - 1, nullptr, nullptr);
                                         }
                                         cbPat = (cb > 0) ? (DWORD) (cb - 1) : 0;   // without the terminator
@@ -4531,10 +4744,21 @@ void PaintGutter(void)
                 cLines = (int) SendMessage(hEdit, EM_GETLINECOUNT, 0, 0);
         }
         int iFirst = (int) SendMessage(hEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+        // 3.02 (O5): the whole column goes out in ONE PolyTextOutW call.
+        // Every visible line used to cost its own TextOutW round trip to GDI
+        // (40-160 of them on a normal repaint, every mouse-wheel scroll
+        // included). POLYTEXTW (wingdi.h) batches them: x/y name each label's
+        // cell, lpstr/n the text, uiFlags stays 0 (transparent: the strip fill
+        // above already did the background, no ETO_OPAQUE needed), rcl is only
+        // read with ETO_OPAQUE/ETO_CLIPPED and pdx nullptr means default
+        // character spacing. The 160-entry cap covers any realistic row count.
+        POLYTEXTW atxt[160];
+        WCHAR szLabels[160][24];                // a hex offset (at most 16 digits) or a line number
+        int ctxt = 0;
         int y = 0;
-        for (int iLine = iFirst; iLine < cLines && y + iHexLineH <= rcEdit.bottom; iLine++)
+        for (int iLine = iFirst; iLine < cLines && y + iHexLineH <= rcEdit.bottom && ctxt < 160; iLine++)
         {
-                WCHAR szLabel[24];              // a hex offset (at most 16 digits) or a line number
+                WCHAR* szLabel = szLabels[ctxt];
                 int cch;
                 if (bHex)
                 {
@@ -4561,8 +4785,22 @@ void PaintGutter(void)
                         WCHAR* pEnd = U64ToWide(szLabel, (ULONGLONG) (iLine + 1));
                         cch = (int) (pEnd - szLabel);
                 }
-                TextOutW(hdc, iW - 6 - cch * iHexCharW, y, szLabel, cch);    // right-aligned
+                atxt[ctxt].x = iW - 6 - cch * iHexCharW;      // right-aligned on the grid
+                atxt[ctxt].y = y;
+                atxt[ctxt].n = (UINT) cch;
+                atxt[ctxt].lpstr = szLabel;
+                atxt[ctxt].uiFlags = 0;         // transparent: the fill above did the background
+                atxt[ctxt].rcl.left = 0;
+                atxt[ctxt].rcl.top = 0;
+                atxt[ctxt].rcl.right = 0;
+                atxt[ctxt].rcl.bottom = 0;
+                atxt[ctxt].pdx = nullptr;      // default spacing: ExtTextOut's own metrics
+                ctxt++;
                 y += iHexLineH;
+        }
+        if (ctxt > 0)
+        {
+                PolyTextOutW(hdc, atxt, ctxt);           // one GDI call for the whole column
         }
         SelectObject(hdc, hOldFont);
         ReleaseDC(hWndMain, hdc);
@@ -4665,7 +4903,25 @@ BOOL ParseU64(LPCWSTR psz, ULONGLONG& rqw)
                 {
                         return(FALSE);         // hex letters without the 0x prefix
                 }
-                qw = bHex ? (qw << 4) + (ULONGLONG) d : (qw * 10) + (ULONGLONG) d;
+                // 3.02: refuse on overflow instead of wrapping modulo 2^64:
+                // 20 decimal digits exceed ULLONG_MAX almost always, and a
+                // wrapped "goto" lands the caret somewhere arbitrary.
+                if (bHex)
+                {
+                        if (qw > (((ULONGLONG) -1) >> 4))
+                        {
+                                return(FALSE);
+                        }
+                        qw = (qw << 4) + (ULONGLONG) d;
+                }
+                else
+                {
+                        if (qw > ((((ULONGLONG) -1) - (ULONGLONG) d) / 10))
+                        {
+                                return(FALSE);
+                        }
+                        qw = (qw * 10) + (ULONGLONG) d;
+                }
                 c++;
                 if (c > 20)
                 {

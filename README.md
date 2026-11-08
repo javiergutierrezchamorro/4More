@@ -1,6 +1,6 @@
 # 4More
 
-**A fast, read-only file viewer for Windows.** Plain Win32 API, no MFC, no runtime dependencies — one small executable that opens files of *any* size instantly: from a 100-byte note to a 100-gigabyte log.
+**A fast, read-only file viewer for Windows (x86 and x64).** Plain Win32 API, no MFC, no runtime dependencies — one small executable that opens files of *any* size instantly: from a 100-byte note to a 100-gigabyte log.
 
 <img width="1426" height="746" alt="image" src="https://github.com/user-attachments/assets/c715f80d-efa7-48c0-926d-8bac9b434eb8" />
 

@@ -1,4 +1,4 @@
-﻿// 4More.rc — recursos del visor (Build 3.00)
+﻿// 4More.rc — recursos del visor (Build 3.01)
 // Sin ficheros del asistente de Visual Studio (2.97): ni targetver.h ni
 // afxres.h, que no forman parte del SDK. Sólo windows.h + resource.h:
 // compila con rc.exe (MSVC) y con windres (MinGW-w64). Guardar en UTF-8

@@ -1,6 +1,35 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.03
+   Build 3.04
+
+   Novedades de la revisión 3.04 (SEGUNDA PASADA: SIMPLIFICAR Y ACELERAR):
+   - LA PASADA CRLF YA NO ESCANEA DOS VECES. El worker cuenta la expansión
+     sobre los BYTES crudos con memchr (CountCRLFExpansion, SIMD) y
+     NormalizeNewlines repetía el MISMO recuento carácter a carácter sobre
+     el texto decodificado (hasta ~32M WCHAR por carga). Ahora recibe la
+     cifra hecha (cExpandKnown) y salta su pasada de detección: un fichero
+     con EOL mixtos paga una pasada de copia, no dos escaneos más la copia.
+   - DETECTORES MÁS DELGADOS: UTF-16 sin BOM pierde el contador de
+     "tormenta de controles" (regla muerta: todo control cuenta también
+     como no-imprimible, así que la regla del ≤10% no-imprimible ya la
+     implica; un contador y dos ramas menos por palabra); el NUL binario
+     de IsBinaryData sale por memchr (SIMD, y para en el primero); el fin
+     de cadena del portapapeles va por memchr (ANSI) y wmemchr (UTF-16).
+   - SIMPLIFICACIÓN: la medida de página "(iView==HEX)?CB_HEX_MAX:
+     CB_TEXT_MAX" vivía repetida en 6 sitios y la base "(cb>cbPage)?
+     cb-cbPage:0" en 4: PageCapBytes() y LastPageBase() las centralizan
+     (LoadPage aprovecha para clampear y alinear ANTES de BeginLoadJob,
+     mientras iView/g_cbFileTotal aún son los de la página en pantalla);
+     GetViewSubMenu y GetFileSubMenu eran dos gemelos: un solo
+     FindSubMenuWithCommand.
+   - 3 CORRECCIONES: View Clipboard as File durante Find Bytes entraba sin
+     mirar g_bInByteSearch y su ResetViewer borraba g_szCurrentFile
+     mientras el hilo de búsqueda la leía para CreateFileW (carrera; ahora
+     se niega con aviso, como todas las cargas); Find Bytes con otra
+     búsqueda ya en marcha respondía en silencio (ahora avisa, la misma
+     cortesía que Go To desde 3.02); Ctrl+PgDn/PgUp sobre stdin/clipboard
+     se consumían sin efecto — sin páginas que saltar, caminan el caret a
+     los extremos de lo mostrado, como Ctrl+Fin/Inicio (3.01).
 
    Novedades de la revisión 3.03 (REVISIÓN EXTERNA: ATAJOS, TAIL Y CORRECCIÓN):
    - LOS ACELERADORES NO LLEGABAN. El bucle de mensajes llamaba a
@@ -199,6 +228,7 @@
 
 #include <new>                                  // std::bad_alloc, std::nothrow
 #include <string.h>                             // memchr/memcmp: the Find Bytes scan (3.00)
+#include <wchar.h>                              // wmemchr: clipboard NUL scan (3.04)
 
 #ifdef _WIN32
 #include <process.h>                            // _beginthreadex
@@ -242,7 +272,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.03"
+#define APP_VERSION L"3.04"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -420,8 +450,8 @@ void UpdateHexMetrics(void);                    // line height / column width of
 void LayoutEdit(void);                          // size + place the edit control (hex offset column aware)
 void OpenFindDialog(HWND hWnd);
 void SearchNext(HWND hWnd, bool bShowError);
-WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut);   // 3.00: answers the length; nullptr = OOM
-HMENU GetViewSubMenu(HWND hWnd);
+WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown = -1);   // 3.00: answers the length; nullptr = OOM. 3.04: cExpandKnown >= 0 skips the count pass
+HMENU FindSubMenuWithCommand(HWND hWnd, UINT uCommand);   // the bar popup owning a command (3.04: one walker for View and File)
 void UpdateViewMenu(void);
 void SetView(int iNewView);
 void ApplyView(void);
@@ -465,10 +495,11 @@ void NextBookmark(bool bForward);
 void ClearBookmarks(void);
 void StatusFlash(LPCWSTR pszText);              // one-shot status bar note (next update restores)
 int GutterWidth(void);                          // painted column width: hex offsets / line numbers
+DWORD PageCapBytes(void);                       // 3.04: bytes per page of the ACTIVE view (the loader/dump caps)
+ULONGLONG LastPageBase(ULONGLONG cbSize);       // 3.04: base of the last full page ending at cbSize
 void PaintGutter(void);                         // 3.00: the one column painter (hex / line numbers)
 BOOL ParseU64(LPCWSTR psz, ULONGLONG& rqw);      // decimal or 0x hex, no CRT dependency
 void JumpFilePage(bool bLast);                  // Ctrl+Home/End: first / last page of the file
-HMENU GetFileSubMenu(HWND hWnd);                // the File popup of the window's menu bar
 void AddRecentEntry(LPCWSTR pszEntry);          // MRU: promote/prepend + rebuild the menu
 void RebuildRecentMenu(void);                   // refill the Recent popup from g_szRecent
 void EnsureRecentMenu(void);                    // create the popup + its menu item, once
@@ -940,11 +971,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                                 // window forever, so the bytes arriving past the cap
                                                 // never reached the screen.
                                                 bool bFollowEnd = (g_qwBase + cbFile >= g_cbFileTotal);
-                                                ULONGLONG cbPageCap = (iView == VIEW_HEX) ? (ULONGLONG) CB_HEX_MAX : (ULONGLONG) CB_TEXT_MAX;
                                                 ULONGLONG qwBase = g_qwBase;
-                                                if (bFollowEnd && cbFile >= cbPageCap)
+                                                if (bFollowEnd && cbFile >= PageCapBytes())
                                                 {
-                                                        qwBase = (cbSize > cbPageCap) ? (cbSize - cbPageCap) : 0;
+                                                        qwBase = LastPageBase(cbSize);
                                                 }
                                                 LoadPage(qwBase, bFollowEnd);
                                         }
@@ -1218,7 +1248,18 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
                                 }
                                 if (bPageNow)
                                 {
-                                        ChangePage(iDir);
+                                        if (g_szCurrentFile[0] == L'\0')
+                                        {
+                                                // 3.04: stdin/clipboard have no pages to change; the
+                                                // keys still must not die (the 3.01 rule). They walk
+                                                // the caret to the ends of the text on screen, the
+                                                // same meaning Ctrl+End/Home already have there.
+                                                JumpFilePage(iDir > 0);
+                                        }
+                                        else
+                                        {
+                                                ChangePage(iDir);
+                                        }
                                         return(0);
                                 }
                                 break;          // stdin/clipboard, or mid-page: the EDIT scrolls
@@ -1364,24 +1405,34 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 // without copying anything. If expansion is needed, a new one is built with
 // the exact size; the caller must free the returned pointer with FreeViewText and, if it
 // differs from the original, the original too.
-WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut)
+// 3.04: cExpandKnown >= 0 hands in the expansion count already computed on
+// the RAW BYTES (CountCRLFExpansion, memchr/SIMD); for the 1-byte views that
+// count IS the character count, so the per-WCHAR walk below (up to ~32M
+// characters per load) would be pure duplicate work. Any other caller
+// passes -1 and gets the self-contained detection pass as before.
+WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown)
 {
-        // 1) Detection and counting in a single pass.
-        int cExpand = 0;
-        for (int i = 0; i < cch; i++)
+        // 1) Detection and counting in a single pass (skipped when the
+        //    caller already counted on the bytes).
+        int cExpand = cExpandKnown;
+        if (cExpand < 0)
         {
-                if (pacText[i] == L'\r')
+                cExpand = 0;
+                for (int i = 0; i < cch; i++)
                 {
-                        if (i + 1 >= cch || pacText[i + 1] != L'\n')
+                        if (pacText[i] == L'\r')
                         {
-                                cExpand++;
+                                if (i + 1 >= cch || pacText[i + 1] != L'\n')
+                                {
+                                        cExpand++;
+                                }
                         }
-                }
-                else if (pacText[i] == L'\n')
-                {
-                        if (i == 0 || pacText[i - 1] != L'\r')
+                        else if (pacText[i] == L'\n')
                         {
-                                cExpand++;
+                                if (i == 0 || pacText[i - 1] != L'\r')
+                                {
+                                        cExpand++;
+                                }
                         }
                 }
         }
@@ -1938,20 +1989,29 @@ void RunLoadJob(LoadJob *pJob)
                         // and ANSI/UTF-8 ask the memchr preview (O2) whether any
                         // lone \r or \n exists before paying the full pass.
                         bool bNeedNorm = true;
+                        int cExpand = -1;               // -1: NormalizeNewlines counts it itself
                         if (pJob->iDetected == VIEW_EBCDIC)
                         {
                                 bNeedNorm = false;               // the decode never produced \r or \n
                         }
-                        else if ((pJob->iDetected == VIEW_ANSI || pJob->iDetected == VIEW_UTF8) &&
-                                 dwSrcLen > 0 &&
-                                 CountCRLFExpansion(pJob->pBytes + dwSrcOff, dwSrcLen) == 0)
+                        else if (pJob->iDetected == VIEW_ANSI || pJob->iDetected == VIEW_UTF8)
                         {
-                                bNeedNorm = false;               // already all CRLF: deliver as is
+                                if (dwSrcLen > 0)
+                                {
+                                        // 3.04: the byte-level count IS the character count for
+                                        // the 1-byte views; hand it over so the normalizer skips
+                                        // its own full scan of the decoded text.
+                                        cExpand = CountCRLFExpansion(pJob->pBytes + dwSrcOff, dwSrcLen);
+                                        if (cExpand == 0)
+                                        {
+                                                bNeedNorm = false;               // already all CRLF: deliver as is
+                                        }
+                                }
                         }
                         if (bNeedNorm && pJob->iDetected != VIEW_HEX && pText != nullptr && cch > 0)
                         {
                                 ULONGLONG dwT2 = GetTickCount64();      // /timing: the CRLF pass runs here
-                                pNorm = NormalizeNewlines(pText, (int) cch, &cchNorm);
+                                pNorm = NormalizeNewlines(pText, (int) cch, &cchNorm, cExpand);
                                 g_msNormalize = GetTickCount64() - dwT2;
                         }
                         if (pNorm == nullptr)
@@ -2072,9 +2132,7 @@ void ApplyLoadResult(LoadJob *pJob)
                         g_bTailJumpFirst = false;
                         if (g_bTail && !pJob->bStdin && !pJob->bOpenFailed && g_szCurrentFile[0] != L'\0')
                         {
-                                DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
-                                ULONGLONG qwBase = (g_cbFileTotal > (ULONGLONG) cbPage) ? (g_cbFileTotal - (ULONGLONG) cbPage) : 0;
-                                LoadPage(qwBase, true);
+                                LoadPage(LastPageBase(g_cbFileTotal), true);
                         }
                 }
                 if (pJob->bTailJump && hEdit != nullptr)
@@ -2145,20 +2203,22 @@ void LoadFileSync(void)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// TRUE when the content is not plain text: any NUL byte is binary for sure;
-// otherwise, a significant share of control characters also is (executables,
-// images, compressed data...). Tab, line breaks, form feed and escape are
-// accepted as text.
+// TRUE when the content is not plain text. 3.04: the NUL test — binary for
+// sure, and the usual first verdict for executables, images and compressed
+// data — goes through memchr: the CRT's SIMD scan, and it STOPS at the
+// first hit instead of testing every byte. The control share keeps its own
+// walk, now without the NUL branch (memchr already answered it).
+// Tab, line breaks, form feed and escape are accepted as text.
 bool IsBinaryData(const BYTE* pBytes, DWORD cb)
 {
+        if (cb > 0 && memchr(pBytes, 0x00, cb) != nullptr)
+        {
+                return(true);                   // any NUL byte: binary for sure
+        }
         DWORD cCtrl = 0;
         for (DWORD i = 0; i < cb; i++)
         {
                 BYTE b = pBytes[i];
-                if (b == 0x00)
-                {
-                        return(true);
-                }
                 if ((b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0C && b != 0x0D && b != 0x1B) || b == 0x7F)
                 {
                         cCtrl++;
@@ -2271,16 +2331,16 @@ void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull)
 
 /* -------------------------------------------------------------------------------------------- */
 // TRUE when the bytes look like UTF-16 LE text WITHOUT a BOM. One pass over
-// the NUL bytes, one pass over the decoded words (both decision counters in
-// the same loop), three rules in order:
+// the NUL bytes, one pass over the decoded words, two rules in order:
 //   1) Real UTF-16 text of ordinary content carries a large share of zero
 //      bytes (the high half of Latin characters): at least ~25%. ANSI or
 //      UTF-8 text has none, so this alone rejects almost every false friend.
-//   2) The decoded words must not be a control-character storm (more than
-//      30% of them controls), which is what NUL-rich binary files (MZ/PE
-//      headers) decode to (0x0000, 0x0003, 0x0090...).
-//   3) The decoded text must be at least 90% printable.
-// Tab, CR, LF, FF and ESC are accepted as text in all rules.
+//   2) The decoded text must be at least 90% printable (DEL and the
+//      FFF0..FFFF zone count as not printable; Tab, CR, LF, FF and ESC are
+//      accepted as text). 3.04: the old middle rule ("control storm above
+//      30% rejects") was dead weight: every control it counted is also
+//      counted by the printability rule, so a text printable enough to pass
+//      this rule could never trip it. One counter, same verdicts.
 // Deterministic on every Windows version, and no Advapi32 import needed.
 // NOTE: the old IsTextUnicode (Advapi32) is gone. It was happy to call an
 // executable header "Unicode" (MZ/PE headers are full of 00 00 words) and
@@ -2304,7 +2364,7 @@ bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
                 return(false);
         }
         DWORD cwch = cb / 2;
-        DWORD cCtrl = 0, cBad = 0;
+        DWORD cBad = 0;
         for (DWORD i = 0; i < cwch; i++)
         {
                 WCHAR wch = (WCHAR) (pBytes[i * 2] | ((WCHAR) pBytes[i * 2 + 1] << 8));
@@ -2312,18 +2372,10 @@ bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
                 {
                         continue;                       // accepted text controls
                 }
-                if (wch < 0x20 || wch == 0x7F)
-                {
-                        cCtrl++;                        // feeds the control-storm rule
-                }
                 if (wch < 0x20 || wch == 0x7F || wch >= 0xFFF0)
                 {
-                        cBad++;                         // feeds the printability rule (DEL + the FFF0..FFFF zone)
+                        cBad++;                         // controls + DEL + the FFF0..FFFF zone
                 }
-        }
-        if (cwch > 0 && (unsigned long long) cCtrl * 10 > (unsigned long long) cwch * 3)
-        {
-                return(false);                          // control storm: binary, not text
         }
         return((unsigned long long) cBad * 10 <= cwch); // >= 90% printable
 }
@@ -3144,9 +3196,12 @@ BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// Handle of the "View" popup, located by its command IDs (robust against
-// future menu reorderings).
-HMENU GetViewSubMenu(HWND hWnd)
+// The popup of the menu bar that owns a command, located by that command ID
+// (robust against future menu reorderings). 3.04: one walker where 3.03 kept
+// two near-twins — GetViewSubMenu (answered to ID_VIEW_ANSI) and
+// GetFileSubMenu (ID_FILE_OPEN, plus a first-popup fallback kept at its call
+// site below).
+HMENU FindSubMenuWithCommand(HWND hWnd, UINT uCommand)
 {
         HMENU hMenu = GetMenu(hWnd);
         if (hMenu == nullptr)
@@ -3157,9 +3212,17 @@ HMENU GetViewSubMenu(HWND hWnd)
         for (int i = 0; i < cMenus; i++)
         {
                 HMENU hSub = GetSubMenu(hMenu, i);
-                if (hSub != nullptr && GetMenuState(hSub, ID_VIEW_ANSI, MF_BYCOMMAND) != (UINT) -1)
+                if (hSub != nullptr)
                 {
-                        return(hSub);
+                        MENUITEMINFOW mii = {};
+                        mii.cbSize = sizeof(mii);
+                        mii.fMask = MIIM_ID;
+                        // By COMMAND, not by position: TRUE when this submenu
+                        // carries the command as one of its own items.
+                        if (GetMenuItemInfoW(hSub, uCommand, FALSE, &mii) && mii.wID == uCommand)
+                        {
+                                return(hSub);
+                        }
                 }
         }
         return(nullptr);
@@ -3176,7 +3239,7 @@ void UpdateViewMenu(void)
         {
                 return;
         }
-        HMENU hViewMenu = GetViewSubMenu(hWndMain);
+        HMENU hViewMenu = FindSubMenuWithCommand(hWndMain, ID_VIEW_ANSI);
         if (hViewMenu != nullptr)
         {
                 CheckMenuRadioItem(hViewMenu, ID_VIEW_ANSI, ID_VIEW_EBCDIC, ID_VIEW_ANSI + iView, MF_BYCOMMAND);
@@ -3663,6 +3726,31 @@ void OpenFileDlg(void)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// Bytes per page of the ACTIVE view: the display cap the loader obeys for
+// text (CB_TEXT_MAX) or the hex dump (CB_HEX_MAX). 3.04: one function where
+// the ternary lived copied in six places (ChangePage, GoToOffset,
+// JumpFilePage, ToggleTail, the tail timer, the tail jump of a fresh load).
+// NOT usable inside LoadPage after BeginLoadJob: ResetViewer (inside it)
+// resets iView — LoadPage clamps before that call instead.
+DWORD PageCapBytes(void)
+{
+        return(iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// The base of the LAST full page that ends at cbSize (0 when the content
+// fits in one page). 3.04: the shared tail of Ctrl+End, Tail File, the tail
+// timer's re-anchor, the tail jump of a fresh load — and Previous Page,
+// which steps the same distance back from the base on screen.
+ULONGLONG LastPageBase(ULONGLONG cbSize)
+{
+        ULONGLONG cbPage = PageCapBytes();
+        return(cbSize > cbPage) ? (cbSize - cbPage) : 0;
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
 // The paged view. The bytes on screen are a WINDOW of the file: at most
 // CB_TEXT_MAX source bytes (CB_HEX_MAX in hexadecimal) starting at g_qwBase.
 // Loading another page is the same async job as a fresh file, with two
@@ -3685,27 +3773,28 @@ bool LoadPage(ULONGLONG qwBase, bool bTailJump)
         {
                 return(false);                  // stdin / clipboard / nothing: no pages
         }
+        // 3.04: clamp and alignment happen HERE, before BeginLoadJob — its
+        // ResetViewer resets iView/g_cbFileTotal, so the caps of the page on
+        // screen are only honest up to this point.
+        if (g_cbFileTotal > 0 && qwBase >= g_cbFileTotal)
+        {
+                // Clamp the base into the file (the size is from the load that is on
+                // screen; a file that shrank below it is caught by the open/size path).
+                qwBase = LastPageBase(g_cbFileTotal);
+        }
+        if (iView == VIEW_HEX)
+        {
+                qwBase = (qwBase / 16) * 16;     // hex pages start 16-byte aligned
+        }
         WCHAR szPath[MAX_PATH];
         lstrcpynW(szPath, g_szCurrentFile, MAX_PATH);
         int iKeepView = iView;
-        ULONGLONG cbTotal = g_cbFileTotal;
         LoadJob* pJob = BeginLoadJob(false);     // clears the viewer (also g_szCurrentFile)
         if (pJob == nullptr)
         {
                 return(false);                  // out of memory: BeginLoadJob already said so
         }
         lstrcpynW(pJob->szPath, szPath, MAX_PATH);
-        // Clamp the base into the file (the size is from the load that is on
-        // screen; a file that shrank below it is caught by the open/size path).
-        if (cbTotal > 0 && qwBase >= cbTotal)
-        {
-                DWORD cbPage = (iKeepView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
-                qwBase = (cbTotal > (ULONGLONG) cbPage) ? (cbTotal - (ULONGLONG) cbPage) : 0;
-        }
-        if (iKeepView == VIEW_HEX)
-        {
-                qwBase = (qwBase / 16) * 16;     // hex pages start 16-byte aligned
-        }
         pJob->qwBase = qwBase;
         pJob->iDetected = iKeepView;            // keep the view the user is reading
         pJob->bKeepView = true;
@@ -3726,7 +3815,6 @@ void ChangePage(int iDir)
         {
                 return;                         // nothing to page through
         }
-        DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
         ULONGLONG qwBase;
         if (iDir > 0)
         {
@@ -3744,7 +3832,7 @@ void ChangePage(int iDir)
                         MessageBeep(MB_ICONASTERISK);   // the first page is on screen
                         return;
                 }
-                qwBase = (g_qwBase > (ULONGLONG) cbPage) ? (g_qwBase - (ULONGLONG) cbPage) : 0;
+                qwBase = LastPageBase(g_qwBase);        // a full page back, never before 0
         }
         LoadPage(qwBase, false);
 }
@@ -3772,7 +3860,6 @@ void JumpFilePage(bool bLast)
                 SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
                 return;
         }
-        DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
         if (!bLast)
         {
                 if (g_qwBase == 0)
@@ -3789,7 +3876,7 @@ void JumpFilePage(bool bLast)
         }
         // Last page: load the final window of the file. LoadPage(bTailJump=
         // true) lands the caret on the last line, tail style.
-        ULONGLONG qwBase = (g_cbFileTotal > (ULONGLONG) cbPage) ? (g_cbFileTotal - (ULONGLONG) cbPage) : 0;
+        ULONGLONG qwBase = LastPageBase(g_cbFileTotal);
         if (g_qwBase == qwBase)
         {
                 // Already on the last page: just walk the caret to the very
@@ -3836,9 +3923,7 @@ void ToggleTail(void)
                 if (g_szCurrentFile[0] != L'\0' && g_cbFileTotal > 0)
                 {
                         // Start from the END of the file, like a tail tool.
-                        DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
-                        ULONGLONG qwBase = (g_cbFileTotal > (ULONGLONG) cbPage) ? (g_cbFileTotal - (ULONGLONG) cbPage) : 0;
-                        LoadPage(qwBase, true);
+                        LoadPage(LastPageBase(g_cbFileTotal), true);
                 }
         }
         else if (hWndMain != nullptr)
@@ -4100,8 +4185,8 @@ void GoToOffset(ULONGLONG qwOff)
                 PositionAtOffset(qwOff);        // the offset is already on screen
                 return;
         }
-        DWORD cbPage = (iView == VIEW_HEX) ? (DWORD) CB_HEX_MAX : (DWORD) CB_TEXT_MAX;
-        ULONGLONG qwBase = (qwOff / (ULONGLONG) cbPage) * (ULONGLONG) cbPage;
+        ULONGLONG cbPage = PageCapBytes();
+        ULONGLONG qwBase = (qwOff / cbPage) * cbPage;
         // 3.02: el goto diferido se arma SOLO si la página se aceptó. Antes un
         // LoadPage rechazado (Find Bytes en marcha) dejaba g_qwPendingGoto
         // huérfano y la siguiente página que sí cargara posicionaba el caret en
@@ -4398,7 +4483,10 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
         }
         if (g_bInByteSearch)
         {
-                return;                         // one search at a time (the gate reopens on WM_APP_SEARCHDONE)
+                // 3.04: a silent return read as "the button did nothing". Same
+                // courtesy Go To has shown since 3.02.
+                MessageBox(hWndMain, L"A raw-file search is already running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
         }
         // The pattern dies with the dialog call: copy it to the worker's slot.
         // The dialog already bounds it, but a flat copy keeps the worker simple.
@@ -4525,6 +4613,15 @@ void ViewClipboardAsFile(void)
         {
                 return;
         }
+        if (g_bInByteSearch)
+        {
+                // 3.04: the ResetViewer below clears g_szCurrentFile while the
+                // search worker may still be reading it for CreateFileW, and
+                // drops the raw bytes under its feet. The clipboard waits, like
+                // every other load.
+                MessageBox(hWndMain, L"A raw-file search is running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
+                return;
+        }
         if (!OpenClipboard(hWndMain))
         {
                 MessageBox(hWndMain, L"Could not open the clipboard.", szTitle, MB_OK | MB_ICONWARNING);
@@ -4537,15 +4634,11 @@ void ViewClipboardAsFile(void)
         if (pwsz != nullptr)
         {
                 SIZE_T cbMem = GlobalSize(hMem);
-                int cch = (int) (cbMem / sizeof(WCHAR));
-                for (int i = 0; i < cch; i++)
-                {
-                        if (pwsz[i] == L'\0')
-                        {
-                                cch = i;
-                                break;              // GlobalSize can over-report: trust the NUL
-                        }
-                }
+                // GlobalSize can over-report: trust the NUL. 3.04: wmemchr does
+                // the scan (byte memchr would hit the LOW byte of characters
+                // like U+0100 and cut the text short).
+                const WCHAR* pNul = (const WCHAR*) wmemchr(pwsz, L'\0', cbMem / sizeof(WCHAR));
+                int cch = (pNul != nullptr) ? (int) (pNul - pwsz) : (int) (cbMem / sizeof(WCHAR));
                 if (cch > (int) (CB_TEXT_MAX / 2))
                 {
                         cch = (int) (CB_TEXT_MAX / 2);       // the text cap applies here too
@@ -4575,15 +4668,10 @@ void ViewClipboardAsFile(void)
                 if (psz != nullptr)
                 {
                         SIZE_T cbMem = GlobalSize(hAnsi);
-                        int cbSrc = (int) cbMem;
-                        for (int i = 0; i < cbSrc; i++)
-                        {
-                                if (psz[i] == '\0')
-                                {
-                                        cbSrc = i;
-                                        break;
-                                }
-                        }
+                        // 3.04: the terminating NUL comes out of one memchr (the
+                        // CRT's SIMD scan) instead of a byte-at-a-time walk.
+                        const char* pNul = (const char*) memchr(psz, '\0', cbMem);
+                        int cbSrc = (pNul != nullptr) ? (int) (pNul - psz) : (int) cbMem;
                         // 3.03: the BYTE cap lands BEFORE measuring the conversion.
                         // ANSI never yields more characters than bytes (SBCS maps
                         // 1:1, DBCS folds pairs), so cch below always fits. The old
@@ -5007,9 +5095,17 @@ BOOL ParseU64(LPCWSTR psz, ULONGLONG& rqw)
                 {
                         d = (int) (wch - L'a' + 10);
                 }
-                else if (wch == L' ' && *psz == L'\0')
+                else if (wch == L' ')
                 {
-                        break;                 // trailing space: tolerated
+                        while (*psz == L' ')
+                        {
+                                psz++;                  // 3.04: ANY number of trailing spaces, not just one
+                        }
+                        if (*psz == L'\0')
+                        {
+                                break;                  // end of input: the spaces were trailing
+                        }
+                        return(FALSE);                  // a space in the middle: refuse
                 }
                 else
                 {
@@ -5295,39 +5391,6 @@ void SaveSettings(void)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// The File popup of the main menu bar: the one that owns ID_FILE_OPEN.
-// Every menu the program owns is reachable from the bar, so a linear walk
-// of the submenus is both correct and instant.
-HMENU GetFileSubMenu(HWND hWnd)
-{
-        HMENU hBar = GetMenu(hWnd);
-        if (hBar == nullptr)
-        {
-                return(nullptr);
-        }
-        int cMenus = GetMenuItemCount(hBar);
-        for (int i = 0; i < cMenus; i++)
-        {
-                HMENU hSub = GetSubMenu(hBar, i);
-                if (hSub != nullptr)
-                {
-                        MENUITEMINFOW mii = {};
-                        mii.cbSize = sizeof(mii);
-                        mii.fMask = MIIM_ID;
-                        // uItem is a command ID here (fByPosition = FALSE):
-                        // TRUE means "this submenu carries the Open command".
-                        if (GetMenuItemInfoW(hSub, ID_FILE_OPEN, FALSE, &mii) && mii.wID == ID_FILE_OPEN)
-                        {
-                                return(hSub);
-                        }
-                }
-        }
-        // Fallback (never expected): the first popup is File.
-        return(GetSubMenu(hBar, 0));
-}
-
-
-/* -------------------------------------------------------------------------------------------- */
 // Creates the Recent popup and its menu entry, once, at WM_CREATE. After
 // this, AddRecentEntry only refills it. Inserted right before Exit with a
 // separator, in File-menu tradition; "(empty)" grays out until a first
@@ -5338,7 +5401,13 @@ void EnsureRecentMenu(void)
         {
                 return;
         }
-        HMENU hFile = GetFileSubMenu(hWndMain);
+        HMENU hFile = FindSubMenuWithCommand(hWndMain, ID_FILE_OPEN);
+        if (hFile == nullptr)
+        {
+                // Fallback (never expected): the first popup is File.
+                HMENU hBar = GetMenu(hWndMain);
+                hFile = (hBar != nullptr) ? GetSubMenu(hBar, 0) : nullptr;
+        }
         if (hFile == nullptr)
         {
                 return;

@@ -1,4 +1,10 @@
-﻿// 4More.rc — recursos del visor (Build 3.03)
+﻿// 4More.rc — recursos del visor (Build 3.04)
+//
+// 3.04: NI MENÚ NI ACELERADORES CAMBIAN. La segunda pasada de revisión fue
+// para el .cpp (la pasada CRLF escanea una vez, detectores más delgados,
+// dos gemelos menos) y para correcciones que no tocan recursos. Compilar
+// junto al 4More.cpp 3.04 (APP_VERSION ya dice "3.04") y el About lo
+// mostrará solo.
 //
 // 3.03: Next/Previous Page anuncian PgDn/PgUp (las teclas las atiende
 // el subclass del EDIT con semántica de pager: la página se desplaza

@@ -1,11 +1,43 @@
-﻿// 4More.rc — recursos del visor (Build 2.98)
+﻿// 4More.rc — recursos del visor (Build 3.00)
 // Sin ficheros del asistente de Visual Studio (2.97): ni targetver.h ni
 // afxres.h, que no forman parte del SDK. Sólo windows.h + resource.h:
 // compila con rc.exe (MSVC) y con windres (MinGW-w64). Guardar en UTF-8
 // con BOM y finales de línea CRLF.
+//
+// MANIFEST (2.99): "1 24" embebe 4More.manifest como RT_MANIFEST de id 1.
+// La dependencia de Common-Controls 6.0 es lo que hace que los botones,
+// radios y checkboxes de los diálogos pinten con el look moderno de
+// Windows (sin él, el sistema sirve la versión 5 de 1995). supportedOS
+// (8.1/10/11) y dpiAware van en el mismo fichero.
+//
+// OJO, PROYECTOS MSVC: Visual Studio incrusta POR DEFECTO su propio
+// manifiesto (UAC) con el MISMO id de recurso 1 y el MISMO idioma
+// (0x0409). En cuanto este .rc también trae el suyo, el enlace muere con:
+//     "recurso duplicado. Tipo:MANIFEST, nombre: 1, idioma: 0x0409"
+//     "error durante la conversión a COFF: archivo no válido o dañado"
+//     (CVT1100 / LNK1123; el "dañado" es engañoso: nada está dañado,
+//      sólo hay DOS manifiestos id 1).
+// Dos arreglos, a elegir:
+//   A) Propiedades → Enlazador → Archivo de manifiesto → Crear
+//      manifiesto = No (/MANIFEST:NO). RECOMENDADO: el del .rc queda
+//      como único y windres/MinGW sigue igual.
+//   B) Propiedades → Recursos → Preprocesador → Definiciones de
+//      preprocesador: añadir NO_RC_MANIFEST (la línea de abajo se
+//      desactiva), y que VS incruste el manifiesto él mismo:
+//      Propiedades → Herramienta Manifiesto → Manifiesto de entrada
+//      = 4More.manifest.
+// MinGW no se ve afectado: windres no genera manifiesto propio.
 
 #include "windows.h"
 #include "resource.h"
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Manifest
+
+#ifndef NO_RC_MANIFEST
+1 24 "4More.manifest"
+#endif
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -46,22 +78,22 @@ BEGIN
         MENUITEM "&UTF-8",                              ID_VIEW_UTF8
         MENUITEM "&Unicode (UTF-16 LE)",                ID_VIEW_UNICODE
         MENUITEM "UTF-16 &BE",                          ID_VIEW_UTF16BE
-        MENUITEM "&EBCDIC",                              ID_VIEW_EBCDIC
+        MENUITEM "&EBCDIC",                             ID_VIEW_EBCDIC
         MENUITEM "&Hexadecimal",                        ID_VIEW_HEX
         MENUITEM SEPARATOR
         MENUITEM "&Next Page\tCtrl+PgDn",               ID_VIEW_NEXTPAGE
         MENUITEM "&Previous Page\tCtrl+PgUp",           ID_VIEW_PREVPAGE
-        MENUITEM "&Refresh\tF5",                        ID_VIEW_REFRESH
+        MENUITEM "&Refresh\tF5",                         ID_VIEW_REFRESH
         MENUITEM "&Tail File\tCtrl+T",                  ID_VIEW_TAIL
-        MENUITEM "&Line Numbers",                       ID_VIEW_LINENUMS
-        MENUITEM "&Word Wrap",                          ID_VIEW_WRAP
+        MENUITEM "&Line Numbers",                        ID_VIEW_LINENUMS
+        MENUITEM "&Word Wrap",                           ID_VIEW_WRAP
         MENUITEM SEPARATOR
-        MENUITEM "Font &+\tCtrl++",                     ID_VIEW_FONTPLUS
-        MENUITEM "Font &-\tCtrl+-",                     ID_VIEW_FONTMINUS
+        MENUITEM "Font &+\tCtrl++",                      ID_VIEW_FONTPLUS
+        MENUITEM "Font &-\tCtrl+-",                      ID_VIEW_FONTMINUS
     END
     POPUP "&Help"
     BEGIN
-        MENUITEM "&About 4More...",                     ID_ABOUT
+        MENUITEM "&About 4More...",                      ID_ABOUT
     END
 END
 
@@ -82,7 +114,7 @@ BEGIN
     VK_F2,          ID_EDIT_NEXTBOOKMARK,   VIRTKEY, SHIFT, NOINVERT
     VK_F2,          ID_EDIT_PREVBOOKMARK,   VIRTKEY, CONTROL, NOINVERT
     VK_F3,          ID_FINDNEXT,             VIRTKEY, NOINVERT
-    VK_F5,          ID_VIEW_REFRESH,         VIRTKEY, NOINVERT
+    VK_F5,          ID_VIEW_REFRESH,        VIRTKEY, NOINVERT
     VK_NEXT,        ID_VIEW_NEXTPAGE,       VIRTKEY, CONTROL, NOINVERT
     VK_PRIOR,       ID_VIEW_PREVPAGE,       VIRTKEY, CONTROL, NOINVERT
     // Fuente: fila principal (= / _) y numpad (+ / -). El subclass del
@@ -103,11 +135,12 @@ IDI_SMALL             ICON                   "small.ico"
 
 /////////////////////////////////////////////////////////////////////////////
 // Cuadro Acerca de
+// Fuente "MS Shell Dlg 2" (Tahoma) desde 2.99: la clásica de Common-Controls 6.
 
 IDD_ABOUTBOX DIALOGEX 22, 17, 230, 102
 STYLE DS_MODALFRAME | WS_CAPTION | WS_SYSMENU | WS_POPUP
 CAPTION "About 4More"
-FONT 8, "MS Shell Dlg", 400, 0, 0x1
+FONT 8, "MS Shell Dlg 2", 400, 0, 0x1
 BEGIN
     ICON            IDI_MY4MORE, IDC_STATIC, 10, 10, 21, 20, SS_REALSIZECONTROL
     LTEXT           "4More", IDC_STATIC, 42, 10, 178, 8, SS_NOPREFIX
@@ -125,7 +158,7 @@ END
 IDD_GOTO DIALOGEX 0, 0, 264, 92
 STYLE DS_MODALFRAME | WS_CAPTION | WS_SYSMENU | WS_POPUP
 CAPTION "Go To"
-FONT 8, "MS Shell Dlg", 400, 0, 0x1
+FONT 8, "MS Shell Dlg 2", 400, 0, 0x1
 BEGIN
     LTEXT           "Go to:", IDC_STATIC, 12, 12, 40, 8
     CONTROL         "&Line", IDC_GOTO_LINE, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 60, 10, 40, 10
@@ -143,7 +176,7 @@ END
 IDD_FINDBYTES DIALOGEX 0, 0, 264, 116
 STYLE DS_MODALFRAME | WS_CAPTION | WS_SYSMENU | WS_POPUP
 CAPTION "Find Bytes"
-FONT 8, "MS Shell Dlg", 400, 0, 0x1
+FONT 8, "MS Shell Dlg 2", 400, 0, 0x1
 BEGIN
     LTEXT           "&Pattern:", IDC_STATIC, 12, 12, 40, 8
     EDITTEXT         IDC_BYTES_EDIT, 60, 10, 192, 14, ES_AUTOHSCROLL

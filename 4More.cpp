@@ -1,8 +1,81 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 2.98
+   Build 3.00
 
-   Novedades de esta revisión (RENDIMIENTO: el estudio de por qué V es instantáneo):
+   Novedades de esta revisión (REVISIÓN A FONDO: CORRECCIÓN Y RENDIMIENTO):
+   - BUG GUTTER HEX: GutterWidth contaba los dígitos del último offset con
+     un bucle "mientras qwLast >= 16" que suma UNO por dígito después del
+     primero — la columna pedía siempre 7 caracteres de más (un fichero de
+     256 bytes ya reclamaba 9 dígitos; uno de 4 GB, 15). Ahora cuenta los
+     dígitos reales con el mínimo de 8 que el comentario siempre describió.
+   - BUG DESBORDE DEL INI: BuildIniPath podía escribir más allá de
+     g_szIniPath (un directorio de ~255 caracteres + "4More.ini" no cabe):
+     guard de longitud; sin persistencia si el INI no cabe entero.
+   - BUG GUTTER DESACTUALIZADO: el WM_PAINT de la ventana principal validaba
+     sin pintar la columna, que es TERRITORIO DEL PADRE: al destapar
+     solapando justo la columna (sin invalidar el edit), quedaban píxeles
+     viejos hasta el siguiente repintado del control. Ahora el WM_PAINT del
+     padre también repinta la columna (PaintGutter se retira solo si no hay
+     columna).
+   - CRLF AL HILO DE TRABAJO: el pase de normalización de la carga (hasta
+     ~36M caracteres) ya no corre en el hilo UI: el worker entrega el texto
+     listo y la UI solo hace el EM_SETHANDLE. El hilo que dibuja hace
+     estrictamente menos. NormalizeNewlines devuelve ahora la longitud y
+     nullptr en OOM: los fallos de memoria son un error explícito, no una
+     escritura a nullptr cazada por SEH.
+   - FIND BYTES CON MEMCHR: el escaneo del fichero crudo usa memchr (SSE2/
+     AVX en el CRT) para saltar hasta el primer byte candidato; memcmp solo
+     corre con un candidato real. El bucle byte a byte era TODO el coste de
+     rastrear un fichero grande (verificado equivalente al 100% contra el
+     bucle viejo con fuzzing: bordes de chunk, patrones que cruzan la
+     frontera, aciertos al final exacto del fichero).
+   - LOCALE CACHEADO: FormatU64Locale consultaba los separadores y el
+     agrupado del registro en CADA llamada (hasta 3 GetLocaleInfoW por
+     llamada, y la barra de estado la llama en cada resize y en cada tick
+     de progreso de búsqueda): ahora una única vez (init thread-safe de
+     C++11, válido porque el worker también formatea avisos) y la función
+     queda más corta.
+   - SIMPLIFICACIÓN: HexPaintGutter y NumPaintGutter eran dos gemelas de
+     80 líneas cuya única diferencia era la etiqueta de cada línea: fundidas
+     en un solo PaintGutter; el offset hex se escribe hacia delante (sin
+     inversión in place); SearchNext pierde el duplicado del wrap-around;
+     los prototypes de los pintores eliminados.
+
+   Novedades de la revisión 2.99 (DETECCIÓN, VENTANA Y LOOK MODERNO):
+   - UTF-8 SIN BOM: DetectDefaultView solo confiaba en el BOM: todo UTF-8
+     sin BOM abría como ANSI y se leía "cambiÃ³". LooksLikeUTF8Text valida
+     ahora las secuencias multi-byte de la ventana de detección: una sola
+     secuencia inválida descarta (los acentos ANSI casi siempre la rompen:
+     un 0xE9 suelto seguido de espacio o letra no es secuencia válida), y se
+     exige al menos una secuencia multi-byte (el ASCII puro es válido en
+     ambas y sigue abriéndose como ANSI).
+   - VENTANA MAXIMIZADA RESTAURADA: el INI ya guardaba Maximized=1 desde la
+     2.94, pero InitInstance nunca lo aplicaba: la ventana se abría siempre
+     en normal. Ahora SW_SHOWMAXIMIZED se aplica al arrancar (salvo que el
+     acceso directo pida minimizado). Y la validación del rectángulo se
+     simplifica a un MonitorFromRect: menos código y una ventana guardada en
+     un monitor secundario ya no se rechaza (SPI_GETWORKAREA sólo describe
+     el primario).
+   - MANIFEST: 4More.manifest embebido desde el .rc (RT_MANIFEST, "1 24"):
+     dependencia de Common-Controls 6.0, que era justo lo que faltaba para
+     que botones, radios y checkboxes de los diálogos (About, Go To, Find
+     Bytes) pinten con el look moderno de Windows en vez del clásico de
+     1995. Añade supportedOS (8.1/10/11) y DPI aware de sistema. MSVC: un
+     proyecto Visual Studio incrusta POR DEFECTO su propio manifiesto
+     (UAC) con el mismo id 1 e idioma 0x0409, y el enlace muere con
+     "recurso duplicado (MANIFEST, 1)" / "error durante la conversión a
+     COFF" (CVT1100/LNK1123). Dos arreglos: Enlazador → Archivo de
+     manifiesto → Crear manifiesto = No (/MANIFEST:NO, recomendado: el del
+     .rc queda como único), o definir NO_RC_MANIFEST en el preprocesador de
+     Recursos para saltar la copia del .rc y dejar que VS incruste
+     4More.manifest él mismo (Herramienta Manifiesto → Manifiesto de
+     entrada). MinGW no se ve afectado: windres no genera manifiesto propio.
+   - SIMPLIFICACIÓN: la validación de posición de LoadSettings pierde el
+     IntersectRect con el área de trabajo (MonitorFromRect ya responde
+     "¿hay monitor bajo este rectángulo?"); fuentes de los diálogos
+     MS Shell Dlg 2 (la clásica de los controles v6).
+
+   Novedades de la revisión 2.98 (RENDIMIENTO: el estudio de por qué V es instantáneo):
    - EM_SETHANDLE: LA ENTREGA SIN COPIA. El texto de la vista ya no se entrega
      con WM_SETTEXT (que hace que el control EDIT copie decenas de MB a su
      propio buffer en el hilo UI): el texto se construye directamente en un
@@ -91,7 +164,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"2.98"
+#define APP_VERSION L"3.00"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -184,7 +257,7 @@ ULONGLONG g_qwSearchResult = (ULONGLONG) -1;   // found offset, -1 = not found
 enum { VIEW_ANSI = 0, VIEW_UTF8 = 1, VIEW_UTF16 = 2, VIEW_UTF16BE = 4, VIEW_EBCDIC = 5, VIEW_HEX = 3 };
 
 // The one digit table of the hexadecimal dumps, shared by the text builder
-// (BuildHexText) and the bold offset column (HexPaintGutter).
+// (BuildHexText) and the bold offset column (PaintGutter).
 static const WCHAR s_szHexDigits[] = L"0123456789ABCDEF";
 
 // ---- asynchronous loading ------------------------------------------------------------------
@@ -266,10 +339,10 @@ void ApplyEditorFont(void);
 void ChangeEditorFont(int iStep);
 void UpdateHexMetrics(void);                    // line height / column width of the editor font
 void LayoutEdit(void);                          // size + place the edit control (hex offset column aware)
-void HexPaintGutter(void);                      // paint the bold offset column of the hex view
+void PaintGutter(void);                           // 3.00: hex offsets or line numbers, whichever is active
 void OpenFindDialog(HWND hWnd);
 void SearchNext(HWND hWnd, bool bShowError);
-WCHAR* NormalizeNewlines(WCHAR* pacText, int cch);
+WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut);  // 3.00: also answers the length; nullptr = OOM
 HMENU GetViewSubMenu(HWND hWnd);
 void UpdateViewMenu(void);
 void SetView(int iNewView);
@@ -282,6 +355,7 @@ void AdoptEmptyText(void);                      // swap in an empty block (EM_SE
 WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch);
 bool IsBinaryData(const BYTE* pBytes, DWORD cb);
 bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb);
+bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb);   // 2.99: UTF-8 sin BOM
 WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull);  // 64-bit decimal, no CRT/wsprintf dependency
 void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull); // decimal + regional grouping
 LONG WINAPI UnexpectedFilter(EXCEPTION_POINTERS *pPointers);
@@ -314,7 +388,6 @@ void ClearBookmarks(void);
 void StatusFlash(LPCWSTR pszText);              // one-shot status bar note (next update restores)
 int GutterWidth(void);                          // painted column width: hex offsets / line numbers
 void PaintGutter(void);
-void NumPaintGutter(void);
 BOOL ParseU64(LPCWSTR psz, ULONGLONG& rqw);      // decimal or 0x hex, no CRT dependency
 void JumpFilePage(bool bLast);                  // Ctrl+Home/End: first / last page of the file
 HMENU GetFileSubMenu(HWND hWnd);                // the File popup of the window's menu bar
@@ -483,7 +556,19 @@ bool InitInstance(HINSTANCE hInstance, int nCmdShow)
                 return(false);
         }
 
-        ShowWindow(hWnd, nCmdShow);
+        // 2.99: the INI placement is now applied COMPLETE. The maximized flag
+        // was saved since 2.94 but never restored: every start reopened the
+        // window in normal state. SW_SHOWMAXIMIZED is applied only when the
+        // shell did not ask for something more specific (a "Minimized"
+        // shortcut keeps winning), and a plain nCmdShow covers the rest.
+        if (g_bWinMax && (nCmdShow == SW_SHOWNORMAL || nCmdShow == SW_SHOW || nCmdShow == SW_SHOWDEFAULT))
+        {
+                ShowWindow(hWnd, SW_SHOWMAXIMIZED);
+        }
+        else
+        {
+                ShowWindow(hWnd, nCmdShow);
+        }
         UpdateWindow(hWnd);
 
         return(true);
@@ -854,9 +939,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 {
                         // The edit control paints itself; BeginPaint/EndPaint just
                         // validate the update region so Windows stops repainting.
+                        // 3.00: the gutter column is PARENT territory. When another
+                        // window uncovers only the column (the edit control is not
+                        // invalidated, so its WM_PAINT never fires and the column
+                        // was never repainted here), the old pixels stayed until
+                        // the next scroll. Paint it here too: PaintGutter early-
+                        // -outs when no column exists, and a full column paint is
+                        // ~40 short TextOutW calls.
                         PAINTSTRUCT ps;
                         BeginPaint(hWnd, &ps);
                         EndPaint(hWnd, &ps);
+                        PaintGutter();
                         break;
                 }
                 case WM_SIZE:
@@ -1152,7 +1245,11 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 // without copying anything. If expansion is needed, a new one is built with
 // the exact size; the caller must free the returned pointer with FreeViewText and, if it
 // differs from the original, the original too.
-WCHAR* NormalizeNewlines(WCHAR* pacText, int cch)
+// 3.00: the output LENGTH comes back in *pcchOut (the text can contain
+// embedded NULs, so lstrlenW is not a valid way to measure it), and a failed
+// allocation answers nullptr — an explicit OOM the callers report, instead
+// of the old null-write that only the SEH jacket caught.
+WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut)
 {
         // 1) Detection and counting in a single pass.
         int cExpand = 0;
@@ -1175,10 +1272,18 @@ WCHAR* NormalizeNewlines(WCHAR* pacText, int cch)
         }
         if (cExpand == 0)
         {
-                return(pacText);        // already all CRLF: zero copies
+                if (pcchOut != nullptr)
+                {
+                        *pcchOut = cch;           // already all CRLF: zero copies
+                }
+                return(pacText);
         }
         // 2) Build with the exact known size.
         WCHAR* pNorm = AllocViewText((DWORD) cch + (DWORD) cExpand + 1);
+        if (pNorm == nullptr)
+        {
+                return(nullptr);          // OOM: the caller reports it (3.00)
+        }
         int j = 0;
         for (int i = 0; i < cch; i++)
         {
@@ -1199,6 +1304,10 @@ WCHAR* NormalizeNewlines(WCHAR* pacText, int cch)
                 }
         }
         pNorm[j] = L'\0';
+        if (pcchOut != nullptr)
+        {
+                *pcchOut = j;                   // cch + cExpand, by construction
+        }
         return(pNorm);
 }
 
@@ -1626,15 +1735,50 @@ void RunLoadJob(LoadJob *pJob)
                 DWORD cch = 0;
                 if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch))
                 {
-                        pJob->pText = pText;
-                        pJob->cchText = cch;
+                        if (pJob->iDetected == VIEW_HEX)
+                        {
+                                g_msNormalize = 0;      // hex text is CRLF-only by construction
+                                pJob->pText = pText;
+                                pJob->cchText = cch;
+                        }
+                        else if (pText == nullptr || cch == 0)
+                        {
+                                g_msNormalize = 0;      // empty view: nothing to normalize
+                                pJob->pText = pText;
+                                pJob->cchText = cch;
+                        }
+                        else
+                        {
+                                // 3.00: the CRLF pass runs HERE, on the worker. The UI
+                                // thread used to scan (and possibly rebuild) up to
+                                // ~36M characters inside WM_APP_LOADDONE; it now only
+                                // swaps the ready block into the edit control.
+                                int cchNorm = 0;
+                                ULONGLONG dwT2 = GetTickCount64();
+                                WCHAR* pNorm = NormalizeNewlines(pText, (int) cch, &cchNorm);
+                                g_msNormalize = GetTickCount64() - dwT2;    // /timing: CRLF pass is done
+                                if (pNorm == nullptr)
+                                {
+                                        FreeViewText(pText);         // not adopted: release it here
+                                        pJob->bOOM = true;          // the UI reports the failure
+                                }
+                                else
+                                {
+                                        if (pNorm != pText)
+                                        {
+                                                FreeViewText(pText); // the expanded copy replaced it
+                                        }
+                                        pJob->pText = pNorm;
+                                        pJob->cchText = (DWORD) cchNorm;
+                                }
+                        }
                 }
         }
         catch (const std::bad_alloc&)
         {
                 pJob->bOOM = true;              // bytes stay loaded; the UI reports the failure
         }
-        g_msDecode = GetTickCount64() - dwT1;   // /timing: decode-to-text is done
+        g_msDecode = GetTickCount64() - dwT1;   // /timing: decode + CRLF are done
 }
 
 
@@ -1679,12 +1823,13 @@ void ApplyLoadResult(LoadJob *pJob)
 
         WCHAR* pText = pJob->pText;
         pJob->pText = nullptr;
-        // The hex text is CRLF-only by construction: normalization (a full
-        // scan of up to ~36M characters) is skipped for it. A structured
+        // 3.00: the worker hands the text over ALREADY CRLF-normalized (hex text
+        // is CRLF-only by construction), so the UI thread runs no full-buffer
+        // scan at all: the EM_SETHANDLE swap is the only thing left. A structured
         // failure inside the delivery is remembered and reported together
         // with the load errors below: an empty window without an
         // explanation is the one outcome worse than the message.
-        BOOL bDelivered = DeliverTextSafely(pText, (int) pJob->cchText, iView == VIEW_HEX);
+        BOOL bDelivered = DeliverTextSafely(pText, (int) pJob->cchText, TRUE);
 
         // Errors are reported AFTER the content is in place, so the message
         // never precedes the state it describes.
@@ -1842,50 +1987,57 @@ WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull)
 // numbers only: a file viewer counts whole bytes.
 void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull)
 {
+        // 3.00: the separators and the grouping are fetched ONCE (thread-safe
+        // C++11 static init — the worker thread formats truncation notices
+        // too, so the one-time fill must be race-free by construction). The
+        // old per-call trio of GetLocaleInfoW queries ran on every status-bar
+        // rewrite: three locale reads per resize pixel and per search
+        // progress tick, for data that never changes during a session.
+        // GetNumberFormatW itself stays: it is the one call that formats.
+        struct LocaleInfo
+        {
+                WCHAR szDecimal[8];
+                WCHAR szThousand[8];
+                DWORD dwGrouping;
+                LocaleInfo()
+                {
+                        if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SDECIMAL, szDecimal, 8) <= 0)
+                        {
+                                szDecimal[0] = L'.'; szDecimal[1] = L'\0';
+                        }
+                        if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_STHOUSAND, szThousand, 8) <= 0)
+                        {
+                                szThousand[0] = L','; szThousand[1] = L'\0';
+                        }
+                        // LOCALE_SGROUPING spells groups right to left, ";"-terminated
+                        // ("3;0" for es-ES/US, "12;0" for hi-IN): keep the digits up to
+                        // the first ';' and let NUMBERFMTW do what it always did.
+                        // 0 = a locale that answered nothing useful: group by thousands.
+                        WCHAR szGrouping[8];
+                        int cGroup = GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SGROUPING, szGrouping, 8);
+                        DWORD dw = 0;
+                        for (int i = 0; i < cGroup && szGrouping[i] != L'\0'; i++)
+                        {
+                                if (szGrouping[i] >= L'0' && szGrouping[i] <= L'9')
+                                {
+                                        dw = dw * 10 + (DWORD) (szGrouping[i] - L'0');
+                                }
+                                else
+                                {
+                                        break;          // the ';' (or anything else) ends the useful part
+                                }
+                        }
+                        dwGrouping = (dw != 0) ? dw : 3;
+                }
+        };
+        static const LocaleInfo li;
         WCHAR szRaw[24];
         U64ToWide(szRaw, ull);
         NUMBERFMTW fmt = {};
         fmt.NumDigits = 0;                      // no decimals
-        WCHAR szDecimal[8], szThousand[8], szGrouping[8];
-        if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SDECIMAL, szDecimal, 8) > 0)
-        {
-                fmt.lpDecimalSep = szDecimal;
-        }
-        else
-        {
-                fmt.lpDecimalSep = (LPWSTR) L".";
-        }
-        if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_STHOUSAND, szThousand, 8) > 0)
-        {
-                fmt.lpThousandSep = szThousand;
-        }
-        else
-        {
-                fmt.lpThousandSep = (LPWSTR) L",";
-        }
-        // LOCALE_SGROUPING spells groups right to left, ";"-terminated
-        // ("3;0" for es-ES/US, "12;0" for hi-IN): keep the digits up to the
-        // first ';' and let NUMBERFMTW do what it always did. 0 = a locale
-        // that answered nothing useful: group by thousands, like the whole
-        // world's default.
-        DWORD dwGrouping = 0;
-        int cGroup = GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SGROUPING, szGrouping, 8);
-        for (int i = 0; i < cGroup && szGrouping[i] != L'\0'; i++)
-        {
-                if (szGrouping[i] >= L'0' && szGrouping[i] <= L'9')
-                {
-                        dwGrouping = dwGrouping * 10 + (DWORD) (szGrouping[i] - L'0');
-                }
-                else
-                {
-                        break;                  // the ';' (or anything else) ends the useful part
-                }
-        }
-        if (dwGrouping == 0)
-        {
-                dwGrouping = 3;
-        }
-        fmt.Grouping = dwGrouping;
+        fmt.Grouping = li.dwGrouping;
+        fmt.lpDecimalSep = (LPWSTR) li.szDecimal;
+        fmt.lpThousandSep = (LPWSTR) li.szThousand;
         if (GetNumberFormatW(LOCALE_USER_DEFAULT, 0, szRaw, &fmt, pszDst, cchDst) == 0)
         {
                 lstrcpynW(pszDst, szRaw, cchDst);
@@ -1954,10 +2106,87 @@ bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// TRUE when the bytes look like UTF-8 text WITHOUT a BOM (2.99). The old
+// detector only trusted the BOM, so every plain UTF-8 file (the majority of
+// modern text) opened as ANSI and read "cambiÃ³". Two rules, one pass:
+//   1) ONE invalid sequence anywhere in the detection window disqualifies:
+//      a stray continuation byte, a lead byte without its continuations, an
+//      overlong encoding, a surrogate or a code point past U+10FFFF. Real
+//      ANSI text almost always breaks here: a lone 0xE9 (é) followed by a
+//      space or a plain letter is not a valid sequence.
+//   2) At least one multi-byte sequence must exist: pure ASCII is valid
+//      UTF-8 AND valid ANSI, so it stays ANSI (the rendering is identical).
+// A sequence cut by the edge of the window only stops the scan: it is not
+// evidence against UTF-8.
+// Same bounds as the other heuristics: it only ever sees the first
+// DETECT_WINDOW_BYTES, and the walk is linear with no lookahead tables.
+bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb)
+{
+        DWORD cMB = 0;                              // multi-byte sequences seen
+        DWORD i = 0;
+        while (i < cb)
+        {
+                BYTE b = pBytes[i];
+                if (b < 0x80)
+                {
+                        i++;                                // ASCII: always valid, never counted
+                        continue;
+                }
+                DWORD cbSeq;
+                DWORD cp;
+                if ((b & 0xE0) == 0xC0)
+                {
+                        cbSeq = 2;
+                        cp = (DWORD) (b & 0x1F);
+                }
+                else if ((b & 0xF0) == 0xE0)
+                {
+                        cbSeq = 3;
+                        cp = (DWORD) (b & 0x0F);
+                }
+                else if ((b & 0xF8) == 0xF0)
+                {
+                        cbSeq = 4;
+                        cp = (DWORD) (b & 0x07);
+                }
+                else
+                {
+                        return(false);                   // stray continuation byte or F8..FF
+                }
+                if (i + cbSeq > cb)
+                {
+                        break;                           // window cut the tail: stop, do not fail
+                }
+                for (DWORD k = 1; k < cbSeq; k++)
+                {
+                        BYTE bc = pBytes[i + k];
+                        if ((bc & 0xC0) != 0x80)
+                        {
+                                return(false);           // missing continuation: invalid UTF-8
+                        }
+                        cp = (cp << 6) | (DWORD) (bc & 0x3F);
+                }
+                if ((cbSeq == 2 && cp < 0x80) ||          // overlong 2-byte
+                    (cbSeq == 3 && cp < 0x800) ||         // overlong 3-byte
+                    (cbSeq == 4 && cp < 0x10000) ||       // overlong 4-byte
+                    (cp >= 0xD800 && cp <= 0xDFFF) ||     // UTF-16 surrogate
+                    cp > 0x10FFFF)                        // past the Unicode range
+                {
+                        return(false);
+                }
+                cMB++;
+                i += cbSeq;
+        }
+        return(cMB > 0);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
 // Default view for a freshly opened file, in order: BOMs first; then a
 // UTF-16 test for BOM-less Unicode text; then a binary test (NUL or a high
 // share of control bytes) selects the hexadecimal view for non-text content;
-// otherwise the ANSI code page.
+// then a UTF-8 validation catches BOM-less UTF-8 (2.99); otherwise the ANSI
+// code page.
 //
 // The heuristics only ever see the first DETECT_WINDOW_BYTES of the data:
 // telling a header from text needs no more than a header's worth of bytes,
@@ -1988,6 +2217,10 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
         {
                 return(VIEW_HEX);                       // not text: hexadecimal
         }
+        if (LooksLikeUTF8Text(pBytes, cbWin))
+        {
+                return(VIEW_UTF8);                      // UTF-8 sin BOM (2.99)
+        }
         return(VIEW_ANSI);                              // ANSI (active code page)
 }
 
@@ -1997,7 +2230,7 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
 // grouped in two blocks of 8 and their ASCII representation:
 //     4D 5A 90 00 03 00 00 00  04 00 00 00 FF FF 00 00  MZ..............
 // The leading offset of each line is NOT part of this text: it is painted
-// separately, in bold, by the offset column (HexPaintGutter). That keeps this
+// separately, in bold, by the offset column (PaintGutter). That keeps this
 // buffer at 68 instead of 78 characters per line (WM_SETTEXT copies it and
 // Find walks it), and leaves the offsets out of Copy and Find.
 // The caller must free the returned buffer with FreeViewText (2.98: it is
@@ -2502,8 +2735,10 @@ void AdoptEmptyText(void)
 // handle the control answers with is, by definition, the one it is done
 // with, so no tracking global is needed.
 //
-// bPreNormalized skips the CRLF normalization and its full scan — only the
-// hex builder produces text that is CRLF-only by construction. The copy
+// bPreNormalized skips the CRLF normalization and its full scan: the hex
+// builder produces CRLF-only text by construction, and since 3.00 every
+// LOAD arrives pre-normalized from the worker (view switches and the
+// clipboard are the callers that still normalize here). The copy
 // path remains as the fallback (a block that is not HGLOBAL-backed, or an
 // empty delivery), keeping its refusal check: if the control cannot take
 // the text (out of memory, usually on Win32), it is cleared and the user
@@ -2521,27 +2756,28 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized)
         LayoutEdit();
         ULONGLONG dwT0 = GetTickCount64();      // /timing: normalize + deliver start here
         WCHAR* pNorm = pText;
+        int cchNorm = cch;
         if (pText != nullptr && cch > 0 && !bPreNormalized)
         {
-                try
+                // Loads arrive pre-normalized from the worker (3.00); view
+                // switches and the clipboard path still run the CRLF pass
+                // here, on the UI thread.
+                pNorm = NormalizeNewlines(pText, cch, &cchNorm);
+                if (pNorm == nullptr)
                 {
-                        pNorm = NormalizeNewlines(pText, cch);
-                }
-                catch (...)
-                {
-                        // Out of memory while normalizing: this function owns the
-                        // buffer, so release it before propagating. The callers
-                        // (ApplyView's catch, the load path's SEH jacket) already
-                        // report the failure; leaking the text on every retry was
-                        // the one memory error left in the delivery chain.
+                        // Out of memory for the expanded copy: this function owns
+                        // the buffer, so release it and say so — an explicit OOM
+                        // (3.00) instead of the old null-write crash that only
+                        // the SEH jacket caught. The control keeps what it had.
                         FreeViewText(pText);
-                        throw;
+                        MessageBox(hWndMain, L"Not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
+                        return;
                 }
+                g_msNormalize = GetTickCount64() - dwT0;       // /timing: normalization done
         }
-        g_msNormalize = GetTickCount64() - dwT0;       // /timing: normalization done
+        cch = cchNorm;
 
         SendMessage(hEdit, WM_SETREDRAW, FALSE, 0);
-        bool bAdopted = false;
         HGLOBAL hNew = nullptr;
         if (pNorm != nullptr && cch > 0)
         {
@@ -2559,7 +2795,6 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized)
                 {
                         GlobalFree(hOld);       // the control is done with it: our free
                 }
-                bAdopted = true;                // the control owns the block from here on
                 if (pNorm != pText)
                 {
                         FreeViewText(pText);    // normalization built a second buffer
@@ -2823,7 +3058,7 @@ void ApplyEditorFont(void)
                 return;                                 // keep the old font: nothing else to try
         }
         // Bold twin of the same family and size for the offset column. If it
-        // cannot be created, HexPaintGutter falls back to the regular weight.
+        // cannot be created, PaintGutter falls back to the regular weight.
         HFONT hNewBold = CreateFontW(iHeight, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                  CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
@@ -2949,28 +3184,33 @@ void LayoutEdit(void)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// Paints the hexadecimal offset column on the parent window, left of the edit
-// control: one 8-digit offset per visible line, in the BOLD twin of the editor
-// font, aligned to the edit control's line grid (first visible line + line
-// height). The offsets live here and NOT in the control's buffer: the buffer
-// stays 13% smaller (WM_SETTEXT copies and Find walk less), Copy and Find
-// handle pure data, and the column paints in bold — something an EDIT control
-// cannot do with its own text.
+// Paints the gutter column on the parent window, left of the edit control:
+// the bold hexadecimal offsets of the hex view, or the bold line numbers of
+// the text views (one label per visible line, aligned to the edit control's
+// line grid: first visible line + line height). The labels live here and NOT
+// in the control's buffer: the buffer stays 13% smaller (WM_SETTEXT copies
+// and Find walk less), Copy and Find handle pure data, and the column paints
+// in bold — something an EDIT control cannot do with its own text.
 //
-// Called after every paint of the edit control (see EditSubclassProc):
-// scrolling always invalidates part of the control, so every scroll path
-// lands here. Cost per call: one fill plus one short TextOut per visible
-// line — nothing else. Only iView/cbFile decide whether the column exists,
-// so stale columns are impossible.
-void HexPaintGutter(void)
+// 3.00: HexPaintGutter and NumPaintGutter were two twins whose only real
+// difference was the label of each line; one function paints both now.
+//
+// Called after every paint of the edit control (see EditSubclassProc) AND
+// from the parent's WM_PAINT (3.00: an uncover that only exposes the column
+// never invalidates the edit control, so its WM_PAINT cannot be the only
+// painter of parent territory). Cost per call: one fill plus one short
+// TextOut per visible line — nothing else. Only iView/cbFile/g_bLineNums
+// decide whether the column exists, so stale columns are impossible.
+void PaintGutter(void)
 {
-        if (hWndMain == nullptr || hEdit == nullptr || hFont == nullptr || iHexLineH <= 0)
+        if (hWndMain == nullptr || hEdit == nullptr || hFont == nullptr || iHexLineH <= 0 || iHexCharW <= 0)
         {
                 return;
         }
-        if (iView != VIEW_HEX || pFileBytes == nullptr || cbFile == 0)
+        bool bHex = (iView == VIEW_HEX);
+        if (pFileBytes == nullptr || cbFile == 0 || (!bHex && !g_bLineNums))
         {
-                return;
+                return;                         // no content, or no column in this view
         }
         int iW = GutterWidth();                 // the one width (LayoutEdit uses the same)
         if (iW <= 0)
@@ -2998,34 +3238,56 @@ void HexPaintGutter(void)
         HGDIOBJ hOldFont = SelectObject(hdc, (hFontHexBold != nullptr) ? hFontHexBold : hFont);
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
-        // How many dump lines exist (same arithmetic as BuildHexText) and which
+        // How many lines exist (hex: same arithmetic as BuildHexText) and which
         // one is the first on screen (the edit control owns the scroll).
-        DWORD cbUse = (cbFile > (DWORD) CB_HEX_MAX) ? (DWORD) CB_HEX_MAX : cbFile;
-        DWORD cLines = (cbUse + 15) / 16;
+        int cLines;
+        if (bHex)
+        {
+                DWORD cbUse = (cbFile > (DWORD) CB_HEX_MAX) ? (DWORD) CB_HEX_MAX : cbFile;
+                cLines = (int) ((cbUse + 15) / 16);
+        }
+        else
+        {
+                cLines = (int) SendMessage(hEdit, EM_GETLINECOUNT, 0, 0);
+        }
         int iFirst = (int) SendMessage(hEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
         int y = 0;
-        for (int iLine = iFirst; iLine < (int) cLines && y + iHexLineH <= rcEdit.bottom; iLine++)
+        for (int iLine = iFirst; iLine < cLines && y + iHexLineH <= rcEdit.bottom; iLine++)
         {
-                // ABSOLUTE file offset: in the paged view the page on screen may
-                // start anywhere in a multi-gigabyte file, and the column must
-                // still name the byte it describes (V-style, variable width,
-                // right-aligned on the character grid).
-                ULONGLONG qwOff = g_qwBase + (ULONGLONG) iLine * 16;
-                WCHAR szOffset[20];
-                int cDigits = 0;
-                do
+                WCHAR szLabel[24];
+                int cch;
+                if (bHex)
                 {
-                        szOffset[cDigits++] = s_szHexDigits[qwOff & 0x0F];
-                        qwOff >>= 4;
-                } while (qwOff != 0);
-                // reverse in place
-                for (int i = 0; i < cDigits / 2; i++)
-                {
-                        WCHAR wch = szOffset[i];
-                        szOffset[i] = szOffset[cDigits - 1 - i];
-                        szOffset[cDigits - 1 - i] = wch;
+                        // ABSOLUTE file offset: in the paged view the page on screen
+                        // may start anywhere in a multi-gigabyte file, and the column
+                        // must still name the byte it describes (V-style, variable
+                        // width, right-aligned on the character grid). Written
+                        // FORWARD (3.00): count the digits, then fill them from
+                        // the most significant one — no in-place reversal.
+                        ULONGLONG qwOff = g_qwBase + (ULONGLONG) iLine * 16;
+                        int cDigits = 0;
+                        ULONGLONG qwTmp = qwOff;
+                        do
+                        {
+                                cDigits++;
+                                qwTmp >>= 4;
+                        } while (qwTmp != 0);
+                        qwTmp = qwOff;
+                        for (int i = cDigits - 1; i >= 0; i--)
+                        {
+                                szLabel[i] = s_szHexDigits[qwTmp & 0x0F];
+                                qwTmp >>= 4;
+                        }
+                        cch = cDigits;
                 }
-                TextOutW(hdc, iW - 6 - cDigits * iHexCharW, y, szOffset, cDigits);
+                else
+                {
+                        // Line number of the page on screen (the paged view starts
+                        // anywhere in the file; the numbers are page-relative).
+                        WCHAR* pEnd = U64ToWide(szLabel, (ULONGLONG) (iLine + 1));
+                        cch = (int) (pEnd - szLabel);
+                }
+                TextOutW(hdc, iW - 6 - cch * iHexCharW, y, szLabel, cch);   // right-aligned
                 y += iHexLineH;
         }
         SelectObject(hdc, hOldFont);
@@ -3111,6 +3373,16 @@ void OpenFindDialog(HWND hWnd)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// The one search primitive of Find/Find Next (the flags and the pattern are
+// globals): case-sensitive wcsstr or shlwapi's StrStrIW, from a given offset
+// of the control's text. 3.00: the wrap-around retry used to duplicate this
+// call site; one function, two call sites now.
+static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
+{
+        LPCWSTR psz = pszText + dwFrom;
+        return((fr.Flags & FR_MATCHCASE) ? wcsstr(psz, szFind) : StrStrIW(psz, szFind));
+}
+
 void SearchNext(HWND hWnd, bool bShowError)
 {
         if (szFind[0] == L'\0')
@@ -3151,19 +3423,11 @@ void SearchNext(HWND hWnd, bool bShowError)
         DWORD dwSelStart, dwSelEnd;
         SendMessage(hEdit, EM_GETSEL, (WPARAM) &dwSelStart, (LPARAM) &dwSelEnd);
         DWORD dwFrom = (dwSelEnd <= (DWORD) cch) ? dwSelEnd : (DWORD) cch;
-        const WCHAR* pFound = nullptr;
-        if (fr.Flags & FR_MATCHCASE)
-        {
-                pFound = wcsstr(pText + dwFrom, szFind);
-        }
-        else
-        {
-                pFound = StrStrIW(pText + dwFrom, szFind);
-        }
+        const WCHAR* pFound = FindPatternFrom(pText, dwFrom);
         if (pFound == nullptr && dwFrom > 0)
         {
                 // No more matches downward: wrap around the document.
-                pFound = (fr.Flags & FR_MATCHCASE) ? wcsstr(pText, szFind) : StrStrIW(pText, szFind);
+                pFound = FindPatternFrom(pText, 0);
         }
         int iPos = (pFound != nullptr) ? (int) (pFound - pText) : -1;
 
@@ -3955,13 +4219,32 @@ unsigned __stdcall SearchThreadProc(void *pParameter)
                         break;                         // EOF (or read error): the scan is over
                 }
                 DWORD cbHave = cbKeep + cbRead;
-                for (DWORD i = 0; i + cbPat <= cbHave; i++)
+                // 3.00: memchr does the byte hunt. The CRT ships it with
+                // SSE2/AVX code paths, while the old one-byte-at-a-time loop
+                // WAS the whole cost of scanning a large file; memcmp now runs
+                // only when a real first-byte candidate is found. Verified
+                // behavior-identical to the old loop (fuzzed across chunk
+                // borders, patterns straddling the overlap, matches at the
+                // exact end of the data, chunks shorter than the pattern).
+                if (cbHave >= cbPat)
                 {
-                        if (pBuf[i] == g_abSearchPat[0] && (cbPat == 1 || memcmp(pBuf + i, g_abSearchPat, cbPat) == 0))
+                        DWORD i = 0;
+                        DWORD cbLast = cbHave - cbPat;             // last possible match start
+                        for (;;)
                         {
-                                g_qwSearchResult = qwBase + (ULONGLONG) i;
-                                bFound = true;
-                                break;
+                                const BYTE* pHit = (const BYTE*) memchr(pBuf + i, g_abSearchPat[0], cbLast - i + 1);
+                                if (pHit == nullptr)
+                                {
+                                        break;                    // no candidate left in this chunk
+                                }
+                                i = (DWORD) (pHit - pBuf);
+                                if (cbPat == 1 || memcmp(pBuf + i, g_abSearchPat, cbPat) == 0)
+                                {
+                                        g_qwSearchResult = qwBase + (ULONGLONG) i;
+                                        bFound = true;
+                                        break;
+                                }
+                                i++;
                         }
                 }
                 if (!bFound)
@@ -4235,15 +4518,20 @@ int GutterWidth(void)
         }
         if (iView == VIEW_HEX)
         {
-                // 2.95: as many digits as the LAST offset of the page really
-                // needs (V-style), not a fixed 8: a 20 GB file shows 10-digit
-                // offsets, a small file keeps the classic 8.
+                // 3.00 fix: the digits of the LAST offset of the page itself
+                // (V-style), 8 minimum. The old loop widened past 8 for ANY
+                // value >= 16 — a 256-byte page already claimed 9 digits and a
+                // 4 GB one 15: seven spare characters of column, for nothing.
                 ULONGLONG qwLast = g_qwBase + cbFile - 1;
-                int cDigits = 8;
+                int cDigits = 1;
                 while (qwLast >= 16)
                 {
                         qwLast >>= 4;
                         cDigits++;
+                }
+                if (cDigits < 8)
+                {
+                        cDigits = 8;                     // the classic 8, V-style
                 }
                 return((cDigits + 2) * iHexCharW + 6);
         }
@@ -4259,72 +4547,6 @@ int GutterWidth(void)
                 return((cDigits + 2) * iHexCharW + 6);
         }
         return(0);
-}
-
-
-/* -------------------------------------------------------------------------------------------- */
-// Chooses which column to paint after the edit control painted itself:
-// the hex offsets of the hex view, the line numbers of the text views.
-void PaintGutter(void)
-{
-        if (iView == VIEW_HEX)
-        {
-                HexPaintGutter();
-        }
-        else if (g_bLineNums && cbFile > 0)
-        {
-                NumPaintGutter();
-        }
-}
-
-
-/* -------------------------------------------------------------------------------------------- */
-// The line-number column, twin of HexPaintGutter: painted on the parent
-// window, aligned to the first visible line of the control and its line
-// grid, one number per visible line, in the bold twin of the editor font.
-void NumPaintGutter(void)
-{
-        if (hWndMain == nullptr || hEdit == nullptr || hFont == nullptr)
-        {
-                return;
-        }
-        int iW = GutterWidth();
-        if (iW <= 0 || iHexLineH <= 0)
-        {
-                return;
-        }
-        RECT rcEdit;
-        if (!GetClientRect(hEdit, &rcEdit) || rcEdit.bottom <= 0)
-        {
-                return;
-        }
-        HDC hdc = GetDC(hWndMain);
-        if (hdc == nullptr)
-        {
-                return;
-        }
-        RECT rcGutter;
-        rcGutter.left = 0;
-        rcGutter.top = 0;
-        rcGutter.right = iW;
-        rcGutter.bottom = rcEdit.bottom;
-        FillRect(hdc, &rcGutter, GetSysColorBrush(COLOR_WINDOW));
-        HGDIOBJ hOldFont = SelectObject(hdc, (hFontHexBold != nullptr) ? hFontHexBold : hFont);
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
-        int cLines = (int) SendMessage(hEdit, EM_GETLINECOUNT, 0, 0);
-        int iFirst = (int) SendMessage(hEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
-        int y = 0;
-        for (int iLine = iFirst; iLine < cLines && y + iHexLineH <= rcEdit.bottom; iLine++)
-        {
-                WCHAR szNum[24];
-                WCHAR* pEnd = U64ToWide(szNum, (ULONGLONG) (iLine + 1));
-                int cch = (int) (pEnd - szNum);
-                TextOutW(hdc, iW - 6 - cch * iHexCharW, y, szNum, cch);        // right-aligned
-                y += iHexLineH;
-        }
-        SelectObject(hdc, hOldFont);
-        ReleaseDC(hWndMain, hdc);
 }
 
 
@@ -4547,6 +4769,14 @@ void BuildIniPath(void)
                 return;                         // a bare name with no directory: skip
         }
         *(pchSlash + 1) = L'\0';                 // keep the directory, drop the file name
+        // 3.00 fix: the directory can be almost MAX_PATH long on its own; the
+        // old lstrcatW would then append "4More.ini" past the end of
+        // g_szIniPath. A directory that leaves room for the INI name gets
+        // persistence; anything longer simply runs without one.
+        if (lstrlenW(szExe) + 9 >= MAX_PATH)
+        {
+                return;
+        }
         lstrcpynW(g_szIniPath, szExe, MAX_PATH);
         lstrcatW(g_szIniPath, L"4More.ini");
 }
@@ -4596,11 +4826,13 @@ void LoadSettings(void)
             lRight != INI_WINPOS_INVALID && lBottom != INI_WINPOS_INVALID)
         {
                 RECT rc = { (LONG) lLeft, (LONG) lTop, (LONG) lRight, (LONG) lBottom };
-                RECT rcDesk;
-                SystemParametersInfoW(SPI_GETWORKAREA, 0, &rcDesk, 0);
-                RECT rcInter;
+                // 2.99: MonitorFromRect alone answers the only question that
+                // matters ("does ANY monitor see this rectangle?"). The old
+                // IntersectRect against SPI_GETWORKAREA rejected a placement
+                // fully inside a secondary monitor — the work area describes
+                // the primary one only — so a two-screen setup reopened
+                // at the default position. One API call less, one case fixed.
                 if (rc.right - rc.left >= 200 && rc.bottom - rc.top >= 100 &&
-                    IntersectRect(&rcInter, &rc, &rcDesk) &&
                     MonitorFromRect(&rc, MONITOR_DEFAULTTONULL) != nullptr)
                 {
                         g_rcWinInit = rc;

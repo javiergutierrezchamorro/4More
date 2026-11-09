@@ -22,7 +22,7 @@ dir | 4More               view a command's output (stdin)
 ### Speed and memory
 
 - **Opens files of any size, instantly.** The viewer shows a *page* — a window of at most **32 MB** of text (or **8 MB** in hexadecimal) — and loads it asynchronously on a worker thread. The window never freezes; a 512 GB file opens exactly as fast as a 512 KB one.
-- **Paged, on-demand viewing.** `Ctrl+PgDn` / `Ctrl+PgUp` walk the file page by page at constant memory. Every file is walkable end to end; the caps bound a single page, never your reach. (This is the approach of [The V File Viewer](https://www.fileviewer.com/) for 100 GB files, adapted on top of the standard Windows EDIT control.)
+- **Paged, on-demand viewing.** `Ctrl+PgDn` / `Ctrl+PgUp` walk the file page by page at constant memory. Every file is walkable end to end; the caps bound a single page, never your reach. The V File Viewer for 100 GB files, adapted on top of the standard Windows EDIT control. Even if 4More is not so complete, it is 20 times smaller, open source and free.
 - **Two-phase loading.** Only 64 KB is read before the encoding is decided; the full read then stops at what the active view can ever display. A multi-gigabyte open costs at most one bounded read.
 - **Everything off the UI thread.** Since 3.00 the load worker also normalizes line endings (CRLF) after decoding, so the UI thread only hands the finished text to the EDIT control — the full scan of up to ~36M characters no longer runs on it. `/timing` shows the CRLF pass as part of the load.
 - **Pipes end like pipes.** `type file | 4more` ends cleanly since 3.01: a pipe's EOF is a *failing* `ReadFile` (`ERROR_BROKEN_PIPE`), not a zero-byte read; treating that as a read error made every complete pipe load end with a spurious "Could not read the whole file."
@@ -153,6 +153,6 @@ Both 32-bit and 64-bit builds are supported; the About dialog reports the bitnes
 
 ## Acknowledgments
 
-The feature set of this revision was shaped by the published features and release history (V8–V16) of [The V File Viewer](https://www.fileviewer.com/): paged viewing of very large files, Go To, tailing, raw-file byte search, line numbers, EBCDIC, clipboard-as-file, word wrap, bookmarks, Alternate Data Streams, recent files and command line switches. The 2.98 performance pass (zero-copy `EM_SETHANDLE` delivery, `/timing`) came from asking why V shows a 20 MB text file in under a second.
+The feature set of this revision was shaped by the published features and release history (V8–V16) of [The V File Viewer](https://www.fileviewer.com/) by Charles Prineas: paged viewing of very large files, Go To, tailing, raw-file byte search, line numbers, EBCDIC, clipboard-as-file, word wrap, bookmarks, Alternate Data Streams, recent files and command line switches. The 2.98 performance pass (zero-copy `EM_SETHANDLE` delivery, `/timing`) came from asking why V shows a 20 MB text file in under a second.
 
 Copyright (c) 2020-2026 Javier Gutiérrez Chamorro (Guti)

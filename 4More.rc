@@ -1,4 +1,51 @@
-﻿// 4More.rc — recursos del visor (Build 3.06)
+﻿// 4More.rc — recursos del visor (Build 3.15)
+//
+// 3.15: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
+// .cpp: la entrega troceada de 3.14 excluía Word Wrap, y con wrap activo
+// (recordado en 4More.ini) la página grande seguía entrando monolítica
+// detrás de la señal de barra llena — la misma barra helada de siempre.
+// 3.15 quita la exclusión: el reenvuelto del EDIT es incremental desde el
+// punto de edición igual que su tabla de líneas, así que el troceo vale
+// también con wrap y la barra camina permille real en TODOS los caminos
+// de página grande. Compilar junto al 4More.cpp 3.15 (APP_VERSION ya
+// dice "3.15"); manifest a 3.15.0.0.
+//
+// 3.14: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
+// .cpp: la entrega de páginas grandes se trocea y se bombea (EM_REPLACESEL
+// de 1M de caracteres con bomba de mensajes entre trozos) y la barra de
+// progreso publica permille real durante TODA la carga — también en el
+// tramo de entrega que antes congelaba el hilo UI con la barra llena.
+// Compilar junto al 4More.cpp 3.14 (APP_VERSION ya dice "3.14");
+// manifest a 3.14.0.0.
+//
+// 3.13: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es solo
+// del .cpp: el worker publica CADA tic de trozo sin throttle (el throttle
+// de 62 ms se comía todos los tics de una lectura rápida y la barra no
+// tenía nada que animar) y el sondeo baja a 16 ms. Único cambio visible
+// en recursos: el comentario de abajo, porque EnsureRecentMenu ya NO
+// inserta separador propio (dos separadores seguidos en File). Compilar
+// junto al 4More.cpp 3.13 (APP_VERSION ya dice "3.13"); manifest a 3.13.0.0.
+// del .cpp: la barra de progreso ya no viaja por mensajes. El worker
+// publica el permille en un campo atómico del job y la UI lo sondea
+// con un WM_TIMER de 50 ms pintando en el acto; ApplyLoadResult pinta
+// además el estado final (100%) ANTES de la entrega EM_SETHANDLE.
+// Tres revisiones publicando el permille correcto por PostMessage se
+// clavaban igual en la máquina real: la petición de repintado perdía
+// la carrera contra la cola. Trozos de lectura de 1 MB (antes 4 MB).
+// Compilar junto al 4More.cpp 3.12 (APP_VERSION ya dice "3.12");
+// manifest a 3.12.0.0.
+//
+// 3.09: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es solo
+// del .cpp: la vista hex ya pinta su primera pantalla mientras carga (con
+// columna de offsets) y la barra de progreso sube al empezar la lectura
+// larga, no tras el primer trozo. Compilar junto al 4More.cpp 3.09
+// (APP_VERSION ya dice "3.09"); manifest a 3.09.0.0.
+//
+// 3.08: NI MENÚ NI ACELERADORES CAMBIAN. La revisión toca el .cpp (barra
+// de progreso en la parte derecha de la status bar, primera pintada del
+// principio del fichero mientras carga, lecturas partidas de 64 bits en
+// x86) y el manifest (versión 3.08.0.0, GUIDs supportedOS de Windows 7/8).
+// Compilar junto al 4More.cpp 3.08 (APP_VERSION ya dice "3.08").
 //
 // 3.06: NI MENÚ NI ACELERADORES CAMBIAN. Revisión a fondo del .cpp
 // (columna de líneas, PgDn en Hex, foco tras Word Wrap, Find más rápido).
@@ -83,7 +130,8 @@ BEGIN
         MENUITEM "&Alternate Data Streams...",          ID_FILE_ADS
         MENUITEM SEPARATOR
         // Recent Files (2.96) se inserta aquí en ejecución: EnsureRecentMenu
-        // añade separador + popup antes de Exit.
+        // añade el popup antes de Exit (3.13: SIN separador propio — el
+        // separador estático de arriba ya separa el bloque del popup).
         MENUITEM "E&xit",                               ID_EXIT
     END
     POPUP "&Edit"

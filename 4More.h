@@ -28,6 +28,11 @@
 
 #define ID_EDITCHILD 1000
 #define IDC_STATUSBAR 1001
+// 3.08: la barra de progreso de las cargas vive DENTRO de la status bar
+// (parte derecha, la de "0 bytes"): se crea en WM_CREATE como hija de la
+// barra, la coloca PositionProgress y la muestran los tics de
+// WM_APP_LOADPROGRESS. Solo .cpp: sin entrada en el .rc.
+#define IDC_PROGRESS 1002
 // PREFERENCIAS (2.94): fuente, números de línea, wrap, tail, posición de
 // ventana y recientes se guardan en 4More.ini junto al ejecutable; el
 // arranque los lee ANTES de la línea de comandos (un switch explícito

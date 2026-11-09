@@ -1,0 +1,14 @@
+{
+    "version": 1,
+    "revision": 0,
+    "rules": [
+        {
+            "primary-output": "4More\\x64\\Debug\\4More.obj",
+            "outputs": [
+                "4More\\x64\\Debug\\4More.cpp.obj.dt.module.json",
+                "4More\\x64\\Debug\\4More.cpp.obj.dt.d.json"
+            ],
+            "requires": []
+        }
+    ]
+}

@@ -1,6 +1,249 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.07
+   Build 3.15
+
+   Novedades de la revisión 3.15 (WORD WRAP YA NO EXCLUYE EL TROCEO):
+   - 3.14 DEJÓ FUERA DEL TROCEO A WORD WRAP ("el reenvuelto del control
+     no se puede trocear") Y CON WRAP ACTIVO (recordado en 4More.ini) LA
+     PÁGINA GRANDE SEGUÍA ENTRANDO MONOLÍTICA: el EM_SETHANDLE caía
+     intacto detrás de la señal de barra llena de 3.10, el control
+     reenvolvía TODO su texto en UNA llamada del hilo UI y la barra se
+     quedaba CLAVADA en 1000 — la misma barra helada de siempre, justo
+     donde 3.14 la había resuelto para el camino sin wrap. La exclusión
+     era una cautela teórica: el reenvuelto del EDIT no bloquea el
+     troceo (cada EM_REPLACESEL reenvuelve sólo lo que entra, igual que
+     su tabla de líneas se mantiene incremental desde el punto de
+     edición — la misma razón por la que teclear en Notepad no se
+     ralentiza en documentos de varios MB).
+   - LA EXCLUSIÓN SALE: el troceo del EDIT es incremental desde el punto
+     de edición igual que su tabla de líneas, así que el troceo vale
+     también con wrap. El reenvuelto se hace por trozo (no de golpe al
+     final) y ENTRE TROZOS el hilo UI bombea: la barra camina permille
+     real en TODOS los caminos de página grande — con wrap o sin él.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
+     cambian. La revisión es del .cpp únicamente. APP_VERSION ya dice
+     "3.15"; el manifest a 3.15.0.0 (ya alineado en 4More.manifest).
+
+   Novedades de la revisión 3.14 (LA BARRA CUBRE LA CARGA ENTERA):
+   - SEIS REVISIONES (3.08-3.13) ARREGLARON EL TRANSPORTE DEL PROGRESO Y LA
+     BARRA SEGUÍA CLAVADA EN PÁGINAS GRANDES: en un log de 30 MB la barra
+     trepa hasta ~50% en menos de un segundo y luego se queda HELADA unos
+     diez segundos, hasta que la página aparece y la barra desaparece. El
+     transporte no tenía culpa: lo que queda tras la lectura no es carga de
+     fichero, es la ENTREGA — el EM_SETHANDLE con el que el control EDIT
+     adopta el texto (30M de caracteres, medio millón de líneas) reconstruye
+     su tabla de líneas ENTERA dentro de UNA llamada del hilo UI. Dentro de
+     esa llamada no corre temporizador, no hay repintado, no hay NADA: seis
+     revisiones de tics y sondeos no podían mover la barra ahí, y el 100%
+     congelado se leía como "estancada". El propio 2.98 señalaba al
+     culpable ("la indexación de líneas del propio control EDIT") y el
+     /timing lo mide: es el tramo "deliver".
+   - LA ENTREGA SE TROCEA Y SE BOMBEA: por encima de 1M de caracteres (y
+     con Word Wrap fuera: el reenvuelto del control no se puede trocear) el
+     texto ya NO entra en un EM_SETHANDLE monolítico. El control arranca
+     vacío y cada trozo de 1M de caracteres aterriza con EM_REPLACESEL al
+     final — el mantenimiento de la tabla de líneas del EDIT es incremental
+     desde el punto de edición (teclear en Notepad sobre documentos de
+     varios MB no se ralentiza, por la misma razón), así que el coste total
+     sigue siendo O(n). ENTRE TROZOS el hilo UI bombea la cola
+     (PeekMessage): el sondeo de 16 ms vive toda la entrega, la ventana
+     nunca pasa a "(No responde)", y la barra publica permille REAL —
+     caracteres ya dentro del control — sobre la MISMA escala de la
+     lectura: camina de ~50% a 100% durante los antiguos diez segundos.
+     Nada inventado: las unidades son caracteres entregados.
+   - EL 100% YA NO MIENTE: el tic forzado a 1000 del worker (3.10) SALE.
+     Decía "terminado" cuando solo terminaba LA LECTURA, y era el tic que
+     pintaba la barra LLENA justo antes de que la entrega helara el hilo:
+     la barra llena congelada era su obra. El worker termina en el tick de
+     fin de lectura (~50% de la escala compartida) y el 1000 lo publica
+     AHORA la entrega, tras el último trozo, cuando el texto está de verdad
+     dentro del control — y la primera pantalla pinta al instante porque la
+     tabla de líneas ya está completa. Donde no hay bomba (página pequeña,
+     o Word Wrap activo) se conserva la señal de 3.10: barra llena ANTES
+     del intercambio.
+   - LA PUERTA DE CARGAS: la entrega troceada bombea mensajes, y en la cola
+     puede entrar de todo. g_bInDelivery (la gemela de g_bInByteSearch)
+     cierra Load File, Load Page, Go To, portapapeles y Find Bytes mientras
+     dura; el temporizador del tail rebota en la LoadPage rechazada; ESC
+     sigue cerrando el programa (la bomba aborta limpia con IsWindow, y un
+     WM_QUIT ajeno se re-postea, no se come). El KillTimer del poll sale de
+     WM_APP_LOADDONE: muere al FINAL de ApplyLoadResult — el sondeo alimenta
+     la barra del job vivo (el átomo) o de la entrega en curso
+     (s_pmDeliver), y una excepción dentro de la entrega reabre las puertas
+     en el SEH de DeliverTextSafely.
+   - COSTE: la entrega troceada paga las realloc del buffer del control
+     (amortizadas: como mucho una copia extra del texto) y pierde el
+     cero-copias de 2.98 SOLO en páginas grandes, donde el pico de memoria
+     sube ~el tamaño del texto durante la entrega. El precio de que la
+     barra viva toda la carga y la ventana respire.
+
+   Novedades de la revisión 3.13 (LA BARRA SUBE DE VERDAD):
+   - CUATRO REVISIONES (3.09-3.12) CAMBIARON EL TRANSPORTE DEL PROGRESO Y LA
+     BARRA SEGUÍA SIN MOVERSE EN EL SSD: el cuello nunca estuvo en el
+     transporte, estuvo en la CANTIDAD de valores publicados. El throttle de
+     62 ms del worker (heredado de 3.08, cuando cada tic era un PostMessage)
+     se comía TODOS los tics de trozo de una lectura rápida: los 30 MB de la
+     página entran dentro de la primera ventana de 62 ms y la única
+     publicación que sobrevivía era el tic inicial (~0%). El sondeo del
+     átomo era correcto pero el átomo solo cambió tres veces (0% -> 50% ->
+     100%): no había nada que animar en NINGÚN transporte. La simulación de
+     la tubería lo confirma: 0 pasos intermedios pintados en 3.09-3.12.
+   - EL THROTTLE DESAPARECE: publicar en el átomo cuesta nanosegundos y no
+     hay cola que inundar; lo que hay que dosificar es el REPINTADO, y eso
+     ya lo hace el sondeo (pinta solo cuando el valor cambia). Cada trozo
+     de 1 MB publica su permille (hasta ~32 publicaciones por página) y el
+     WM_TIMER pasa de 50 a 16 ms (~60 muestreos/s): la barra trepa de
+     verdad hasta el 100 a medida que llega la página, sea SSD, USB o red.
+     msNextProgress y el parámetro bForce salen del LoadJob: menos estado.
+   - SEPARADOR DOBLE EN FILE FUERA: EnsureRecentMenu insertaba un
+     separador propio junto al estático del .rc y el menú mostraba dos
+     líneas seguidas. El popup Recent Files entra ya sin separador
+     adicional: el estático separa el bloque.
+
+   Novedades de la revisión 3.12 (LA BARRA SONDEA, NO ESPERA MENSAJES):
+   - TRES REVISIONES SEGUIDAS (3.09-3.11) PUBLICARON EL PERMILLE CORRECTO
+     Y LA BARRA AUN ASÍ SE CLAVABA AL MOSTRAR LA PRIMERA PÁGINA. La causa
+     común: un tic publicado con PostMessage es solo una PETICIÓN de
+     repintado, y la petición perdía carreras contra la cola — tics
+     seguidos, tramos modales, la entrega final bloqueando el hilo UI.
+     3.11 forzó el repintado con UpdateWindow tras cada tic procesado y
+     en la máquina real siguió igual: la cadena tic→mensaje→repaint
+     tiene demasiados eslabones que el código no controla.
+   - LA CADENA SE CORTA: el worker publica el permille en un campo
+     ATÓMICO del job (pmProgress: -2 nada, -1 marquee de stdin,
+     0..1000) y la UI lo SONDEA con un WM_TIMER de 50 ms (IDT_LOADPROG)
+     que corre solo mientras el job vive: lee el átomo, mueve
+     PBM_SETPOS y pinta en el acto con UpdateWindow. No hay mensaje que
+     perder, no hay coalescencia que retenga un cuadro viejo, no hay
+     serial que cuadrar: el valor leído ES el del job vivo. El timer
+     muere en WM_APP_LOADDONE, en WM_DESTROY y por autoprotección si el
+     job ya no está. WM_APP_LOADPROGRESS y su handler desaparecen.
+   - GARANTÍA FINAL INDEPENDIENTE DE TODA CARRERA: ApplyLoadResult pinta
+     el estado FINAL de la barra (el 1000 publicado en el éxito, el
+     último real en una carga fallida) ANTES de la entrega EM_SETHANDLE.
+     Si la entrega es lo único que seguro se ejecuta, el usuario ve la
+     barra LLENA durante el intercambio. Después se retira.
+   - LECTURA MÁS FINA: los trozos de la fase 2 bajan de 4 MB a 1 MB —
+     ocho tics de lectura reales por página hex en vez de dos, y
+     granularidad honesta en medios lentos (USB, red). El coste por
+     llamada sigue siendo marginal y el read-ahead secuencial paga el
+     ancho de disco.
+
+   Novedades de la revisión 3.11 (LA BARRA PINTA CADA PASO):
+   - 3.10 CALCULABA LAS POSICIONES CORRECTAS Y AUN ASÍ LA BARRA SE VEÍA
+     CLAVADA EN EL PRIMER TROZO (10-15%). PBM_SETPOS solo invalida la
+     franja que cambia: el control repinta cuando la cola de mensajes se
+     vacía, y durante una carga no llega a vaciarse — los tics entran
+     seguidos y WM_APP_LOADDONE encadena la entrega (EM_SETHANDLE del
+     volcado, segundos en x86) que bloquea el hilo UI con todos los
+     repintados pendientes SIN EJECUTAR. El último cuadro que la barra
+     pintó de verdad era el del primer trozo; de ahí saltaba a
+     desaparecer: el 100% existía como mensaje, nunca como píxeles.
+   - CADA TIC SE PINTA EN EL ACTO: WM_APP_LOADPROGRESS cierra con
+     UpdateWindow sobre la barra. Es un hijo de ~150x15 px (pintarla
+     cuesta microsegundos, <= 16 veces/s tras el throttle): la posición
+     en pantalla es SIEMPRE la del último tic procesado, y el 100%
+     forzado se pinta ANTES de que WM_APP_LOADDONE saque de la cola la
+     entrega — el intercambio corre con la barra LLENA a la vista.
+   - EL 100% YA NO EXIGE ÉXITO: el tic forzado sale siempre que la barra
+     llegó a mostrarse (bBarPosted), también si la carga termina en
+     error (OOM, lectura) — una barra que se mostró no muere a medias.
+
+   Novedades de la revisión 3.10 (LA BARRA LLEGA AL 100):
+   - LA BARRA SE QUEDABA EN UN 10-15% Y MORÍA SIN COMPLETARSE. Tres
+     defectos encadenados: (1) los tics de lectura caían dentro de la
+     ventana de throttle (62 ms) que abre el primer tic — la página hex
+     se lee en dos trozos de 4 MB en pocos milisegundos y el throttle se
+     comía ambos: la barra jamás pasó del tic inicial; (2) al acabar la
+     lectura la barra pasaba a MARQUEE para cubrir la construcción, y la
+     entrega final (EM_SETHANDLE del volcado) bloquea el hilo UI: el
+     bloque verde —un 10-15% del ancho de la barra— se congelaba junto al
+     borde izquierdo durante segundos, y la barra parecía clavada en un
+     10-15% que nunca llegaba a 100; (3) nada escribía jamás un 100%: la
+     barra se retiraba sin completarse.
+   - UNA SOLA ESCALA DETERMINADA PARA TODA LA CARGA. El total pasa a ser
+     "bytes de la página + caracteres estimados de su construcción"
+     (EstBuildChars: hex x4.25, UTF-16 /2, texto 1:1). Sobre ella
+     escriben los tics de lectura (trozos de 4 MB), un tic FORZADO de fin
+     de lectura —aterriza la barra donde el throttle dejó los trozos sin
+     pintar— y tics de CONSTRUCCIÓN nuevos: el bucle del volcado hex
+     avisa cada 4096 líneas (64 KB de página) con los caracteres ya
+     escritos, así el tramo lento de CPU sube la barra en vez de esconder
+     un marquee. El tic inicial medía el FICHERO ENTERO (64 KB sobre
+     200 MB: primer tic en torno al 0%) mientras los tics de trozo medían
+     la página: dos escalas para la misma barra — ahora una.
+   - EL 100% EXISTE: con la página construida, el worker manda un tic
+     forzado a 1000 permille antes del WM_APP_LOADDONE. El intercambio
+     EM_SETHANDLE bloquea después el hilo UI sin poder repintar: ahí la
+     barra se ve LLENA —la señal honesta de "terminando"—, no un bloque
+     marquee congelado. stdin conserva su marquee: con total desconocido
+     un 100% determinado sería un invento.
+   - SOLO UN TIC REAL MUESTRA LA BARRA: LoadProgressPost marca bBarPosted
+     en el LoadJob y el 100% forzado no sale si ningún tic la levantó —
+     una carga pequeña no parpadea.
+
+   Novedades de la revisión 3.09 (HEX VE LA CARGA):
+   - LA VISTA HEX TAMBIÉN PINTA SU PRIMERA PANTALLA MIENTRAS CARGA. 3.08
+     la saltaba creyendo que su lectura limitada (8 MB) era todo el
+     coste, pero construir el volcado (x4.25) y entregarlo añade tiempo
+     visible en ficheros reales: binario grande = pantalla en blanco.
+     El preview de la ventana de detección (64 KB) vale ahora para hex
+     igual que para los textos y viaja con la base y el tamaño de la
+     ventana, de modo que la columna de offsets ya está en la primera
+     pintada (GutterWidth responde 0 mientras cbFile es 0).
+   - LA BARRA DE PROGRESO SUBE AL EMPEZAR LA LECTURA LARGA, no tras el
+     primer trozo de 4 MB: con el tope hex (8 MB) la lectura entera son
+     dos trozos y el primer tic caía en el ~50% de una lectura de
+     milisegundos — la barra no llegaba a verse. Un tic inicial (~1%)
+     la levanta en cuanto la fase 2 va a leer de verdad, con el mismo
+     umbral de "resto con sentido" que el preview (256 KB).
+
+   - LA BARRA VIVE TODA LA CARGA, no solo la lectura: al terminar de
+     leer, el worker manda un marquee FORZADO (sin throttle) y la barra
+     anima mientras se construye el volcado o se decodifica la página,
+     fases sin tics naturales. La barra se retira al FINAL de
+     ApplyLoadResult (tras la entrega), no en WM_APP_LOADDONE, y el
+     status escribe su estado definitivo ANTES de la entrega: el tramo
+     congelado del EM_SETHANDLE ya nunca enseña "Loading..." sin barra.
+
+   Novedades de la revisión 3.08 (BARRA DE PROGRESO, PRIMERA PINTADA Y X86):
+   - BARRA DE PROGRESO EN LA CARGA. El trozo derecho de la barra de estado
+     (donde vive "0 bytes") acoge ahora un control de progreso real: el
+     worker mide la lectura de la página y manda permille (~16 tics/s) por
+     WM_APP_LOADPROGRESS; la barra aparece con el PRIMER tic (una carga
+     pequeña no llega a parpadear) y se retira en WM_APP_LOADDONE. Cuando
+     el total es desconocido (stdin) la barra pasa a marquee (comctl32 6,
+     la misma dependencia del manifest). El grip de redimensionar conserva
+     su hueco: el control le deja ~18 px a la derecha.
+   - PRIMERA PINTADA MIENTRAS CARGA. La ventana ya no mira una pantalla en
+     blanco hasta el fin de la lectura: en cuanto el worker tiene la
+     ventana de detección y la codificación decidida, decodifica ese
+     trozo, lo normaliza EN el worker y lo manda por WM_APP_LOADPREVIEW;
+     el hilo UI lo entrega con el EM_SETHANDLE de siempre y el principio
+     del fichero —varias pantallas— se lee MIENTRAS el resto de la página
+     sigue llegando del disco. La página completa la sustituye al
+     aterrizar. 3.09: la vista hex TAMBIÉN la usa (el volcado y su
+     entrega cuestan encima de la lectura). El salto del tail no la
+     usa (acaba en el final, no en el principio);
+     las páginas y stdin sí (stdin pinta con la primera ventana llena,
+     aunque el pipe siga aspirando). El preview viaja con el número de
+     serie del trabajo (uSeq): un mensaje en cola de un job sin hilos ya
+     no puede pintarse encima de la carga siguiente.
+   - X86: LECTURAS PARTIDAS DE 64 BITS. g_qwSearchPos (volatile ULONGLONG)
+     lo escribía el worker de Find Bytes y lo leía el hilo UI: en Win32
+     son dos mitades de 32 bits y el "Searching..." podía enseñar un
+     número roto. La posición viaja ahora DENTRO del mensaje (wParam =
+     parte baja, lParam = parte alta) y el global se ha ido. Los cuatro
+     contadores de /timing bajan a DWORD (los milisegundos caben de
+     sobra): la misma carrera, con menos alcance.
+   - MANIFEST: supportedOS suma los GUID de Windows 7 y Windows 8 (el
+     suelo del programa es 7 desde 2.98): sin ellos un Windows 7 trataba
+     el ejecutable como legado. Versión 3.08.0.0.
+   - SIMPLIFICACIÓN: InitInstance pierde los dos CreateWindow gemelos
+     (una sola llamada con la posición calculada antes); el progreso de
+     la carga sale de UN helper (LoadProgressPost) con el throttle en el
+     propio LoadJob. Ni menú ni aceleradores cambian: el .rc 3.06 vale
+     tal cual (su cabecera solo se actualiza). APP_VERSION dice "3.08".
 
    Novedades de la revisión 3.07 (REVISIÓN: COLA HEX, PORTAPAPELES, GOTO Y RENDIMIENTO):
    - LA ÚLTIMA PÁGINA HEX PERDÍA HASTA 15 BYTES DEL FINAL DEL FICHERO.
@@ -392,7 +635,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.07"
+#define APP_VERSION L"3.15"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -402,8 +645,32 @@
 // 0xFFFFFFFF (not found), 0 (cancelled) or 2 (3.07: could not scan at all —
 // the file vanished or the chunk buffer did not fit). The found OFFSET
 // travels in g_qwSearchResult: wParam is only 32 bits on Win32 builds.
+// 3.08: the scanned POSITION travels in the progress message itself
+// (wParam = low half, lParam = high half): a volatile ULONGLONG shared
+// with the UI thread was a torn read on Win32.
 #define WM_APP_SEARCHPROGRESS (WM_APP + 2)
 #define WM_APP_SEARCHDONE (WM_APP + 3)
+// WM_APP_LOADPREVIEW: the worker's FIRST PAINT — lParam = LoadPreview*
+// (owned by the UI thread on arrival); it arrives strictly before
+// WM_APP_LOADDONE of the same job (same thread, same queue order).
+// 3.12: the load progress no longer travels as messages. Three revisions
+// posted the right permille and the bar still stranded on real machines —
+// a posted tick is only a REQUEST to paint, and the request lost every
+// race against the queue. The worker now publishes the permille in the
+// ATOMIC LoadJob::pmProgress and the UI polls it with IDT_LOADPROG.
+#define WM_APP_LOADPREVIEW (WM_APP + 5)
+
+// 3.12: the load-bar poll timer (the tail watcher keeps timer id 1).
+// 3.13: 16 ms (~60 samples/s) — the worker now publishes EVERY chunk tick
+// (the 62 ms throttle is gone), and this period is what paces the pixels.
+#define IDT_LOADPROG 2
+
+// 3.14: la entrega de páginas grandes se trocea y se bombea (ver la
+// cabecera): por encima de este número de caracteres el texto ya no entra
+// en un EM_SETHANDLE monolítico, sino en trozos de 1M de caracteres con
+// bombeo entre trozos y permille real en la barra. Una página de 30 MB son
+// ~30 trozos: la barra camina y el hilo UI respira entre trozo y trozo.
+#define CB_SLICE_CHARS (1 << 20)
 
 
 /* -------------------------------------------------------------------------------------------- */
@@ -412,6 +679,8 @@ WCHAR szTitle[MAX_LOADSTRING];                  // Title bar text
 WCHAR szWindowClass[MAX_LOADSTRING];            // main window class name
 HWND hEdit;
 HWND hStatusBar;
+HWND g_hProgress;                               // 3.08: load progress bar, child of the status bar (size part)
+static LONG s_pmApplied = -2;                   // 3.12: last permille painted by the load-bar poll
 HFONT hFont;
 HFONT hFontHexBold;                             // same family and size as hFont, bold: offset column
 int iHexLineH = 0;                              // editor line height in pixels (from hFont's metrics)
@@ -437,15 +706,24 @@ DWORD* g_pBookmarks = nullptr;                  // bookmarked lines (page-relati
 int g_cBookmarks = 0, g_cBookmarksMax = 0;
 ULONGLONG g_qwPendingGoto = (ULONGLONG)-1;     // byte offset to position on when its page lands
 bool g_bInByteSearch = false;                   // raw-file byte scan in progress: blocks loads and the tail timer
+bool g_bInDelivery = false;                     // 3.14: the sliced delivery owns the pump — every load gate checks it
+// 3.14: the delivery's feed for the poll while the job is already landed
+// (g_pJob is null inside ApplyLoadResult): -2 nothing, -1 marquee (stdin),
+// 0..1000 permille of the text already inside the control. The UI thread
+// both writes and reads it: a plain volatile LONG, no interlocked needed.
+static volatile LONG s_pmDeliver = -2;
 WCHAR g_szBytesPattern[128] = {};               // last pattern of Find Bytes (dialog default)
 bool g_bBytesHex = false;                       // last mode of Find Bytes: TRUE = hex pairs
 
 // --- Performance instrumentation (/timing switch) ---
 bool g_bTiming = false;                         // CLI /timing: show the per-phase load times
-volatile ULONGLONG g_msRead = 0;                // worker: raw read phase, ms
-volatile ULONGLONG g_msDecode = 0;              // worker: decode-to-text phase, ms
-volatile ULONGLONG g_msNormalize = 0;          // UI: CRLF normalization pass, ms
-volatile ULONGLONG g_msDeliver = 0;            // UI: hand the text to the EDIT control, ms
+// 3.08: DWORD, not ULONGLONG. The worker writes them and the UI thread
+// reads them: a volatile 64-bit store is TWO halves on Win32, so a read
+// could catch one half of each. Milliseconds fit a DWORD by a wide margin.
+volatile DWORD g_msRead = 0;                    // worker: raw read phase, ms
+volatile DWORD g_msDecode = 0;                  // worker: decode-to-text phase, ms
+volatile DWORD g_msNormalize = 0;              // UI: CRLF normalization pass, ms
+volatile DWORD g_msDeliver = 0;                // UI: hand the text to the EDIT control, ms
 
 // --- Preferences (4More.ini, written on exit, loaded before the switches) ---
 WCHAR g_szIniPath[MAX_PATH] = {};               // 4More.ini beside the executable ("" = no persistence)
@@ -469,7 +747,9 @@ DWORD g_cbSearchPat = 0;
 WCHAR g_szSearchFile[MAX_PATH] = {};            // 3.05: the worker's own copy of g_szCurrentFile (set at launch)
 HANDLE g_hSearchThread = nullptr;
 volatile LONG g_bSearchCancel = 0;              // ESC or a dying window: stop the scan
-volatile ULONGLONG g_qwSearchPos = 0;          // bytes scanned so far (status bar progress)
+// 3.08: g_qwSearchPos is GONE. The scanned position travels inside the
+// progress message (low/high halves): a volatile ULONGLONG written by the
+// worker and read by the UI thread is a torn read on Win32 builds.
 ULONGLONG g_qwSearchResult = (ULONGLONG)-1;   // found offset, -1 = not found
 
 // --- Edit control text adoption (EM_SETHANDLE, 2.98) ---
@@ -532,6 +812,34 @@ struct LoadJob
     bool   bKeepView = false;                   // page navigation: keep the view on screen (no re-detection)
     bool   bTailJump = false;                   // scroll to the end once the page is applied (tail mode)
 
+    // 3.08: serial number of this job, assigned on the UI thread in
+    // BeginLoadJob and carried by every message the job posts. A message
+    // left in the queue by a FINISHED job (the no-threads fallback queues
+    // its ticks/previews after ApplyLoadResult already ran) is recognized
+    // and dropped instead of painting over the next load.
+    unsigned int uSeq = 0;
+    // 3.13: msNextProgress (the 3.08 worker-side throttle) is GONE — the
+    // throttle throttled the wrong side. Publishing into the atomic costs
+    // nanoseconds and floods no queue; the POLL is what paces the pixels.
+    bool   bBarPosted = false;                  // 3.10: at least one tick was published (the bar is on screen)
+    // 3.12: the bar's truth, readable by the UI at any moment: -2 nothing
+    // published yet, -1 unknown total (stdin, marquee), 0..1000 permille.
+    // The worker writes it with InterlockedExchange, the UI's WM_TIMER
+    // poll reads it with InterlockedCompareExchange — a 32-bit interlocked
+    // store is tear-free on Win32 and x64 alike, which a plain 64-bit
+    // field is not (it splits in two halves on the 32-bit build).
+    volatile LONG pmProgress = -2;
+    // 3.14: the delivery's place on the ONE shared scale. The worker fills
+    // them at the read-done tick (bytes actually read, and the build
+    // estimate over those bytes); the sliced delivery continues the SAME
+    // permille from there up to 1000 as the text really lands in the
+    // control, so the bar never jumps backwards between phases. Both 0
+    // means "no positions to publish" (stdin: the marquee stays; a load
+    // that failed mid-read: the last real tick holds). Filled ONLY on the
+    // worker thread, read only after WM_APP_LOADDONE: plain fields.
+    ULONGLONG qwProgRead = 0;
+    ULONGLONG qwProgBuild = 0;
+
     // The single exit door for every failure path: a cancelled load, a job
     // freed without ApplyLoadResult ever running, an exception during the
     // read. Whatever was not adopted by the UI is released here.
@@ -545,6 +853,21 @@ struct LoadJob
 LoadJob* g_pJob = nullptr;                      // != nullptr while a load is in flight
 HANDLE g_hLoadThread = nullptr;                 // handle of the load worker (async mode)
 volatile LONG g_bLoadCancel = 0;                // set by the UI to stop the worker
+static unsigned int s_uLoadSeq = 0;             // 3.08: grows by one per job (UI thread only)
+
+// 3.08: the load worker's first paint (WM_APP_LOADPREVIEW). One small
+// struct on the heap: the UI thread owns it on arrival — it delivers the
+// text through the usual EM_SETHANDLE path, or frees it (job gone, serial
+// stale, cancel). Posted strictly before WM_APP_LOADDONE of the same job.
+struct LoadPreview
+{
+    unsigned int uSeq = 0;                      // must match g_pJob->uSeq to be shown
+    int    iView = VIEW_ANSI;                   // the view the text was decoded for
+    ULONGLONG qwBase = 0;                       // 3.09: file offset of the window (gutter offsets)
+    DWORD  cbBytes = 0;                         // 3.09: bytes of the window (the gutter reads cbFile)
+    DWORD  cch = 0;                             // characters in pText
+    WCHAR* pText = nullptr;                     // decoded AND normalized: ready for EM_SETHANDLE
+};
 
 
 /* -------------------------------------------------------------------------------------------- */
@@ -566,6 +889,9 @@ BOOL ShowViewSafely(void);                      // ApplyView wrapped in SEH
 void RecoverEditAfterViewFailure(void);
 void UpdateStatusBar(bool bForce = false);      // bForce rewrites even unchanged parts
 void LayoutStatusBar(int iWidth);               // status bar split shared by create/resize
+void PositionProgress(void);                    // 3.08: the load bar rides the size part of the status bar
+void HideLoadProgress(void);                    // 3.08: retire the load bar (job landed or window dying)
+void OnLoadProgressTimer(void);                 // 3.12: the WM_TIMER poll that feeds the load bar
 void ApplyEditorFont(void);
 void ChangeEditorFont(int iStep);
 void UpdateHexMetrics(void);                    // line height / column width of the editor font
@@ -577,12 +903,12 @@ HMENU FindSubMenuWithCommand(HWND hWnd, UINT uCommand);   // the bar popup ownin
 void UpdateViewMenu(void);
 void SetView(int iNewView);
 void ApplyView(void);
-bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr);   // 3.02: los dos últimos responden la ventana de BYTES que se decodificó
+bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, LoadJob* pProgJob = nullptr);   // 3.02: los dos últimos responden la ventana de BYTES que se decodificó; 3.10: pProgJob, solo el worker manda tics
 int DetectDefaultView(const BYTE* pBytes, DWORD cb);
-void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1); // deliver + own/free the buffer
-BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1); // DeliverTextToEdit wrapped in SEH
+void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, bool bProgress = false, LONG pmStart = -2, ULONGLONG qwProgRead = 0, ULONGLONG qwProgBuild = 0); // deliver + own/free the buffer
+BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, bool bProgress = false, LONG pmStart = -2, ULONGLONG qwProgRead = 0, ULONGLONG qwProgBuild = 0); // DeliverTextToEdit wrapped in SEH
 void AdoptEmptyText(void);                      // swap in an empty block (EM_SETHANDLE, 2.98)
-WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch);
+WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch, LoadJob* pProgJob = nullptr);    // 3.10: pProgJob activa los tics de construcción (solo el worker la pasa)
 bool IsBinaryData(const BYTE* pBytes, DWORD cb);
 bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb);
 bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb);   // 2.99: UTF-8 sin BOM
@@ -663,6 +989,14 @@ int g_iFontIndex = 4;                           // -12, the shipped default
 // encoding (see RunLoadJob's two-phase read and DetectDefaultView).
 #ifndef DETECT_WINDOW_BYTES
 #define DETECT_WINDOW_BYTES (64 * 1024)
+#endif
+
+// 3.08: the FIRST PAINT (WM_APP_LOADPREVIEW) is posted when the page still
+// has more than this left to read (or a pipe keeps streaming): below it the
+// full load lands before the preview could matter. The preview itself
+// decodes the detection window (64 KB, several screens of text).
+#ifndef PREVIEW_REST_BYTES
+#define PREVIEW_REST_BYTES (256 * 1024)
 #endif
 
 
@@ -775,20 +1109,17 @@ bool InitInstance(HINSTANCE hInstance, int nCmdShow)
     hInst = hInstance; // Store instance handle in a global variable
 
     // Restored placement (2.94): the INI position wins over CW_USEDEFAULT;
-    // a plain Show follows when nothing was persisted.
-    HWND hWnd = nullptr;
+    // a plain Show follows when nothing was persisted. 3.08: the two
+    // CreateWindow twins are one call — only the placement changes.
+    int x = CW_USEDEFAULT, y = 0, cx = CW_USEDEFAULT, cy = 0;
     if (g_bWinPos)
     {
-        hWnd = CreateWindow(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-            g_rcWinInit.left, g_rcWinInit.top,
-            g_rcWinInit.right - g_rcWinInit.left, g_rcWinInit.bottom - g_rcWinInit.top,
-            nullptr, nullptr, hInstance, nullptr);
+        x = g_rcWinInit.left;
+        y = g_rcWinInit.top;
+        cx = g_rcWinInit.right - g_rcWinInit.left;
+        cy = g_rcWinInit.bottom - g_rcWinInit.top;
     }
-    else
-    {
-        hWnd = CreateWindow(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
-    }
-
+    HWND hWnd = CreateWindow(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW, x, y, cx, cy, nullptr, nullptr, hInstance, nullptr);
     if (!hWnd)
     {
         return(false);
@@ -1007,6 +1338,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         RECT rcClient;
         GetClientRect(hWnd, &rcClient);
         LayoutStatusBar(rcClient.right);
+        // 3.08: the load progress bar lives INSIDE the status bar, over its
+        // size part (the "0 bytes" corner). Hidden until the first progress
+        // tick of a job: a load that ends before its first tick never sees it.
+        g_hProgress = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | PBS_SMOOTH, 0, 0, 0, 0, hStatusBar, (HMENU)IDC_PROGRESS, hInst, nullptr);
+        SendMessage(g_hProgress, PBM_SETRANGE32, 0, 1000);
+        PositionProgress();
         // Drag & drop: accept files dropped onto the window.
         DragAcceptFiles(hWnd, TRUE);
         // Allow drag & drop from non-elevated processes (Explorer) when running elevated.
@@ -1104,6 +1441,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 }
             }
         }
+        // 3.12: the load-bar poll. The worker publishes the permille in
+        // the atomic job field; this timer turns it into pixels. No
+        // posted tick to lose, no stale-serial gate: the value read IS
+        // the live job's (g_pJob).
+        else if (wParam == IDT_LOADPROG)
+        {
+            OnLoadProgressTimer();
+        }
         break;
     case WM_DROPFILES:
     {
@@ -1133,26 +1478,77 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (pJob != nullptr && pJob == g_pJob)
         {
             g_pJob = nullptr;       // ownership moves here; guard against stale posts
+            // 3.14: the poll OUTLIVES the job now: ApplyLoadResult's sliced
+            // delivery feeds the bar (s_pmDeliver) and the timer dies at the
+            // END of ApplyLoadResult, when the bar retires. A stale post
+            // that skips ApplyLoadResult leaves the poll one fire away from
+            // its own self-retire (g_pJob null, s_pmDeliver -2).
             HANDLE hThread = g_hLoadThread;
             g_hLoadThread = nullptr;
             if (hThread != nullptr)
             {
                 CloseHandle(hThread);   // worker has posted its final message
             }
+            // 3.09: the bar retires at the END of ApplyLoadResult, not
+            // here — hiding it before the delivery left the status on
+            // "Loading..." with NO bar while the swap landed.
             ApplyLoadResult(pJob);          // adopts results and frees pJob
+        }
+        return(0);
+    }
+    // 3.12: WM_APP_LOADPROGRESS is GONE — the progress no longer travels
+    // as messages. The worker publishes the permille in the atomic job
+    // field; the IDT_LOADPROG WM_TIMER poll reads it and paints. Three
+    // revisions of the message path (3.09-3.11) posted correct positions
+    // that never all reached the screen; a poll of atomic ground truth
+    // has no queue to lose them in.
+    case WM_APP_LOADPREVIEW:
+    {
+        // 3.08: the worker's first paint. Adopted only while ITS job is
+        // still the one in flight (same serial, not cancelled): the text
+        // enters through the usual EM_SETHANDLE delivery and the full page
+        // replaces it when it lands. Any stale preview is freed here
+        // without touching the screen — the synchronous fallback queues
+        // its preview AFTER ApplyLoadResult, and a cancelled job never
+        // shows one either.
+        LoadPreview* pPv = (LoadPreview*)lParam;
+        if (pPv != nullptr)
+        {
+            if (g_pJob != nullptr && !g_bLoadCancel && pPv->uSeq == g_pJob->uSeq && pPv->pText != nullptr)
+            {
+                // 3.09: stage the window the preview shows (view, base,
+                // byte count) BEFORE delivering: GutterWidth answers 0
+                // while cbFile is 0, so the hex offset column (and the
+                // line numbers) would miss from the first paint — the
+                // exact screen the user watches while the rest loads.
+                // ApplyLoadResult overwrites the three with the real
+                // page on LOADDONE, and UpdateStatusBar stays on
+                // "Loading..." while g_pJob lives, so nothing misleading
+                // is written with the staged values.
+                iView = pPv->iView;
+                g_qwBase = pPv->qwBase;
+                cbFile = pPv->cbBytes;
+                DeliverTextSafely(pPv->pText, (int)pPv->cch, TRUE);
+            }
+            else
+            {
+                FreeViewText(pPv->pText);
+            }
+            delete pPv;
         }
         return(0);
     }
     case WM_APP_SEARCHPROGRESS:
     {
-        // Worker progress tick (~10/s): offset scanned so far. The
-        // position arrives in g_qwSearchPos (the worker is done with
-        // it by the time this message is processed, but re-reading it
-        // here keeps one source of truth for the status bar).
+        // Worker progress tick (~10/s): offset scanned so far. 3.08: the
+        // position travels IN the message (wParam = low half, lParam =
+        // high half) instead of a volatile 64-bit global the UI thread
+        // could read torn on Win32.
         if (g_bInByteSearch)
         {
+            ULONGLONG qwPos = ((ULONGLONG)(DWORD)lParam << 32) | (ULONGLONG)(DWORD)wParam;
             WCHAR szPos[40];
-            FormatU64Locale(szPos, 40, g_qwSearchPos);
+            FormatU64Locale(szPos, 40, qwPos);
             WCHAR szStatus[96];
             wsprintfW(szStatus, L"Searching... %s (ESC = cancel)", szPos);
             SendMessage(hStatusBar, SB_SETTEXTW, 0, (LPARAM)szStatus);
@@ -1253,6 +1649,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
         SaveSettings();                     // 2.94: while the window still exists
         KillTimer(hWnd, 1);            // tail watcher: never fire into a dying window
+        KillTimer(hWnd, IDT_LOADPROG);      // 3.12: the load-bar poll dies with the window
+        HideLoadProgress();                 // 3.08: stop the marquee timer; the bar dies with the status bar
+        g_hProgress = nullptr;
         ClearBookmarks();
         if (hDlgFind != nullptr)
         {
@@ -1667,9 +2066,9 @@ void LoadFile(const WCHAR* pacFilename)
     {
         return;
     }
-    if (g_bInByteSearch)
+    if (g_bInByteSearch || g_bInDelivery)
     {
-        return;             // a raw-file scan is using the UI: loads wait for it
+        return;             // a raw-file scan or a sliced delivery is using the UI: loads wait
     }
     if (g_pJob != nullptr)
     {
@@ -1716,6 +2115,7 @@ LoadJob* BeginLoadJob(bool bStdin)
     }
     pJob->bStdin = bStdin;
     pJob->hWnd = hWndMain;
+    pJob->uSeq = ++s_uLoadSeq;              // 3.08: every message of this job carries it
     g_bLoadCancel = 0;
     return(pJob);
 }
@@ -1728,12 +2128,21 @@ LoadJob* BeginLoadJob(bool bStdin)
 void LaunchLoadJob(LoadJob* pJob)
 {
     g_pJob = pJob;                          // busy marker (cleared on WM_APP_LOADDONE / WM_DESTROY)
+    // 3.12: the bar is fed by THIS poll, not by posted ticks: a WM_TIMER
+    // that reads the job's atomic permille and paints. 3.13: the period is
+    // 16 ms (~60 samples/s) — the worker publishes every chunk tick now,
+    // and the poll is the only pacing the pixels need. It dies on
+    // WM_APP_LOADDONE, on WM_DESTROY, and by its own guard if it ever
+    // fires with the job already gone.
+    SetTimer(pJob->hWnd, IDT_LOADPROG, 16, nullptr);
 
     uintptr_t hThread = _beginthreadex(nullptr, 0, LoadThreadProc, pJob, 0, nullptr);
     if (hThread == 0)
     {
         // No threads available (nothing else is expected to fail here):
-        // run inline so the file still opens, exactly as before.
+        // run inline so the file still opens, exactly as before. The
+        // poll would find g_pJob null and retire itself: stop it first.
+        KillTimer(pJob->hWnd, IDT_LOADPROG);
         g_pJob = nullptr;
         RunJobSynchronously(pJob);
         return;
@@ -1941,6 +2350,140 @@ static void PlanCRLFPass(int iView, const BYTE* pBytes, DWORD dwSrcOff, DWORD dw
 
 
 /* -------------------------------------------------------------------------------------------- */
+// 3.10: estimated WCHAR count of the text a page of cb bytes builds into,
+// per view. It only shapes the progress scale: read ticks and build ticks
+// must share ONE monotone 0..1000 permille bar, so the worker adds this
+// estimate to the page bytes as the tail of the total. Drift is harmless:
+// the load ends with a forced 100% tick before WM_APP_LOADDONE.
+static ULONGLONG EstBuildChars(int iView, ULONGLONG cb)
+{
+    if (iView == VIEW_HEX)
+    {
+        return cb * 17 / 4 + 16;            // hex dump: x4.25 the bytes (dump + CRLFs)
+    }
+    if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+    {
+        return cb / 2 + 2;                  // one WCHAR per two source bytes
+    }
+    return cb + 2;                          // ANSI / UTF-8 / EBCDIC: about one char per byte
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 3.08/3.13: one progress publish of the load worker. qwTotal == 0 means
+// "unknown total" (stdin): pm -1, the bar goes marquee. 3.13: EVERY call
+// publishes — the 3.08 throttle (62 ms, msNextProgress) throttled the wrong
+// side and stranded the bar for four revisions (3.09-3.12): it was born when
+// a tick was a PostMessage and the queue had to be protected, but in 3.12+
+// the value lands in the ATOMIC job field pmProgress — an InterlockedExchange
+// costs nanoseconds and there is no queue to flood. On fast media the whole
+// read fit inside one 62 ms window, so EVERY chunk tick was swallowed and the
+// bar's only possible values were ~0%, the read-done 50% and the final 100%:
+// nothing any poll could animate. The side that actually needs pacing is the
+// REPAINT, and the UI poll already paces it (it paints only when the value
+// changed, at most once per timer period).
+static void LoadProgressPublish(LoadJob* pJob, ULONGLONG qwDone, ULONGLONG qwTotal)
+{
+    pJob->bBarPosted = true;                // a publish went out; the bar is (or is about to be) shown
+    LONG pm;
+    if (qwTotal == 0)
+    {
+        pm = -1;                            // no total to show: marquee
+    }
+    else
+    {
+        ULONGLONG pmv = (qwDone * 1000) / qwTotal;
+        if (pmv > 1000)
+        {
+            pmv = 1000;
+        }
+        pm = (LONG)pmv;
+    }
+    InterlockedExchange(&pJob->pmProgress, pm);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 3.08: builds the FIRST PAINT from the window the worker already holds
+// (the detection window: 64 KB, several screens of text) and posts it.
+// Best-effort by design: any failure just means the file opens as it
+// always did. The preview text is normalized HERE (worker side), so the
+// UI delivery is the plain EM_SETHANDLE path. cbAll is clamped to the
+// window itself so BuildViewText appends no truncation notice, and the
+// UTF-8 tail is cut back to a whole sequence so no Windows version falls
+// back to the ANSI decoder for the preview (the full page has its own
+// complete-sequence logic in BuildViewText).
+static void PostLoadPreview(LoadJob* pJob, int iViewPrev, DWORD cbPrev)
+{
+    if (iViewPrev == VIEW_UTF8 && cbPrev > 0)
+    {
+        DWORD iBack = 0;
+        while (iBack < 3 && iBack < cbPrev && (pJob->pBytes[cbPrev - 1 - iBack] & 0xC0) == 0x80)
+        {
+            iBack++;                    // continuation bytes of a sequence cut by the window
+        }
+        if (iBack < cbPrev)
+        {
+            BYTE b = pJob->pBytes[cbPrev - 1 - iBack];
+            int cbSeq = (b < 0x80) ? 1 : (b < 0xE0) ? 2 : (b < 0xF0) ? 3 : 4;
+            if (cbSeq > (int)iBack + 1)
+            {
+                cbPrev -= iBack + 1;    // the lead byte's tail is missing: drop it
+            }
+        }
+        if (cbPrev == 0)
+        {
+            return;                     // nothing decodable in the window
+        }
+    }
+    WCHAR* pText = nullptr;
+    DWORD cch = 0, dwSrcOff = 0, dwSrcLen = 0;
+    if (!BuildViewText(iViewPrev, pJob->pBytes, cbPrev, pJob->qwBase + (ULONGLONG)cbPrev, pJob->qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen) || pText == nullptr || cch == 0)
+    {
+        FreeViewText(pText);
+        return;
+    }
+    // The same CRLF plan as the final load, decided on the preview window.
+    bool bNeedNorm = false;
+    int cExpand = -1;
+    PlanCRLFPass(iViewPrev, pJob->pBytes, dwSrcOff, dwSrcLen, bNeedNorm, cExpand);
+    if (bNeedNorm)
+    {
+        int cchNorm = 0;
+        WCHAR* pNorm = NormalizeNewlines(pText, (int)cch, &cchNorm, cExpand);
+        if (pNorm == nullptr)
+        {
+            FreeViewText(pText);
+            return;
+        }
+        if (pNorm != pText)
+        {
+            FreeViewText(pText);        // the expanded copy replaced the original
+        }
+        pText = pNorm;
+        cch = (DWORD)cchNorm;
+    }
+    LoadPreview* pPv = new (std::nothrow) LoadPreview();
+    if (pPv == nullptr)
+    {
+        FreeViewText(pText);
+        return;
+    }
+    pPv->uSeq = pJob->uSeq;
+    pPv->iView = iViewPrev;
+    pPv->qwBase = pJob->qwBase;         // 3.09: the first paint carries its gutter state
+    pPv->cbBytes = cbPrev;
+    pPv->cch = cch;
+    pPv->pText = pText;
+    if (!PostMessage(pJob->hWnd, WM_APP_LOADPREVIEW, 0, (LPARAM)pPv))
+    {
+        FreeViewText(pText);            // queue full: the final page will paint anyway
+        delete pPv;
+    }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
 // Real load, in two phases:
 //   1) read only the first DETECT_WINDOW_BYTES and decide the encoding on
 //      them (DetectDefaultView);
@@ -1972,7 +2515,7 @@ void RunLoadJob(LoadJob* pJob)
         // a viewer must not lock out the program that is still writing
         // the log being watched (the classic "in use" on live logs).
         // About speed: FILE_FLAG_SEQUENTIAL_SCAN (read-ahead) is already
-        // on and the reads below run in 4 MB chunks; FILE_FLAG_NO_BUFFERING
+        // on and the reads below run in 1 MB chunks; FILE_FLAG_NO_BUFFERING
         // would demand sector-aligned reads and evict the small tail
         // re-reads from the cache: it does not pay off for a viewer.
         hFile = CreateFileW(pJob->szPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
@@ -2060,6 +2603,10 @@ void RunLoadJob(LoadJob* pJob)
                 break;                  // EOF (file shorter than reported)
             }
             cbTotal += cbRead;
+            if (pJob->bStdin)
+            {
+                LoadProgressPublish(pJob, 0, 0);    // 3.08: stdin: no total to measure, marquee
+            }
         }
 
         // The detected encoding is decided on whatever phase 1 brought
@@ -2076,6 +2623,61 @@ void RunLoadJob(LoadJob* pJob)
             iDetected = DetectDefaultView(pJob->pBytes, cbTotal);
         }
         DWORD cbCap = (iDetected == VIEW_HEX) ? CB_HEX_MAX : CB_TEXT_MAX;
+
+        // 3.10: ONE scale for the whole page load: the bytes the page reads
+        // (min(rest on disk, cap)) plus the chars its build will emit. The
+        // initial tick, the chunk ticks, the read-done tick and the hex
+        // build ticks all post against it, so the bar climbs monotonically
+        // from the first tick to the forced 100%.
+        ULONGLONG cbAvailPage = (cbOnDisk > pJob->qwBase) ? (cbOnDisk - pJob->qwBase) : 0;
+        ULONGLONG cbPage = (cbAvailPage < (ULONGLONG)cbCap) ? cbAvailPage : (ULONGLONG)cbCap;
+        ULONGLONG cchExp = EstBuildChars(iDetected, cbPage);
+
+        // 3.09: FIRST PAINT — hex included now. The load is not a tail
+        // jump (it would end at the END of the file, not the beginning)
+        // and there is still a meaningful rest to read: decode the window
+        // the worker already holds and let the user see the beginning of
+        // the file while the rest of the page is still coming in. 3.08
+        // skipped hex believing its capped read (8 MB) was the whole
+        // cost, but the dump build (x4.25) and the delivery after it are
+        // visible work on real files. A small file skips it: its full
+        // load lands first. The full page replaces this when it lands.
+        if (!bCancelled && !bReadError && !pJob->bTailJump && cbTotal > 0)
+        {
+            bool bMoreComing;
+            if (pJob->bStdin)
+            {
+                bMoreComing = (cbTotal >= cbHead);      // first window full: the stream is alive
+            }
+            else
+            {
+                ULONGLONG cbAvailPrev = (cbOnDisk > pJob->qwBase) ? (cbOnDisk - pJob->qwBase) : 0;
+                ULONGLONG cbWantPrev = (cbAvailPrev < (ULONGLONG)cbCap) ? cbAvailPrev : (ULONGLONG)cbCap;
+                bMoreComing = (cbWantPrev > (ULONGLONG)PREVIEW_REST_BYTES);
+            }
+            if (bMoreComing)
+            {
+                PostLoadPreview(pJob, iDetected, cbTotal);
+            }
+        }
+
+        // 3.09: the bar goes up BEFORE the long read, not after its first
+        // chunk — one tick at ~1% raises it the moment phase 2 has real
+        // work, same "meaningful rest" gate as the preview, so a small
+        // page still loads bar-less. stdin is not here: it already ticks
+        // marquee from phase 1. 3.13: with the throttle gone the chunk
+        // ticks below also publish unconditionally, so this initial tick
+        // is no longer the bar's only chance to appear — it just makes
+        // the bar visible a hair earlier (before the first chunk lands).
+        // 3.10: the scale is the PAGE (bytes + estimated build chars), the
+        // same one the chunk ticks and the build ticks use — the old total
+        // (the whole rest of the FILE) put a 200 MB load at ~0 permille on
+        // a scale its own page ticks ran to 1000.
+        if (!bCancelled && !bReadError && !pJob->bStdin &&
+            cbPage > (ULONGLONG)cbTotal && cbPage - (ULONGLONG)cbTotal > (ULONGLONG)PREVIEW_REST_BYTES)
+        {
+            LoadProgressPublish(pJob, cbTotal, cbPage + cchExp);
+        }
 
         // ---- Phase 2: only what the detected view can ever display -------------
         if (!bCancelled && !bReadError)
@@ -2130,16 +2732,19 @@ void RunLoadJob(LoadJob* pJob)
                         break;                  // EOF: normal end of the stream
                     }
                     cbTotal += cbRead;
+                    LoadProgressPublish(pJob, 0, 0);    // 3.08: stdin: marquee while the pipe streams
                 }
             }
             else if (cbOnDisk - pJob->qwBase > (ULONGLONG)cbTotal)
             {
                 // File: one exact allocation for min(size left from the page
-                // base, cap), the head copied in, the rest read in 4 MB chunks
-                // (fewer system calls on large files; cancel still instant).
-                ULONGLONG cbAvail = cbOnDisk - pJob->qwBase;
-                ULONGLONG cbWant = (cbAvail < (ULONGLONG)cbCap) ? cbAvail : (ULONGLONG)cbCap;
-                DWORD cbFinal = (DWORD)cbWant;
+                // base, cap), the head copied in, the rest read in 1 MB chunks
+                // (3.12: was 4 MB — finer progress ticks and honest granularity
+                // on slow media; still far above the read sizes that make large
+                // files crawl, and the sequential read-ahead keeps the width).
+                // 3.10: cbPage IS min(rest, cap), derived above for the
+                // progress scale — the same number this branch re-derived.
+                DWORD cbFinal = (DWORD)cbPage;
                 if (cbFinal > cbTotal)
                 {
                     BYTE* pExact = new BYTE[cbFinal];
@@ -2155,9 +2760,9 @@ void RunLoadJob(LoadJob* pJob)
                             break;
                         }
                         DWORD cbChunk = cbFinal - cbTotal;
-                        if (cbChunk > (4 << 20))
+                        if (cbChunk > (1 << 20))
                         {
-                            cbChunk = 4 << 20;
+                            cbChunk = 1 << 20;
                         }
                         if (!ReadFile(hFile, pJob->pBytes + cbTotal, cbChunk, &cbRead, nullptr))
                         {
@@ -2169,8 +2774,43 @@ void RunLoadJob(LoadJob* pJob)
                             break;          // EOF (file shorter than reported)
                         }
                         cbTotal += cbRead;
+                        LoadProgressPublish(pJob, cbTotal, cbPage + cchExp);    // 3.10: permille of read+build
                     }
                 }
+            }
+        }
+
+        // 3.10: the read phase is over — land the bar at its true end. The
+        // chunk ticks measure DONE bytes, so the last partial chunk and any
+        // file that shrank mid-read would otherwise leave the bar a hair
+        // short of the read's real end. 3.13: this is no longer a "force"
+        // against a throttle — every chunk already published — it is the
+        // honest snap to the end of the READ phase on the one shared scale
+        // (page bytes + estimated build chars) where the hex build ticks
+        // pick it up. Same gate as before: a small page decodes in
+        // milliseconds and must not flash the bar. The max() keeps the
+        // scale honest when a rare handle could not size itself (cbPage 0)
+        // or the file shrank mid-read.
+        if (!bCancelled && !bReadError && cbTotal > (ULONGLONG)PREVIEW_REST_BYTES)
+        {
+            if (pJob->bStdin)
+            {
+                LoadProgressPublish(pJob, 0, 0);      // unknown total: marquee through the decode
+            }
+            else
+            {
+                ULONGLONG cbPageRead = (cbPage > (ULONGLONG)cbTotal) ? cbPage : (ULONGLONG)cbTotal;
+                // The estimate rides cbPageRead (not cbPage): with cbPage 0 or
+                // a shrunken file the scale still starts where the build's
+                // own ticks (cb = the bytes actually read) will continue it.
+                ULONGLONG cchBuild = EstBuildChars(iDetected, cbPageRead);
+                // 3.14: these two numbers are the delivery's handoff — the
+                // sliced delivery in ApplyLoadResult continues THIS scale
+                // (same denominator, so no backwards jump) from the read-done
+                // permille up to 1000 as the text really lands in the control.
+                pJob->qwProgRead = cbPageRead;
+                pJob->qwProgBuild = cchBuild;
+                LoadProgressPublish(pJob, cbPageRead, cbPageRead + cchBuild);      // read done: land the bar
             }
         }
     }
@@ -2220,7 +2860,7 @@ void RunLoadJob(LoadJob* pJob)
     pJob->cbOnDisk = (!pJob->bStdin && cbOnDisk != 0) ? cbOnDisk : (ULONGLONG)cbTotal;
     pJob->bReadError = bReadError;
     pJob->bStreamTruncated = bTruncated;
-    g_msRead = GetTickCount64() - dwT0;     // /timing: raw read is done
+    g_msRead = (DWORD)(GetTickCount64() - dwT0);    // /timing: raw read is done
 
     // Decode the detected view now, on the worker: by the time the result
     // lands, the UI only has to hand the ready text to the edit control.
@@ -2235,7 +2875,7 @@ void RunLoadJob(LoadJob* pJob)
         WCHAR* pText = nullptr;
         DWORD cch = 0;
         DWORD dwSrcOff = 0, dwSrcLen = 0;       // 3.02: raw window the decode covered (O2)
-        if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen))
+        if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen, pJob))
         {
             WCHAR* pNorm = pText;
             int cchNorm = (int)cch;
@@ -2256,7 +2896,7 @@ void RunLoadJob(LoadJob* pJob)
             {
                 ULONGLONG dwT2 = GetTickCount64();      // /timing: the CRLF pass runs here
                 pNorm = NormalizeNewlines(pText, (int)cch, &cchNorm, cExpand);
-                g_msNormalize = GetTickCount64() - dwT2;
+                g_msNormalize = (DWORD)(GetTickCount64() - dwT2);
             }
             if (pNorm == nullptr)
             {
@@ -2293,7 +2933,17 @@ void RunLoadJob(LoadJob* pJob)
     {
         pJob->bOOM = true;              // bytes stay loaded; the UI reports the failure
     }
-    g_msDecode = GetTickCount64() - dwT1;   // /timing: decode-to-text is done
+    // 3.14: the worker's forced 1000 tick is GONE. It said "done" when only
+    // the READ was done — and it was the tick that painted the bar FULL
+    // right before the delivery froze this thread inside the EM_SETHANDLE
+    // swap: a full bar frozen for the seconds the swap took is what the
+    // user read as "estancada". The worker's last word is the read-done
+    // tick above; the 1000 now belongs to the delivery, published after
+    // the last slice, when the text is really inside the control. For the
+    // deliveries that cannot tick (Word Wrap: the control rewraps the
+    // whole text in one call) ApplyLoadResult keeps 3.10's signal — the
+    // full bar painted BEFORE the swap.
+    g_msDecode = (DWORD)(GetTickCount64() - dwT1);   // /timing: decode-to-text is done
 }
 
 
@@ -2338,13 +2988,45 @@ void ApplyLoadResult(LoadJob* pJob)
 
     WCHAR* pText = pJob->pText;
     pJob->pText = nullptr;
+    // 3.09: write the DEFINITIVE status before the delivery. g_pJob is
+    // already null here, so the bar stops saying "Loading..." and shows
+    // the real size while the EM_SETHANDLE swap runs — that swap is the
+    // one stretch where the UI thread cannot repaint anything, and it
+    // must never look like the load is stuck. DeliverTextToEdit refreshes
+    // the caret line at the end as always (cached: one rewrite total).
+    UpdateStatusBar();
+    // 3.15: Word Wrap YA NO excluye el troceo. El reenvuelto del EDIT
+    // no bloquea la entrega por slices: cada EM_REPLACESEL reenvuelve
+    // sólo el trozo que entra (igual que mantiene la tabla de líneas
+    // incremental desde el punto de edición), así que el troceo vale con
+    // y sin wrap. Antes, con wrap activo, la página grande caía en el
+    // bloque de abajo: barra pintada a 1000 ANTES del EM_SETHANDLE
+    // monolítico y luego el hilo UI helado dentro del reenvuelto — la
+    // barra llena congelada de 3.10, justo donde 3.14 la había resuelto
+    // para el camino sin wrap. Ese bloque (y su variable bSliced) sale:
+    // ahora la entrega troceada (con o sin wrap) publica permille real
+    // — caracteres ya dentro del control — en la MISMA escala de la
+    // lectura, y bombea entre trozos: la barra camina de ~50% a 100%
+    // durante los antiguos diez segundos, en TODOS los caminos de página
+    // grande. (stdin sigue en marquee: pm -1 no es una posición.)
     // 3.00: the worker already normalized the text (and the hex text never
     // needed it): the UI thread only delivers, so the load path always
     // skips the CRLF scan here. A structured failure inside the delivery
     // is remembered and reported together with the load errors below:
     // an empty window without an explanation is the one outcome worse
-    // than the message.
-    BOOL bDelivered = DeliverTextSafely(pText, (int)pJob->cchText, TRUE);
+    // than the message. 3.14: big pages deliver SLICED and pumped — the
+    // delivery itself publishes its progress on the worker's shared scale
+    // (pmStart carries the last real permille for the roads where the
+    // scale is gone: a failed read keeps its last tick, stdin its marquee).
+    LONG pmHandoff = InterlockedCompareExchange(&pJob->pmProgress, 0, 0);
+    BOOL bDelivered = DeliverTextSafely(pText, (int)pJob->cchText, TRUE, -1, true, pmHandoff, pJob->qwProgRead, pJob->qwProgBuild);
+    // 3.09: the bar retires AFTER the delivery (was: before, in the
+    // LOADDONE handler — the user watched "Loading..." with no bar during
+    // the swap). During the delivery the marquee may freeze for a moment
+    // with the UI thread busy; it stays VISIBLE, which is the honest
+    // signal while the page is not on screen yet.
+    HideLoadProgress();
+    KillTimer(hWndMain, IDT_LOADPROG);      // 3.14: the poll dies with the bar (it also self-retires between fires)
 
     // Errors are reported AFTER the content is in place, so the message
     // never precedes the state it describes.
@@ -2768,7 +3450,7 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
 // the current page (qwBase..qwBase+CB_HEX_MAX at most); when the file holds
 // more bytes past that window, a notice replaces the final CRLF of the last
 // line. cbAll is the REAL total on disk, the notice cites the page range.
-WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch)
+WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch, LoadJob* pProgJob)
 {
     if (cbAll < qwBase + (ULONGLONG)cb)
     {
@@ -2922,6 +3604,17 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
         }
         *p++ = L'\r';
         *p++ = L'\n';
+        // 3.10: build ticks for the load bar — only the worker passes a job
+        // (every UI-thread re-decode comes with nullptr and never ticks, and
+        // a bar no tick has raised yet stays hidden: bBarPosted gates it).
+        // Every 4096 lines (64 KB of page) the chars written so far join
+        // the page bytes on the one scale the read ticks opened, so the
+        // x4.25 dump build — the slow CPU stretch of a hex load — keeps the
+        // bar climbing to 100% instead of hiding behind a frozen marquee.
+        if (pProgJob != nullptr && pProgJob->bBarPosted && (iLine & 0xFFF) == 0)
+        {
+            LoadProgressPublish(pProgJob, (ULONGLONG)cb + (ULONGLONG)(p - pOut), (ULONGLONG)cb + EstBuildChars(VIEW_HEX, cb));
+        }
     }
     if (bTruncated)
     {
@@ -2959,7 +3652,7 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
 // false ONLY on out of memory — 3.05: checked HERE, because a null block used
 // to be stored and written through (an access violation that only the SEH
 // jackets happened to survive); the caller reports it.
-bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen)
+bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen, LoadJob* pProgJob)
 {
     *ppText = nullptr;
     *pcch = 0;
@@ -2987,7 +3680,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
     if (iViewBuild == VIEW_HEX)
     {
         DWORD cchHex = 0;
-        *ppText = BuildHexText(pBytes, cb, cbAll, qwBase, &cchHex);
+        *ppText = BuildHexText(pBytes, cb, cbAll, qwBase, &cchHex, pProgJob);
         if (*ppText == nullptr)
         {
             return(false);                  // 3.05: OOM answers FALSE, never a null dump
@@ -3318,6 +4011,145 @@ void AdoptEmptyText(void)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// 3.14: the pump of the sliced delivery. Drains the queue like the main
+// loop would (WM_QUIT is not ours to eat: re-post it and abort), and
+// answers false when this delivery has no window to finish into.
+static bool PumpDuringDelivery(HWND hEdit)
+{
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+    {
+        if (msg.message == WM_QUIT)
+        {
+            PostQuitMessage((int)msg.wParam);   // not ours: the main loop decides
+            return(false);
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+        if (hEdit != nullptr && !IsWindow(hEdit))
+        {
+            return(false);                      // the window died mid-delivery
+        }
+    }
+    return(true);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 3.14: the sliced half of DeliverTextToEdit — the big-page delivery in
+// slices the UI thread can breathe between. OWNS pNorm (and pOriginal
+// when the normalizer built a second buffer) on entry; frees them on
+// EVERY exit.
+//
+// The permille rides s_pmDeliver on the worker's ONE shared scale:
+//     pm = (qwProgRead + qwProgBuild * cchDone/cch) * 1000 / (qwProgRead+qwProgBuild)
+// which starts exactly at the read-done tick (cchDone = 0) and lands
+// EXACTLY on 1000 (cchDone = cch): one monotone bar for the whole load,
+// no jumps between phases. qwProgBuild == 0 publishes nothing: stdin
+// keeps its marquee (pmStart == -1) and a load that failed mid-read
+// keeps its last real tick (pmStart >= 0).
+//
+// The pump between slices is the whole point: it runs the 16 ms poll (the
+// bar paints), the status bar, the paints — everything a frozen swap used
+// to swallow — and keeps the window responsive so it never goes
+// "(Not responding)".
+static void DeliverTextSliced(WCHAR* pNorm, int cch, WCHAR* pOriginal, LONG pmStart, ULONGLONG qwProgRead, ULONGLONG qwProgBuild, ULONGLONG dwT0)
+{
+    g_bInDelivery = true;                   // the pump makes the UI thread reachable: every load gate is closed
+    LONG lStyle = GetWindowLong(hEdit, GWL_STYLE);
+    bool bAlive = true;
+    bool bOOM = false;
+    // The poll feeds from HERE now (the job landed a message ago). With a
+    // scale, the start permille is the read-done tick (same formula, same
+    // denominator); without one, whatever the job's last real state was.
+    s_pmDeliver = (qwProgBuild > 0) ? (LONG)(((qwProgRead * 1000) / (qwProgRead + qwProgBuild))) : pmStart;
+    SetTimer(hWndMain, IDT_LOADPROG, 16, nullptr);      // idempotent: the synchronous fallback arrives with its timer killed
+    // The control starts EMPTY: WM_SETTEXT makes it absorb/realloc whatever
+    // block it holds (the preview's, the previous page's) into its own
+    // buffer — no adopted block of ours is involved in this path, so no
+    // EM_GETHANDLE/GlobalFree dance. The app's block is sliced OUT, never
+    // adopted: it dies in the FreeViewText below.
+    SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM)L"");
+    // EM_REPLACESEL is refused on a read-only control: lift it for the
+    // loop, restore it on every road (single restore below).
+    SetWindowLong(hEdit, GWL_STYLE, lStyle & ~ES_READONLY);
+    DWORD cchDone = 0;
+    while (bAlive && cchDone < (DWORD)cch)
+    {
+        DWORD cchSlice = (DWORD)cch - cchDone;
+        if (cchSlice > CB_SLICE_CHARS)
+        {
+            cchSlice = CB_SLICE_CHARS;
+        }
+        SendMessage(hEdit, EM_SETSEL, (WPARAM)cchDone, (LPARAM)cchDone);        // caret at the end: the append point
+        SendMessage(hEdit, EM_REPLACESEL, FALSE, (LPARAM)(pNorm + cchDone));    // FALSE: nothing is undoable
+        if ((DWORD)SendMessage(hEdit, WM_GETTEXTLENGTH, 0, 0) < cchDone + cchSlice)
+        {
+            bOOM = true;                    // the control could not take the slice
+            break;
+        }
+        cchDone += cchSlice;
+        if (qwProgBuild > 0)
+        {
+            ULONGLONG pmv = ((qwProgRead + (qwProgBuild * (ULONGLONG)cchDone) / (ULONGLONG)cch) * 1000) / (qwProgRead + qwProgBuild);
+            if (pmv > 999)
+            {
+                pmv = 999;                  // the 1000 is published once, after the last slice
+            }
+            s_pmDeliver = (LONG)pmv;        // same thread: a plain store, the poll reads it on its next fire
+        }
+        bAlive = PumpDuringDelivery(hEdit); // the bar paints here; the window breathes
+    }
+    SetWindowLong(hEdit, GWL_STYLE, lStyle);            // read-only back, every road
+    if (bAlive)
+    {
+        // The last slice is in: NOW the 1000 means "on screen". The final
+        // pump paints the full bar AND the first screen of the text — the
+        // control's line table is already complete (the slices built it
+        // incrementally), so that first paint formats only the visible
+        // lines: no second stall anywhere.
+        if (qwProgBuild > 0)
+        {
+            s_pmDeliver = 1000;
+        }
+        if (g_bLineNums && iView != VIEW_HEX)
+        {
+            // 3.06/3.14: the line-number column follows the line count of
+            // the text JUST delivered — same as the monolithic tail, still
+            // inside the redraw lock (one paint per delivery).
+            LayoutEdit();
+        }
+        SendMessage(hEdit, EM_SETMODIFY, FALSE, 0);
+        SendMessage(hEdit, EM_EMPTYUNDOBUFFER, 0, 0);
+        SendMessage(hEdit, EM_SETSEL, 0, 0);
+        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+        SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(hEdit, nullptr, TRUE);
+        PumpDuringDelivery(hEdit);
+    }
+    else if (IsWindow(hEdit))
+    {
+        // Aborted mid-way (window closing, WM_QUIT): leave nothing locked.
+        SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(hEdit, nullptr, TRUE);
+    }
+    g_bInDelivery = false;
+    s_pmDeliver = -2;                       // the poll goes back to job-only feeding
+    if (pOriginal != nullptr && pOriginal != pNorm)
+    {
+        FreeViewText(pOriginal);            // the normalizer's second buffer
+    }
+    FreeViewText(pNorm);                    // sliced out, never adopted: ours to free
+    g_msDeliver = (DWORD)(GetTickCount64() - dwT0);         // /timing: delivery done (slices included)
+    if (bOOM && hWndMain != nullptr)
+    {
+        MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
+    }
+    UpdateStatusBar();
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
 // Delivers a decoded text to the edit control, repainting disabled, and OWNS
 // the buffer either way: freed here, or handed to the control to own.
 //
@@ -3341,7 +4173,7 @@ void AdoptEmptyText(void)
 // empty delivery), keeping its refusal check: if the control cannot take
 // the text (out of memory, usually on Win32), it is cleared and the user
 // is told instead of leaving stale content on screen.
-void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown)
+void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown, bool bProgress, LONG pmStart, ULONGLONG qwProgRead, ULONGLONG qwProgBuild)
 {
     if (hEdit == nullptr)
     {
@@ -3366,7 +4198,7 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
             MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
             return;
         }
-        g_msNormalize = GetTickCount64() - dwT0;       // /timing: the CRLF pass ran here
+        g_msNormalize = (DWORD)(GetTickCount64() - dwT0);       // /timing: the CRLF pass ran here
     }
 
     SendMessage(hEdit, WM_SETREDRAW, FALSE, 0);
@@ -3376,6 +4208,29 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
     // delivery instead of two (the old order painted the OLD text at the
     // new geometry first, then the new text again).
     LayoutEdit();
+    // 3.14/3.15: the sliced, pumped delivery of big pages. Above
+    // CB_SLICE_CHARS the text no longer enters in one monolithic
+    // EM_SETHANDLE — the call that rebuilds the control's whole line
+    // table on this thread with nothing able to paint: the exact stretch
+    // six revisions of progress transport could never cover. Each slice
+    // lands with EM_REPLACESEL at the end (the EDIT's line-table
+    // maintenance is incremental from the edit point: typing in Notepad
+    // stays fast on multi-MB documents for the same reason, so the total
+    // cost stays O(n)) and BETWEEN slices this thread pumps the queue:
+    // the 16 ms poll lives, the bar walks real permille, the window
+    // never ghosts. 3.15: Word Wrap YA NO excluye el troceo — el
+    // reenvuelto del EDIT se hace por trozo (cada EM_REPLACESEL
+    // reenvuelve sólo lo que entra, igual que su tabla de líneas se
+    // mantiene incremental), así que el camino con wrap activo ya no
+    // cae en el EM_SETHANDLE monolítico que helaba el hilo UI con la
+    // barra llena. bProgress=false callers (view switches, clipboard)
+    // keep the monolithic adopt: their stall is a separate, older
+    // trade-off.
+    if (bProgress && pNorm != nullptr && cch >= CB_SLICE_CHARS && IsWindow(hEdit))
+    {
+        DeliverTextSliced(pNorm, cch, (pNorm != pText) ? pText : nullptr, pmStart, qwProgRead, qwProgBuild, dwT0);
+        return;
+    }
     HGLOBAL hNew = nullptr;
     if (pNorm != nullptr && cch > 0)
     {
@@ -3428,7 +4283,7 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
     SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
     SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(hEdit, nullptr, TRUE);
-    g_msDeliver = GetTickCount64() - dwT0;         // /timing: delivery done
+    g_msDeliver = (DWORD)(GetTickCount64() - dwT0);         // /timing: delivery done
     // The content (and therefore the line/column meaning) changed: repaint
     // the whole status bar. UpdateStatusBar has no caches: it always writes
     // both parts, so the size shown can never be a stale "0 bytes".
@@ -3441,17 +4296,19 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
 // exception during delivery degrades to a recovered, empty control instead of
 // killing 4More. On compilers without SEH (the Linux audit bench) the mapping
 // turns this into the plain call.
-BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown)
+BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown, bool bProgress, LONG pmStart, ULONGLONG qwProgRead, ULONGLONG qwProgBuild)
 {
     BOOL bOk = FALSE;
     __try
     {
-        DeliverTextToEdit(pText, cch, bPreNormalized, cExpandKnown);
+        DeliverTextToEdit(pText, cch, bPreNormalized, cExpandKnown, bProgress, pmStart, qwProgRead, qwProgBuild);
         bOk = TRUE;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         RecoverEditAfterViewFailure();
+        g_bInDelivery = false;              // 3.14: an exception mid-delivery must not weld the load gates shut
+        s_pmDeliver = -2;
         bOk = FALSE;
     }
     return(bOk);
@@ -3670,6 +4527,123 @@ void LayoutStatusBar(int iWidth)
     piParts[0] = (iWidth > 220) ? iWidth - 220 : 0;
     piParts[1] = iWidth;
     SendMessage(hStatusBar, SB_SETPARTS, 2, (LPARAM)piParts);
+    PositionProgress();             // 3.08: the load bar rides the size part; track the width
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 3.08: places the load progress bar inside the size part of the status
+// bar (the right one, the "0 bytes" corner), leaving room for the resize
+// grip. Called by LayoutStatusBar (every width change) and right before
+// the bar is shown (WM_APP_LOADPROGRESS), so it can never appear in a
+// stale position.
+void PositionProgress(void)
+{
+    if (g_hProgress == nullptr || hStatusBar == nullptr)
+    {
+        return;
+    }
+    RECT rc;
+    if (SendMessage(hStatusBar, SB_GETRECT, 1, (LPARAM)&rc) == 0)
+    {
+        return;
+    }
+    LONG lStyle = GetWindowLong(hStatusBar, GWL_STYLE);
+    int iGrip = (lStyle & SBARS_SIZEGRIP) ? 18 : 0;     // the grip owns the right corner
+    int iW = rc.right - rc.left - 4 - iGrip;
+    int iH = rc.bottom - rc.top - 4;
+    if (iW < 10)
+    {
+        iW = 10;                        // a narrow bar beats a misplaced one
+    }
+    if (iH < 6)
+    {
+        iH = 6;
+    }
+    MoveWindow(g_hProgress, rc.left + 2, rc.top + 2, iW, iH, TRUE);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 3.12: the UI side of the load bar. The worker publishes the permille in
+// LoadJob::pmProgress (atomic); this poll — a 16 ms WM_TIMER since 3.13 that
+// runs only while the job is in flight — reads it and paints. WM_TIMER is
+// generated by the OS whenever the pump runs: there is no posted tick to
+// lose, no paint coalescing to strand the bar at an old frame, and no
+// stale-serial gate to maintain (the value read IS the live job's).
+// 3.13: the poll is ALSO the pacing: the worker publishes every chunk tick
+// unconditionally, and painting only happens here, only when the value
+// changed — a publish costs nanoseconds, a repaint is the scarce resource.
+// pm == -2: nothing published yet (the bar stays hidden — a small load never
+// flashes it); -1: unknown total (stdin) — marquee; 0..1000: the position.
+void OnLoadProgressTimer(void)
+{
+    if (g_hProgress == nullptr || (g_pJob == nullptr && s_pmDeliver == -2))
+    {
+        // The job landed between fires and no delivery is feeding the bar
+        // (ApplyLoadResult painted the final state and retired it), or the
+        // window is closing: the poll's reason to exist is gone.
+        KillTimer(hWndMain, IDT_LOADPROG);
+        return;
+    }
+    // 3.14: two feeds, one bar. While the job is in flight the truth is
+    // its atomic permille; once it landed (g_pJob null) the sliced
+    // delivery feeds the same bar through s_pmDeliver with the characters
+    // already inside the control.
+    LONG pm = (g_pJob != nullptr) ? InterlockedCompareExchange(&g_pJob->pmProgress, 0, 0) : s_pmDeliver;
+    if (pm == -2 || pm == s_pmApplied)
+    {
+        return;                             // nothing published, or nothing new since the last paint
+    }
+    LONG lStyle = GetWindowLong(g_hProgress, GWL_STYLE);
+    if (pm == -1)
+    {
+        if (!(lStyle & PBS_MARQUEE))
+        {
+            SetWindowLong(g_hProgress, GWL_STYLE, lStyle | PBS_MARQUEE);
+            SendMessage(g_hProgress, PBM_SETMARQUEE, TRUE, 30);
+            InvalidateRect(g_hProgress, nullptr, TRUE);
+        }
+    }
+    else
+    {
+        if (lStyle & PBS_MARQUEE)
+        {
+            SetWindowLong(g_hProgress, GWL_STYLE, lStyle & ~PBS_MARQUEE);
+            SendMessage(g_hProgress, PBM_SETMARQUEE, FALSE, 0);
+            InvalidateRect(g_hProgress, nullptr, TRUE);
+        }
+        SendMessage(g_hProgress, PBM_SETPOS, (WPARAM)pm, 0);
+    }
+    if (!IsWindowVisible(g_hProgress))
+    {
+        PositionProgress();
+        ShowWindow(g_hProgress, SW_SHOWNOACTIVATE);
+    }
+    UpdateWindow(g_hProgress);              // 3.11's rule stays: paint NOW, never wait for the queue
+    s_pmApplied = pm;
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 3.08: retires the bar when the job lands (WM_APP_LOADDONE) or the window
+// dies (WM_DESTROY). 3.12: the marquee mode and the position go with it —
+// the next job starts from a clean, empty bar.
+void HideLoadProgress(void)
+{
+    s_pmApplied = -2;                       // 3.12: the next job starts clean
+    if (g_hProgress != nullptr)
+    {
+        SendMessage(g_hProgress, PBM_SETPOS, 0, 0);     // no stale fill carried into the next job
+        if (IsWindowVisible(g_hProgress))
+        {
+            if (GetWindowLong(g_hProgress, GWL_STYLE) & PBS_MARQUEE)
+            {
+                SendMessage(g_hProgress, PBM_SETMARQUEE, FALSE, 0);
+            }
+            ShowWindow(g_hProgress, SW_HIDE);
+        }
+    }
 }
 
 
@@ -4101,9 +5075,9 @@ ULONGLONG LastPageBase(ULONGLONG cbSize)
 // file at constant memory.
 bool LoadPage(ULONGLONG qwBase, bool bTailJump)
 {
-    if (g_pJob != nullptr)
+    if (g_pJob != nullptr || g_bInDelivery)
     {
-        return(false);                  // one load at a time
+        return(false);                  // one load at a time (3.14: the sliced delivery counts)
     }
     if (g_bInByteSearch)
     {
@@ -4503,7 +5477,7 @@ void GoToOffset(ULONGLONG qwOff)
         MessageBox(hWndMain, L"There is no file loaded.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (g_pJob != nullptr)
+    if (g_pJob != nullptr || g_bInDelivery)
     {
         MessageBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
@@ -4851,7 +5825,7 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
         MessageBox(hWndMain, L"There is no file loaded: piped input and the clipboard cannot be searched on disk.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (g_pJob != nullptr)
+    if (g_pJob != nullptr || g_bInDelivery)
     {
         MessageBox(hWndMain, L"Still loading the file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
@@ -4872,7 +5846,6 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
     // SetView could, and the copy makes the race impossible to spell.
     lstrcpynW(g_szSearchFile, g_szCurrentFile, MAX_PATH);
     InterlockedExchange(&g_bSearchCancel, 0);
-    g_qwSearchPos = 0;
     g_qwSearchResult = (ULONGLONG)-1;
     g_bInByteSearch = true;                // blocks loads and the tail timer
     uintptr_t uThread = _beginthreadex(nullptr, 0, SearchThreadProc, nullptr, 0, nullptr);
@@ -4959,14 +5932,15 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
                 MoveMemory(pBuf, pBuf + cbHave - cbKeep, cbKeep);
             }
             qwBase += (ULONGLONG)(cbHave - cbKeep);
-            g_qwSearchPos = qwBase;
         }
         // Progress at ~10 Hz: PostMessage is cheap and the UI thread
         // repaints at its own pace, decoupled from the scan speed.
+        // 3.08: the position travels IN the message (low/high halves) —
+        // no 64-bit global shared with the UI thread (torn reads on x86).
         ULONGLONG qwNow = GetTickCount64();
         if (qwNow >= qwNextPost)
         {
-            PostMessage(hWndMain, WM_APP_SEARCHPROGRESS, 0, 0);
+            PostMessage(hWndMain, WM_APP_SEARCHPROGRESS, (WPARAM)(DWORD)qwBase, (LPARAM)(DWORD)(qwBase >> 32));
             qwNextPost = qwNow + 100;
         }
         // The single cancel check per chunk (ESC handler or WM_DESTROY).
@@ -5001,7 +5975,7 @@ void ViewClipboardAsFile(void)
         MessageBox(hWndMain, L"A raw-file search is running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (g_pJob != nullptr)
+    if (g_pJob != nullptr || g_bInDelivery)
     {
         // 3.07: the clipboard view bypasses the load gate (it builds its
         // bytes right here, on the UI thread). While a load is in flight it
@@ -5842,8 +6816,12 @@ void EnsureRecentMenu(void)
     {
         iExit = cItems;                 // no Exit found: append at the end
     }
-    InsertMenuW(hFile, iExit, MF_BYPOSITION | MF_SEPARATOR, 0, nullptr);
-    InsertMenuW(hFile, iExit + 1, MF_BYPOSITION | MF_POPUP, (UINT_PTR)g_hRecentMenu, L"Recent &Files");
+    // 3.13: NO separator of our own. The .rc already ends the command
+    // block with a static separator before Exit, so inserting another one
+    // here placed TWO separators together (Open/Clipboard/ADS | ─── | ─── |
+    // Recent Files). The popup enters right before Exit, under the static
+    // separator; Exit stays at the bottom.
+    InsertMenuW(hFile, iExit, MF_BYPOSITION | MF_POPUP, (UINT_PTR)g_hRecentMenu, L"Recent &Files");
     RebuildRecentMenu();
 }
 

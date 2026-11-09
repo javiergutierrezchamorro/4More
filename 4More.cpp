@@ -1,6 +1,46 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.05
+   Build 3.06
+
+   Novedades de la revisión 3.06 (REVISIÓN A FONDO: 4 CORRECCIONES Y RENDIMIENTO):
+   - COLUMNA DE LÍNEAS DESCUADRADA. DeliverTextToEdit coloca el control ANTES
+     de entregar el texto (3.03) y GutterWidth() cuenta las líneas del texto
+     que hay en ese momento: el viejo, vacío tras ResetViewer. Con View >
+     Line Numbers activo y más de 9.999 líneas, la columna se pintaba una
+     cifra más ancha que el hueco reservado y tapaba el primer carácter del
+     texto. Ahora, con la columna de líneas activa, el control se recoloca
+     tras la entrega (siempre dentro del bloque WM_SETREDRAW(FALSE)).
+   - PGDN SALTABA BYTES. Cargado un texto de 32 MB y cambiado a Hex, la vista
+     muestra 8 MB pero cbFile sigue valiendo 32 MB: la página siguiente
+     arrancaba en +32 MB y los bytes 8..32 MB no se veían NUNCA. ChangePage
+     avanza ahora lo que cabe en la vista activa; el seguimiento del final
+     del tail usa la misma medida.
+   - WORD WRAP DEJABA EL TECLADO MUERTO. RecreateEditControl destruye el
+     control que tiene el foco; el foco pasaba a la ventana principal y su
+     WM_SETFOCUS reenviaba a un hEdit ya destruido. Tras el cambio las
+     flechas y PgUp/PgDn no hacían nada hasta hacer clic. Ahora el control
+     nuevo recibe el foco.
+   - CTRL+MAYÚS+INICIO/FIN. El subclass los trataba como Ctrl+Inicio/Fin
+     (salto de página del fichero) y se perdía la extensión de selección
+     clásica del EDIT. Con Mayús pulsado vuelve a mandar el EDIT.
+   - RENDIMIENTO: FIND (F3) EN MAYÚSCULAS/MINÚSCULAS. StrStrIW compara carácter
+     a carácter con ChrCmpIW (locale incluido): del orden de decenas de MB/s.
+     Con un patrón que empieza por ASCII, el bucle busca el primer carácter en
+     sus dos formas y sólo confirma el resto de los candidatos (ChrCmpIW sólo
+     donde dos caracteres difieren): mismo resultado, mucho más rápido en 32M
+     de caracteres. Patrón no ASCII: sigue StrStrIW.
+   - RENDIMIENTO: NORMALIZACIÓN CRLF. El copiador procesaba cada WCHAR con tres
+     comparaciones y un almacenamiento; ahora localiza cada tramo sin EOL con
+     un escaneo corto y lo mueve con UN memcpy (el caso típico: log con LF
+     solos, una línea cada ~80 caracteres).
+   - RENDIMIENTO: SALIDA Y REDIMENSIONADO. SaveSettings hacía ~25 llamadas
+     WritePrivateProfileString (cada una reabre, reescribe el INI y despierta
+     al antivirus): ahora son DOS WritePrivateProfileSectionW. WM_SIZE sólo
+     rehace las partes de la barra de estado y su texto cuando cambia el
+     ANCHO (arrastrar el borde inferior ya no pregunta al EDIT por línea y
+     columna en cada pixel).
+   - ROBUSTEZ: el bucle de mensajes sale con GetMessage <= 0 (un -1 hacía
+     girar el bucle sobre un MSG sin inicializar).
 
    Novedades de la revisión 3.05 (TERCERA PASADA: SIMPLIFICAR Y ACELERAR):
    - LA PASADA CRLF YA NO CAMINA EL TEXTO DECODIFICADO EN UTF-16.
@@ -308,7 +348,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.05"
+#define APP_VERSION L"3.06"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -638,7 +678,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
         // Main message loop:
         MSG msg;
-        while (GetMessage(&msg, nullptr, 0, 0))
+        while (GetMessage(&msg, nullptr, 0, 0) > 0)
         {
                 // 3.03: the accelerators translate against the MAIN window. They
                 // used to translate against msg.hwnd — the EDIT control, which
@@ -1007,7 +1047,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                                 // old reload of the same base read the same capped
                                                 // window forever, so the bytes arriving past the cap
                                                 // never reached the screen.
-                                                bool bFollowEnd = (g_qwBase + cbFile >= g_cbFileTotal);
+                                                bool bFollowEnd = (g_qwBase + (ULONGLONG) ((cbFile < PageCapBytes()) ? cbFile : PageCapBytes()) >= g_cbFileTotal);   // 3.06: what the view SHOWS
                                                 ULONGLONG qwBase = g_qwBase;
                                                 if (bFollowEnd && cbFile >= PageCapBytes())
                                                 {
@@ -1119,10 +1159,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         // bar (LayoutEdit also knows about the hex offset column, which
                         // shifts the control to the right while it is active).
                         LayoutEdit();
-                        LayoutStatusBar(LOWORD(lParam));
-                        // SB_SETPARTS recreates the parts and their old texts go away
-                        // with them: rewrite both parts regardless of the cache.
-                        UpdateStatusBar(true);
+                        // 3.06: the parts depend on the WIDTH only. A vertical drag of
+                        // the border used to redo SB_SETPARTS and rewrite both texts
+                        // (two EDIT queries + formatting) for every pixel.
+                        static int s_iBarW = -1;
+                        if (LOWORD(lParam) != s_iBarW)
+                        {
+                                s_iBarW = LOWORD(lParam);
+                                LayoutStatusBar(s_iBarW);
+                                // SB_SETPARTS recreates the parts and their old texts go away
+                                // with them: rewrite both parts regardless of the cache.
+                                UpdateStatusBar(true);
+                        }
                         break;
                 }
                 case WM_CTLCOLORSTATIC:
@@ -1249,7 +1297,7 @@ LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
                         // 3.01: with stdin/clipboard content (no pages behind the
                         // text) JumpFilePage walks the caret to the ends of what is
                         // on screen, so the keys never end up dead.
-                        if ((GetKeyState(VK_CONTROL) & 0x8000) && (wParam == VK_HOME || wParam == VK_END))
+                        if ((GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000) && (wParam == VK_HOME || wParam == VK_END))   // 3.06: Ctrl+Shift extends the selection (EDIT)
                         {
                                 JumpFilePage(wParam == VK_END);
                                 return(0);
@@ -1486,23 +1534,34 @@ WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown
                 return(nullptr);        // OOM: the caller keeps (and frees) the original
         }
         int j = 0;
-        for (int i = 0; i < cch; i++)
+        int i = 0;
+        while (i < cch)
         {
+                // 3.06: a run of ordinary characters is found with a tight scan and
+                // moved with ONE memcpy (a log has an EOL every ~80 characters).
+                int iRun = i;
+                while (iRun < cch && pacText[iRun] != L'\r' && pacText[iRun] != L'\n')
+                {
+                        iRun++;
+                }
+                if (iRun > i)
+                {
+                        memcpy(pNorm + j, pacText + i, (size_t) (iRun - i) * sizeof(WCHAR));
+                        j += iRun - i;
+                        i = iRun;
+                }
+                if (i >= cch)
+                {
+                        break;
+                }
+                // CR LF pair, lone CR or lone LF: each one becomes exactly one CRLF.
                 if (pacText[i] == L'\r' && i + 1 < cch && pacText[i + 1] == L'\n')
                 {
-                        pNorm[j++] = L'\r';
-                        pNorm[j++] = L'\n';
                         i++;
                 }
-                else if (pacText[i] == L'\r' || pacText[i] == L'\n')
-                {
-                        pNorm[j++] = L'\r';
-                        pNorm[j++] = L'\n';
-                }
-                else
-                {
-                        pNorm[j++] = pacText[i];
-                }
+                i++;
+                pNorm[j++] = L'\r';
+                pNorm[j++] = L'\n';
         }
         pNorm[j] = L'\0';
         *pcchOut = j;
@@ -3302,6 +3361,13 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
                 }
                 FreeViewText(pText);
         }
+        if (g_bLineNums && iView != VIEW_HEX)
+        {
+                // 3.06: the width of the line-number column depends on the line count
+                // of the text JUST delivered; the LayoutEdit above still saw the old
+                // (empty) one. Same redraw lock: still one paint per delivery.
+                LayoutEdit();
+        }
         SendMessage(hEdit, EM_SETMODIFY, FALSE, 0);
         SendMessage(hEdit, EM_SETSEL, 0, 0);
         SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
@@ -3777,11 +3843,45 @@ void OpenFindDialog(HWND hWnd)
 // case / StrStrIW pair out twice: a copy waiting to drift).
 static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
 {
+        const WCHAR* p = pszText + dwFrom;
         if (fr.Flags & FR_MATCHCASE)
         {
-                return(wcsstr(pszText + dwFrom, szFind));
+                return(wcsstr(p, szFind));
         }
-        return(StrStrIW(pszText + dwFrom, szFind));
+        // 3.06: StrStrIW goes through ChrCmpIW for EVERY character (locale aware,
+        // tens of MB/s). With an ASCII first character the scan looks for it in
+        // its two forms and only confirms the candidates; ChrCmpIW answers only
+        // where two characters differ. A non-ASCII start keeps StrStrIW.
+        WCHAR wcFirst = szFind[0];
+        if (wcFirst == L'\0' || wcFirst >= 0x80)
+        {
+                return(StrStrIW(p, szFind));
+        }
+        WCHAR wcLo = (wcFirst >= L'A' && wcFirst <= L'Z') ? (WCHAR) (wcFirst + 32) : wcFirst;
+        WCHAR wcUp = (wcLo >= L'a' && wcLo <= L'z') ? (WCHAR) (wcLo - 32) : wcLo;
+        for (; *p != L'\0'; p++)
+        {
+                if (*p != wcLo && *p != wcUp)
+                {
+                        continue;
+                }
+                const WCHAR* t = p + 1;
+                const WCHAR* s = szFind + 1;
+                while (*s != L'\0' && *t != L'\0' && (*t == *s || ChrCmpIW(*t, *s) == 0))
+                {
+                        t++;
+                        s++;
+                }
+                if (*s == L'\0')
+                {
+                        return(p);
+                }
+                if (*t == L'\0')
+                {
+                        return(nullptr);        // the text ended inside the candidate: no later start fits
+                }
+        }
+        return(nullptr);
 }
 
 
@@ -3976,7 +4076,9 @@ void ChangePage(int iDir)
         ULONGLONG qwBase;
         if (iDir > 0)
         {
-                qwBase = g_qwBase + cbFile;              // the bytes shown move on
+                // 3.06: advance by what the ACTIVE view shows. After a text load
+                // (32 MB) switched to Hex (8 MB on screen) cbFile alone skipped 24 MB.
+                qwBase = g_qwBase + ((cbFile < PageCapBytes()) ? cbFile : PageCapBytes());
                 if (qwBase >= g_cbFileTotal)
                 {
                         MessageBeep(MB_ICONASTERISK);   // the last page is on screen
@@ -5229,6 +5331,7 @@ void RecreateEditControl(void)
         }
         UpdateHexMetrics();                    // measures through the (new) control
         ApplyView();                           // rebuilds the text of the page from the raw bytes
+        SetFocus(hEdit);                       // 3.06: the destroyed control had the focus
 }
 
 void ToggleWrap(void)
@@ -5525,44 +5628,48 @@ void SaveSettings(void)
         {
                 return;
         }
-        WCHAR szVal[24];
-        wsprintfW(szVal, L"%d", 0 - g_iFontSizes[g_iFontIndex]);       // positive point size
-        WritePrivateProfileStringW(L"4More", L"FontSize", szVal, g_szIniPath);
-        WritePrivateProfileStringW(L"4More", L"LineNumbers", g_bLineNums ? L"1" : L"0", g_szIniPath);
-        WritePrivateProfileStringW(L"4More", L"WordWrap", g_bWrap ? L"1" : L"0", g_szIniPath);
-        WritePrivateProfileStringW(L"4More", L"Tail", g_bTail ? L"1" : L"0", g_szIniPath);
-        // Placement: GetWindowPlacement reports the RESTORED rect even while
+        // 3.06: TWO section writes instead of ~25 WritePrivateProfileString calls
+        // (each one reopens and rewrites the whole INI, antivirus included). A
+        // section block is "key=value" strings separated by NUL, ended by a double
+        // NUL. Placement: GetWindowPlacement reports the RESTORED rect even while
         // maximized, which is exactly what the next start should restore.
+        WCHAR szSec[320];
+        WCHAR* p = szSec;
+        p += wsprintfW(p, L"FontSize=%d", 0 - g_iFontSizes[g_iFontIndex]) + 1;     // positive point size
+        p += wsprintfW(p, L"LineNumbers=%d", g_bLineNums ? 1 : 0) + 1;
+        p += wsprintfW(p, L"WordWrap=%d", g_bWrap ? 1 : 0) + 1;
+        p += wsprintfW(p, L"Tail=%d", g_bTail ? 1 : 0) + 1;
         WINDOWPLACEMENT wp = {};
         wp.length = sizeof(wp);
         if (GetWindowPlacement(hWndMain, &wp))
         {
                 RECT rc = wp.rcNormalPosition;
-                wsprintfW(szVal, L"%d", (int) rc.left);
-                WritePrivateProfileStringW(L"4More", L"WinLeft", szVal, g_szIniPath);
-                wsprintfW(szVal, L"%d", (int) rc.top);
-                WritePrivateProfileStringW(L"4More", L"WinTop", szVal, g_szIniPath);
-                wsprintfW(szVal, L"%d", (int) rc.right);
-                WritePrivateProfileStringW(L"4More", L"WinRight", szVal, g_szIniPath);
-                wsprintfW(szVal, L"%d", (int) rc.bottom);
-                WritePrivateProfileStringW(L"4More", L"WinBottom", szVal, g_szIniPath);
-                WritePrivateProfileStringW(L"4More", L"Maximized", (wp.showCmd == SW_SHOWMAXIMIZED) ? L"1" : L"0", g_szIniPath);
+                p += wsprintfW(p, L"WinLeft=%d", (int) rc.left) + 1;
+                p += wsprintfW(p, L"WinTop=%d", (int) rc.top) + 1;
+                p += wsprintfW(p, L"WinRight=%d", (int) rc.right) + 1;
+                p += wsprintfW(p, L"WinBottom=%d", (int) rc.bottom) + 1;
+                p += wsprintfW(p, L"Maximized=%d", (wp.showCmd == SW_SHOWMAXIMIZED) ? 1 : 0) + 1;
         }
-        for (int i = 0; i < RECENT_MAX; i++)
+        *p = L'\0';
+        WritePrivateProfileSectionW(L"4More", szSec, g_szIniPath);
+        if (g_cRecent > 0)
         {
-                WCHAR szKey[8];
-                wsprintfW(szKey, L"%d", i + 1);
-                if (i < g_cRecent && g_szRecent[i][0] != L'\0')
+                // The whole [Recent] section is rewritten: a hand-removed entry
+                // cannot resurrect from a stale line.
+                WCHAR szRec[RECENT_MAX * (MAX_PATH + 8) + 2];
+                p = szRec;
+                for (int i = 0; i < g_cRecent && g_szRecent[i][0] != L'\0'; i++)
                 {
-                        WritePrivateProfileStringW(L"Recent", szKey, g_szRecent[i], g_szIniPath);
+                        p += wsprintfW(p, L"%d=%s", i + 1, g_szRecent[i]) + 1;
                 }
-                else
-                {
-                        WritePrivateProfileStringW(L"Recent", szKey, nullptr, g_szIniPath);
-                }
+                *p = L'\0';
+                WritePrivateProfileSectionW(L"Recent", szRec, g_szIniPath);
+        }
+        else
+        {
+                WritePrivateProfileStringW(L"Recent", nullptr, nullptr, g_szIniPath);     // no entries: drop the section
         }
 }
-
 
 /* -------------------------------------------------------------------------------------------- */
 // Creates the Recent popup and its menu entry, once, at WM_CREATE. After

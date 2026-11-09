@@ -1,4 +1,8 @@
-﻿// 4More.rc — recursos del visor (Build 3.05)
+﻿// 4More.rc — recursos del visor (Build 3.06)
+//
+// 3.06: NI MENÚ NI ACELERADORES CAMBIAN. Revisión a fondo del .cpp
+// (columna de líneas, PgDn en Hex, foco tras Word Wrap, Find más rápido).
+// Compilar junto al 4More.cpp 3.06 (APP_VERSION ya dice "3.06").
 //
 // 3.05: ACELERADORES DE FUENTE CON GEMELAS SHIFT. TranslateAccelerator
 // compara Shift/Ctrl/Alt de forma EXACTA y en los teclados donde '+' y '-'

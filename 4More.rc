@@ -1,4 +1,24 @@
-﻿// 4More.rc — recursos del visor (Build 3.15)
+﻿// 4More.rc — recursos del visor (Build 3.18)
+//
+// 3.18: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
+// .cpp: con Word Wrap activado, el texto se limita a 2 MB (CB_WRAP_TEXT_MAX)
+// porque el control EDIT recalcula todos los soft breaks sincrónicamente y
+// 26 MB helaba la ventana ~10 segundos. Sin wrap el límite sigue en 32 MB.
+// El manifest puede subir a 3.18.0.0 (opcional, cosmético).
+//
+// 3.17: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
+// .cpp: con Word Wrap activado, la entrega usa WM_SETTEXT en lugar de
+// EM_SETHANDLE porque este último recalcula TODOS los puntos de ruptura
+// del texto en una sola llamada síncrona, helando la ventana varios
+// segundos para 26 MB. El manifest puede subir a 3.17.0.0 (opcional).
+//
+// 3.16: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
+// .cpp: el troceo de la entrega (3.14-3.15, EM_REPLACESEL) era cuadrático
+// en el buffer acumulado del control EDIT y hacía que un TXT de 30 MB
+// tardara ~8 segundos sólo en la entrega. 3.16 elimina el troceo y vuelve
+// a la entrega monolítica EM_SETHANDLE (O(1)), con la barra pintada a
+// 100% antes del swap. El manifest puede subir a 3.16.0.0 (opcional,
+// cosmético: la revisión es toda del .cpp).
 //
 // 3.15: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
 // .cpp: la entrega troceada de 3.14 excluía Word Wrap, y con wrap activo

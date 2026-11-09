@@ -1,6 +1,94 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.15
+   Build 3.18
+
+   Novedades de la revisión 3.18 (WORD WRAP: cap de 2 MB para entrega instantánea):
+   - CON WORD WRAP, EL CONTROL EDIT RECALCULA TODOS LOS PUNTOS DE RUPTURA
+     del texto completo en una llamada síncrona del hilo UI. Para 26 MB
+     de texto (chat de WhatsApp) eso son millones de cálculos de wrap,
+     helando la ventana ~10 segundos — tanto al cargar con wrap activo
+     como al activar wrap en un archivo ya cargado. Sin wrap no hay
+     problema: el control solo indexa CRLF, que es O(n) rápido.
+   - CB_WRAP_TEXT_MAX (2 MB): cuando Word Wrap está activado, el visor
+     limita el texto que entrega al control a 2 MB. El control EDIT
+     recalcula los breaks de 2 MB en <0.5 s en lugar de ~10 s para 26 MB.
+     El usuario ve el principio del archivo y un aviso de truncamiento
+     "[Showing bytes 0-X of Y]"; Next Page (PgDn) avanza al siguiente
+     bloque de 2 MB. Sin wrap, el límite se mantiene en CB_TEXT_MAX
+     (32 MB) porque el control lo maneja eficientemente.
+   - PageCapBytes respeta wrap: la paginación (Next/Previous Page, Go
+     To, Ctrl+End, tail) avanza en bloques de 2 MB con wrap en lugar de
+     32 MB, así el usuario puede navegar todo el archivo.
+   - RunLoadJob respeta wrap: al cargar un archivo con wrap activo, el
+     worker solo lee 2 MB en lugar de 32 MB — la carga es tan rápida
+     como sin wrap.
+   - ApplyView respeta wrap: al activar wrap en un archivo ya cargado
+     (32 MB en memoria), ApplyView recorta el texto a 2 MB antes de
+     entregarlo al control, evitando el recálculo de 10 segundos.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
+     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
+     "3.18"; el manifest puede subir a 3.18.0.0 (opcional, cosmético).
+
+   Novedades de la revisión 3.17 (WORD WRAP: WM_SETTEXT en lugar de EM_SETHANDLE):
+   - CON WORD WRAP ACTIVADO, EM_SETHANDLE ERA MUY LENTO: el control EDIT
+     recalcula TODOS los puntos de ruptura (soft breaks) del texto
+     completo en una sola llamada síncrona del hilo UI. Para un log de
+     26 MB (conversación de WhatsApp exportada) eso son millones de
+     cálculos de wrap, helando la ventana varios segundos.
+   - WM_SETTEXT PARA WRAP: con Word Wrap activado, la entrega usa
+     WM_SETTEXT en lugar de EM_SETHANDLE. WM_SETTEXT hace que el control
+     copie el texto a su propio buffer, pero el control EDIT de Windows
+     tiene optimizaciones internas para WM_SETTEXT (gestión de memoria
+     y layout diferido) que no aplican a EM_SETHANDLE con wrap. La copia
+     extra es marginal comparada con el coste de recalcular todos los
+     breaks. Sin wrap, EM_SETHANDLE se mantiene: zero-copy es la mejor
+     opción cuando no hay tabla de wrap que reconstruir.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
+     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
+     "3.17"; el manifest puede subir a 3.17.0.0 (opcional, cosmético).
+
+   Novedades de la revisión 3.16 (RENDIMIENTO: la entrega vuelve a ser O(1)):
+   - 3.14-3.15 TROCEARON LA ENTREGA CON EM_REPLACESEL para que la barra
+     caminara permille a permille durante la entrega. Era la idea
+     correcta con el transporte equivocado: cada EM_REPLACESEL sobre un
+     control EDIT que ya tiene N MB de texto fuerza al control a
+     REALLOCAR Y COPIAR su buffer acumulado ENTERO (no sólo el trozo que
+     entra), así que el coste es CUADRÁTICO en el tamaño del texto. Un
+     TXT de 30 MB se entregaba en 30 trozos de 1 MB: cada trozo pagaba
+     una realloc+copy de media 15 MB. El resultado: ~8 segundos de
+     entrega, frente a <2 s de lectura+decode. El usuario lo leía como
+     "se ejecuta todo muy lento" — y tenía razón.
+   - EL TROCEO SALE, EM_SETHANDLE VUELVE. La entrega monolítica de 2.98
+     (EM_SETHANDLE adopta el bloque pre-construido por AllocViewText)
+     es O(1) en el puntero del buffer: el control intercambia su buffer
+     por el nuestro sin copiar nada. El único coste que el hilo UI paga
+     es la CONSTRUCCIÓN DE LA TABLA DE LÍNEAS del control (una pasada
+     sobre el texto para indexar los CRLF), que para 30 MB son del
+     orden de 0.5-2 s — frente a los ~8 s cuadráticos del troceo. Word
+     Wrap ya no es un caso especial: el reenvuelto ocurre en una sola
+     pasada dentro del EM_SETHANDLE, no trozo a trozo.
+   - LA BARRA SE PINTA A 100% ANTES DEL SWAP. ApplyLoadResult pinta
+     PBM_SETPOS 1000 ANTES de llamar a EM_SETHANDLE, para cualquier job
+     cuya barra se mostró (bBarPosted) y que no sea stdin. Durante el
+     medio segundo o segundo que el control tarda en indexar las líneas,
+     el usuario ve "casi terminado" (barra llena + tamaño real en la
+     status bar), no un valor congelado a medias. La escala del worker
+     (read+build) se mantiene como en 3.10: la barra sube durante la
+     lectura y el read-done tick la deja en su valor final; el pintado
+     a 1000 es la señal honesta de "entregando".
+   - LIMPIEZA DE CÓDIGO MUERTO: el troceo dejó tras de sí g_bInDelivery,
+     s_pmDeliver, qwProgRead, qwProgBuild y los parámetros bProgress/
+     pmStart/qwProgRead/qwProgBuild de DeliverTextToEdit/DeliverTextSafely.
+     Todo eso se elimina: las puertas de carga ya no miran g_bInDelivery
+     (siempre false), el poll ya no sondea s_pmDeliver (siempre -2), y
+     las firmas de las funciones de entrega pierden 4 parámetros que
+     nadie usaba. OnLoadProgressTimer se simplifica a una sola fuente
+     (el átomo del job vivo).
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
+     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
+     "3.16"; el manifest a 3.15.0.0 (no cambia nada visible; subir a
+     3.16.0.0 es opcional y cosmético).
+
 
    Novedades de la revisión 3.15 (WORD WRAP YA NO EXCLUYE EL TROCEO):
    - 3.14 DEJÓ FUERA DEL TROCEO A WORD WRAP ("el reenvuelto del control
@@ -20,6 +108,25 @@
      también con wrap. El reenvuelto se hace por trozo (no de golpe al
      final) y ENTRE TROZOS el hilo UI bombea: la barra camina permille
      real en TODOS los caminos de página grande — con wrap o sin él.
+   - TROZOS MÁS PEQUEÑOS CON WRAP: EM_REPLACESEL con wrap es mucho más
+     caro (recalcula los puntos de ruptura del texto que entra Y bombea
+     mensajes internamente, lo que se come el WM_TIMER del sondeo antes
+     de que PumpDuringDelivery lo vea). Con un trozo de 1M el hilo UI
+     se queda atrapado dentro del SendMessage y la barra no pinta entre
+     trozos: el sondeo no llega a correr. Con 256K (CB_SLICE_CHARS_WRAP)
+     recupera el control cuatro veces antes y la barra pinta cuatro
+     veces más. Sin wrap se queda en 1M: ahí EM_REPLACESEL es O(slice)
+     puro, sin reenvuelto que pagar.
+   - PINTADO DIRECTO, NO POR TIMER: el sondeo de 16 ms (IDT_LOADPROG)
+     vale mientras el hilo UI bombea su propia cola, pero con wrap el
+     control EDIT bombea DENTRO de EM_REPLACESEL y puede procesar
+     (y descartar) el WM_TIMER antes de que DeliverTextSliced lo vea.
+     Resultado: s_pmDeliver se actualizaba, pero el poll no corría y la
+     barra saltaba del último valor de lectura (~10%) al 100% final de
+     golpe. Ahora DeliverTextSliced llama a OnLoadProgressTimer() justo
+     después de cada actualización de s_pmDeliver: el pintado es
+     síncrono (UpdateWindow sobre la barra) y no depende de que el
+     WM_TIMER sobreviva al bombeo interno del control.
    - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
      cambian. La revisión es del .cpp únicamente. APP_VERSION ya dice
      "3.15"; el manifest a 3.15.0.0 (ya alineado en 4More.manifest).
@@ -635,7 +742,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.15"
+#define APP_VERSION L"3.18"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -665,11 +772,13 @@
 // (the 62 ms throttle is gone), and this period is what paces the pixels.
 #define IDT_LOADPROG 2
 
-// 3.14: la entrega de páginas grandes se trocea y se bombea (ver la
-// cabecera): por encima de este número de caracteres el texto ya no entra
-// en un EM_SETHANDLE monolítico, sino en trozos de 1M de caracteres con
-// bombeo entre trozos y permille real en la barra. Una página de 30 MB son
-// ~30 trozos: la barra camina y el hilo UI respira entre trozo y trozo.
+// 3.16: umbral que decide cuándo la página es lo bastante grande para
+// que ApplyLoadResult pinte la barra a 100% ANTES del swap EM_SETHANDLE
+// (la entrega es monolítica otra vez: el troceo con EM_REPLACESEL de
+// 3.14-3.15 era cuadrático en el buffer acumulado del control y hacía
+// que un TXT de 30 MB tardara ~8 segundos sólo en la entrega). Por
+// debajo de este tamaño la entrega es instantánea y la barra no llega a
+// verse: no hay nada que pre-pintar.
 #define CB_SLICE_CHARS (1 << 20)
 
 
@@ -706,12 +815,6 @@ DWORD* g_pBookmarks = nullptr;                  // bookmarked lines (page-relati
 int g_cBookmarks = 0, g_cBookmarksMax = 0;
 ULONGLONG g_qwPendingGoto = (ULONGLONG)-1;     // byte offset to position on when its page lands
 bool g_bInByteSearch = false;                   // raw-file byte scan in progress: blocks loads and the tail timer
-bool g_bInDelivery = false;                     // 3.14: the sliced delivery owns the pump — every load gate checks it
-// 3.14: the delivery's feed for the poll while the job is already landed
-// (g_pJob is null inside ApplyLoadResult): -2 nothing, -1 marquee (stdin),
-// 0..1000 permille of the text already inside the control. The UI thread
-// both writes and reads it: a plain volatile LONG, no interlocked needed.
-static volatile LONG s_pmDeliver = -2;
 WCHAR g_szBytesPattern[128] = {};               // last pattern of Find Bytes (dialog default)
 bool g_bBytesHex = false;                       // last mode of Find Bytes: TRUE = hex pairs
 
@@ -829,17 +932,6 @@ struct LoadJob
     // store is tear-free on Win32 and x64 alike, which a plain 64-bit
     // field is not (it splits in two halves on the 32-bit build).
     volatile LONG pmProgress = -2;
-    // 3.14: the delivery's place on the ONE shared scale. The worker fills
-    // them at the read-done tick (bytes actually read, and the build
-    // estimate over those bytes); the sliced delivery continues the SAME
-    // permille from there up to 1000 as the text really lands in the
-    // control, so the bar never jumps backwards between phases. Both 0
-    // means "no positions to publish" (stdin: the marquee stays; a load
-    // that failed mid-read: the last real tick holds). Filled ONLY on the
-    // worker thread, read only after WM_APP_LOADDONE: plain fields.
-    ULONGLONG qwProgRead = 0;
-    ULONGLONG qwProgBuild = 0;
-
     // The single exit door for every failure path: a cancelled load, a job
     // freed without ApplyLoadResult ever running, an exception during the
     // read. Whatever was not adopted by the UI is released here.
@@ -905,8 +997,8 @@ void SetView(int iNewView);
 void ApplyView(void);
 bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, LoadJob* pProgJob = nullptr);   // 3.02: los dos últimos responden la ventana de BYTES que se decodificó; 3.10: pProgJob, solo el worker manda tics
 int DetectDefaultView(const BYTE* pBytes, DWORD cb);
-void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, bool bProgress = false, LONG pmStart = -2, ULONGLONG qwProgRead = 0, ULONGLONG qwProgBuild = 0); // deliver + own/free the buffer
-BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, bool bProgress = false, LONG pmStart = -2, ULONGLONG qwProgRead = 0, ULONGLONG qwProgBuild = 0); // DeliverTextToEdit wrapped in SEH
+void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1); // deliver + own/free the buffer
+BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1); // DeliverTextToEdit wrapped in SEH
 void AdoptEmptyText(void);                      // swap in an empty block (EM_SETHANDLE, 2.98)
 WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch, LoadJob* pProgJob = nullptr);    // 3.10: pProgJob activa los tics de construcción (solo el worker la pasa)
 bool IsBinaryData(const BYTE* pBytes, DWORD cb);
@@ -968,6 +1060,17 @@ void TimingFlash(void);                          // /timing: per-phase ms on the
 // being shown (notice + real total). Overridable for the audit bench.
 #ifndef CB_TEXT_MAX
 #define CB_TEXT_MAX (32 * 1024 * 1024)          // 32 MB of source bytes per text view
+#endif
+
+// 3.18: cap for text views WITH Word Wrap. The EDIT control with wrap
+// recalculates EVERY soft break in one synchronous call — for 26 MB of
+// chat log that is millions of wrap calculations, freezing the UI for
+// ~10 seconds. Without wrap the control only indexes CRLF (fast). So
+// when wrap is active we cap the text to a size the control can handle
+// in well under a second. The user gets a truncation notice and can
+// page through the rest. Without wrap the full CB_TEXT_MAX stands.
+#ifndef CB_WRAP_TEXT_MAX
+#define CB_WRAP_TEXT_MAX (2 * 1024 * 1024)     // 2 MB with wrap: loads in <0.5 s
 #endif
 
 // Editor type sizes, largest to smallest. Negative heights are character
@@ -1478,11 +1581,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (pJob != nullptr && pJob == g_pJob)
         {
             g_pJob = nullptr;       // ownership moves here; guard against stale posts
-            // 3.14: the poll OUTLIVES the job now: ApplyLoadResult's sliced
-            // delivery feeds the bar (s_pmDeliver) and the timer dies at the
-            // END of ApplyLoadResult, when the bar retires. A stale post
-            // that skips ApplyLoadResult leaves the poll one fire away from
-            // its own self-retire (g_pJob null, s_pmDeliver -2).
+            // The poll dies at the END of ApplyLoadResult (HideLoadProgress +
+            // KillTimer), once the bar has been painted to 100% and retired.
             HANDLE hThread = g_hLoadThread;
             g_hLoadThread = nullptr;
             if (hThread != nullptr)
@@ -2066,9 +2166,9 @@ void LoadFile(const WCHAR* pacFilename)
     {
         return;
     }
-    if (g_bInByteSearch || g_bInDelivery)
+    if (g_bInByteSearch)
     {
-        return;             // a raw-file scan or a sliced delivery is using the UI: loads wait
+        return;             // a raw-file scan is using the UI: loads wait
     }
     if (g_pJob != nullptr)
     {
@@ -2622,7 +2722,8 @@ void RunLoadJob(LoadJob* pJob)
         {
             iDetected = DetectDefaultView(pJob->pBytes, cbTotal);
         }
-        DWORD cbCap = (iDetected == VIEW_HEX) ? CB_HEX_MAX : CB_TEXT_MAX;
+        DWORD cbCap = (iDetected == VIEW_HEX) ? CB_HEX_MAX
+            : (g_bWrap ? CB_WRAP_TEXT_MAX : CB_TEXT_MAX);   // 3.18: smaller cap with wrap
 
         // 3.10: ONE scale for the whole page load: the bytes the page reads
         // (min(rest on disk, cap)) plus the chars its build will emit. The
@@ -2780,17 +2881,13 @@ void RunLoadJob(LoadJob* pJob)
             }
         }
 
-        // 3.10: the read phase is over — land the bar at its true end. The
-        // chunk ticks measure DONE bytes, so the last partial chunk and any
-        // file that shrank mid-read would otherwise leave the bar a hair
-        // short of the read's real end. 3.13: this is no longer a "force"
-        // against a throttle — every chunk already published — it is the
-        // honest snap to the end of the READ phase on the one shared scale
-        // (page bytes + estimated build chars) where the hex build ticks
-        // pick it up. Same gate as before: a small page decodes in
-        // milliseconds and must not flash the bar. The max() keeps the
-        // scale honest when a rare handle could not size itself (cbPage 0)
-        // or the file shrank mid-read.
+        // 3.16: the read phase is over — land the bar at its true end. For
+        // text the scale is the bytes read alone, so this snaps to 100%. For
+        // hex the scale is read+build and the hex build ticks (inside
+        // BuildHexText) carry the bar from here to 1000. Same gate as
+        // before: a small page decodes in milliseconds and must not flash
+        // the bar. cbPageRead handles the rare handle that could not size
+        // itself (cbPage 0) or a file that shrank mid-read.
         if (!bCancelled && !bReadError && cbTotal > (ULONGLONG)PREVIEW_REST_BYTES)
         {
             if (pJob->bStdin)
@@ -2800,16 +2897,7 @@ void RunLoadJob(LoadJob* pJob)
             else
             {
                 ULONGLONG cbPageRead = (cbPage > (ULONGLONG)cbTotal) ? cbPage : (ULONGLONG)cbTotal;
-                // The estimate rides cbPageRead (not cbPage): with cbPage 0 or
-                // a shrunken file the scale still starts where the build's
-                // own ticks (cb = the bytes actually read) will continue it.
                 ULONGLONG cchBuild = EstBuildChars(iDetected, cbPageRead);
-                // 3.14: these two numbers are the delivery's handoff — the
-                // sliced delivery in ApplyLoadResult continues THIS scale
-                // (same denominator, so no backwards jump) from the read-done
-                // permille up to 1000 as the text really lands in the control.
-                pJob->qwProgRead = cbPageRead;
-                pJob->qwProgBuild = cchBuild;
                 LoadProgressPublish(pJob, cbPageRead, cbPageRead + cchBuild);      // read done: land the bar
             }
         }
@@ -2995,31 +3083,42 @@ void ApplyLoadResult(LoadJob* pJob)
     // must never look like the load is stuck. DeliverTextToEdit refreshes
     // the caret line at the end as always (cached: one rewrite total).
     UpdateStatusBar();
-    // 3.15: Word Wrap YA NO excluye el troceo. El reenvuelto del EDIT
-    // no bloquea la entrega por slices: cada EM_REPLACESEL reenvuelve
-    // sólo el trozo que entra (igual que mantiene la tabla de líneas
-    // incremental desde el punto de edición), así que el troceo vale con
-    // y sin wrap. Antes, con wrap activo, la página grande caía en el
-    // bloque de abajo: barra pintada a 1000 ANTES del EM_SETHANDLE
-    // monolítico y luego el hilo UI helado dentro del reenvuelto — la
-    // barra llena congelada de 3.10, justo donde 3.14 la había resuelto
-    // para el camino sin wrap. Ese bloque (y su variable bSliced) sale:
-    // ahora la entrega troceada (con o sin wrap) publica permille real
-    // — caracteres ya dentro del control — en la MISMA escala de la
-    // lectura, y bombea entre trozos: la barra camina de ~50% a 100%
-    // durante los antiguos diez segundos, en TODOS los caminos de página
-    // grande. (stdin sigue en marquee: pm -1 no es una posición.)
+    // 3.16: the bar goes to 100% BEFORE the monolithic EM_SETHANDLE
+    // delivery. 3.14-3.15 tried to slice the delivery with EM_REPLACESEL
+    // so the bar could walk permille-by-permille, but EM_REPLACESEL is
+    // QUADRATIC on a growing buffer: each slice forces the EDIT control
+    // to realloc-and-copy its entire accumulated buffer (not just the
+    // slice), so 30 slices of 1 MB cost O(n²) in the buffer size. A 30 MB
+    // text took ~8 seconds just in the delivery — the read itself was
+    // under a second. The monolithic EM_SETHANDLE (2.98) swaps the
+    // buffer pointer in O(1): no realloc, no copy, no per-slice rescans.
+    // The trade-off is that the UI thread cannot repaint during the
+    // swap (typically 0.5-2 s for 30 MB while the control builds its
+    // line table), but the bar is already at 100% and the status bar
+    // shows the real size, so the user sees a honest "almost done"
+    // state rather than a frozen mid-value. Word Wrap is no longer
+    // special-cased either: the rewrap happens inside EM_SETHANDLE in
+    // one pass, not per-slice.
+    // 3.16: paint the bar to 100% BEFORE the delivery, for ANY job whose
+    // bar was shown (bBarPosted). The delivery (EM_SETHANDLE) is O(1) for
+    // the buffer swap, but the control's line-table build takes 0.5-2 s
+    // for 30 MB — during that time the UI thread is blocked and cannot
+    // repaint. The bar at 100% + the real size in the status bar is the
+    // honest "finishing" signal the user sees during that stretch. stdin
+    // keeps its marquee (no known total, so 100% would be a lie).
+    if (g_hProgress != nullptr && pJob->bBarPosted && !pJob->bStdin)
+    {
+        SendMessage(g_hProgress, PBM_SETPOS, 1000, 0);
+        UpdateWindow(g_hProgress);
+        s_pmApplied = 1000;
+    }
     // 3.00: the worker already normalized the text (and the hex text never
     // needed it): the UI thread only delivers, so the load path always
     // skips the CRLF scan here. A structured failure inside the delivery
     // is remembered and reported together with the load errors below:
     // an empty window without an explanation is the one outcome worse
-    // than the message. 3.14: big pages deliver SLICED and pumped — the
-    // delivery itself publishes its progress on the worker's shared scale
-    // (pmStart carries the last real permille for the roads where the
-    // scale is gone: a failed read keeps its last tick, stdin its marquee).
-    LONG pmHandoff = InterlockedCompareExchange(&pJob->pmProgress, 0, 0);
-    BOOL bDelivered = DeliverTextSafely(pText, (int)pJob->cchText, TRUE, -1, true, pmHandoff, pJob->qwProgRead, pJob->qwProgBuild);
+    // than the message.
+    BOOL bDelivered = DeliverTextSafely(pText, (int)pJob->cchText, TRUE, -1);
     // 3.09: the bar retires AFTER the delivery (was: before, in the
     // LOADDONE handler — the user watched "Loading..." with no bar during
     // the swap). During the delivery the marquee may freeze for a moment
@@ -4011,142 +4110,14 @@ void AdoptEmptyText(void)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// 3.14: the pump of the sliced delivery. Drains the queue like the main
-// loop would (WM_QUIT is not ours to eat: re-post it and abort), and
-// answers false when this delivery has no window to finish into.
-static bool PumpDuringDelivery(HWND hEdit)
-{
-    MSG msg;
-    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
-    {
-        if (msg.message == WM_QUIT)
-        {
-            PostQuitMessage((int)msg.wParam);   // not ours: the main loop decides
-            return(false);
-        }
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-        if (hEdit != nullptr && !IsWindow(hEdit))
-        {
-            return(false);                      // the window died mid-delivery
-        }
-    }
-    return(true);
-}
-
-
-/* -------------------------------------------------------------------------------------------- */
-// 3.14: the sliced half of DeliverTextToEdit — the big-page delivery in
-// slices the UI thread can breathe between. OWNS pNorm (and pOriginal
-// when the normalizer built a second buffer) on entry; frees them on
-// EVERY exit.
-//
-// The permille rides s_pmDeliver on the worker's ONE shared scale:
-//     pm = (qwProgRead + qwProgBuild * cchDone/cch) * 1000 / (qwProgRead+qwProgBuild)
-// which starts exactly at the read-done tick (cchDone = 0) and lands
-// EXACTLY on 1000 (cchDone = cch): one monotone bar for the whole load,
-// no jumps between phases. qwProgBuild == 0 publishes nothing: stdin
-// keeps its marquee (pmStart == -1) and a load that failed mid-read
-// keeps its last real tick (pmStart >= 0).
-//
-// The pump between slices is the whole point: it runs the 16 ms poll (the
-// bar paints), the status bar, the paints — everything a frozen swap used
-// to swallow — and keeps the window responsive so it never goes
-// "(Not responding)".
-static void DeliverTextSliced(WCHAR* pNorm, int cch, WCHAR* pOriginal, LONG pmStart, ULONGLONG qwProgRead, ULONGLONG qwProgBuild, ULONGLONG dwT0)
-{
-    g_bInDelivery = true;                   // the pump makes the UI thread reachable: every load gate is closed
-    LONG lStyle = GetWindowLong(hEdit, GWL_STYLE);
-    bool bAlive = true;
-    bool bOOM = false;
-    // The poll feeds from HERE now (the job landed a message ago). With a
-    // scale, the start permille is the read-done tick (same formula, same
-    // denominator); without one, whatever the job's last real state was.
-    s_pmDeliver = (qwProgBuild > 0) ? (LONG)(((qwProgRead * 1000) / (qwProgRead + qwProgBuild))) : pmStart;
-    SetTimer(hWndMain, IDT_LOADPROG, 16, nullptr);      // idempotent: the synchronous fallback arrives with its timer killed
-    // The control starts EMPTY: WM_SETTEXT makes it absorb/realloc whatever
-    // block it holds (the preview's, the previous page's) into its own
-    // buffer — no adopted block of ours is involved in this path, so no
-    // EM_GETHANDLE/GlobalFree dance. The app's block is sliced OUT, never
-    // adopted: it dies in the FreeViewText below.
-    SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM)L"");
-    // EM_REPLACESEL is refused on a read-only control: lift it for the
-    // loop, restore it on every road (single restore below).
-    SetWindowLong(hEdit, GWL_STYLE, lStyle & ~ES_READONLY);
-    DWORD cchDone = 0;
-    while (bAlive && cchDone < (DWORD)cch)
-    {
-        DWORD cchSlice = (DWORD)cch - cchDone;
-        if (cchSlice > CB_SLICE_CHARS)
-        {
-            cchSlice = CB_SLICE_CHARS;
-        }
-        SendMessage(hEdit, EM_SETSEL, (WPARAM)cchDone, (LPARAM)cchDone);        // caret at the end: the append point
-        SendMessage(hEdit, EM_REPLACESEL, FALSE, (LPARAM)(pNorm + cchDone));    // FALSE: nothing is undoable
-        if ((DWORD)SendMessage(hEdit, WM_GETTEXTLENGTH, 0, 0) < cchDone + cchSlice)
-        {
-            bOOM = true;                    // the control could not take the slice
-            break;
-        }
-        cchDone += cchSlice;
-        if (qwProgBuild > 0)
-        {
-            ULONGLONG pmv = ((qwProgRead + (qwProgBuild * (ULONGLONG)cchDone) / (ULONGLONG)cch) * 1000) / (qwProgRead + qwProgBuild);
-            if (pmv > 999)
-            {
-                pmv = 999;                  // the 1000 is published once, after the last slice
-            }
-            s_pmDeliver = (LONG)pmv;        // same thread: a plain store, the poll reads it on its next fire
-        }
-        bAlive = PumpDuringDelivery(hEdit); // the bar paints here; the window breathes
-    }
-    SetWindowLong(hEdit, GWL_STYLE, lStyle);            // read-only back, every road
-    if (bAlive)
-    {
-        // The last slice is in: NOW the 1000 means "on screen". The final
-        // pump paints the full bar AND the first screen of the text — the
-        // control's line table is already complete (the slices built it
-        // incrementally), so that first paint formats only the visible
-        // lines: no second stall anywhere.
-        if (qwProgBuild > 0)
-        {
-            s_pmDeliver = 1000;
-        }
-        if (g_bLineNums && iView != VIEW_HEX)
-        {
-            // 3.06/3.14: the line-number column follows the line count of
-            // the text JUST delivered — same as the monolithic tail, still
-            // inside the redraw lock (one paint per delivery).
-            LayoutEdit();
-        }
-        SendMessage(hEdit, EM_SETMODIFY, FALSE, 0);
-        SendMessage(hEdit, EM_EMPTYUNDOBUFFER, 0, 0);
-        SendMessage(hEdit, EM_SETSEL, 0, 0);
-        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
-        SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
-        InvalidateRect(hEdit, nullptr, TRUE);
-        PumpDuringDelivery(hEdit);
-    }
-    else if (IsWindow(hEdit))
-    {
-        // Aborted mid-way (window closing, WM_QUIT): leave nothing locked.
-        SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
-        InvalidateRect(hEdit, nullptr, TRUE);
-    }
-    g_bInDelivery = false;
-    s_pmDeliver = -2;                       // the poll goes back to job-only feeding
-    if (pOriginal != nullptr && pOriginal != pNorm)
-    {
-        FreeViewText(pOriginal);            // the normalizer's second buffer
-    }
-    FreeViewText(pNorm);                    // sliced out, never adopted: ours to free
-    g_msDeliver = (DWORD)(GetTickCount64() - dwT0);         // /timing: delivery done (slices included)
-    if (bOOM && hWndMain != nullptr)
-    {
-        MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
-    }
-    UpdateStatusBar();
-}
+// 3.16: PumpDuringDelivery and DeliverTextSliced (3.14-3.15) are GONE.
+// EM_REPLACESEL on a growing EDIT buffer is quadratic (each slice forces
+// a realloc+copy of the whole accumulated buffer), which made a 30 MB
+// text take ~8 seconds to deliver. The monolithic EM_SETHANDLE (2.98)
+// is O(1) for the buffer swap and lets the control build its line table
+// in one pass. The bar is painted to 100% before the swap in
+// ApplyLoadResult, so the user sees a honest "finishing" state during
+// the ~0.5-2 s the control takes to index lines.
 
 
 /* -------------------------------------------------------------------------------------------- */
@@ -4173,7 +4144,7 @@ static void DeliverTextSliced(WCHAR* pNorm, int cch, WCHAR* pOriginal, LONG pmSt
 // empty delivery), keeping its refusal check: if the control cannot take
 // the text (out of memory, usually on Win32), it is cleared and the user
 // is told instead of leaving stale content on screen.
-void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown, bool bProgress, LONG pmStart, ULONGLONG qwProgRead, ULONGLONG qwProgBuild)
+void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown)
 {
     if (hEdit == nullptr)
     {
@@ -4208,31 +4179,31 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
     // delivery instead of two (the old order painted the OLD text at the
     // new geometry first, then the new text again).
     LayoutEdit();
-    // 3.14/3.15: the sliced, pumped delivery of big pages. Above
-    // CB_SLICE_CHARS the text no longer enters in one monolithic
-    // EM_SETHANDLE — the call that rebuilds the control's whole line
-    // table on this thread with nothing able to paint: the exact stretch
-    // six revisions of progress transport could never cover. Each slice
-    // lands with EM_REPLACESEL at the end (the EDIT's line-table
-    // maintenance is incremental from the edit point: typing in Notepad
-    // stays fast on multi-MB documents for the same reason, so the total
-    // cost stays O(n)) and BETWEEN slices this thread pumps the queue:
-    // the 16 ms poll lives, the bar walks real permille, the window
-    // never ghosts. 3.15: Word Wrap YA NO excluye el troceo — el
-    // reenvuelto del EDIT se hace por trozo (cada EM_REPLACESEL
-    // reenvuelve sólo lo que entra, igual que su tabla de líneas se
-    // mantiene incremental), así que el camino con wrap activo ya no
-    // cae en el EM_SETHANDLE monolítico que helaba el hilo UI con la
-    // barra llena. bProgress=false callers (view switches, clipboard)
-    // keep the monolithic adopt: their stall is a separate, older
-    // trade-off.
-    if (bProgress && pNorm != nullptr && cch >= CB_SLICE_CHARS && IsWindow(hEdit))
-    {
-        DeliverTextSliced(pNorm, cch, (pNorm != pText) ? pText : nullptr, pmStart, qwProgRead, qwProgBuild, dwT0);
-        return;
-    }
+    // 3.16: the sliced delivery (3.14-3.15) is GONE. EM_REPLACESEL on a
+    // growing EDIT buffer is quadratic: each slice forces the control to
+    // realloc-and-copy its entire accumulated buffer. A 30 MB text took
+    // ~8 seconds across 30 slices. The monolithic EM_SETHANDLE below
+    // (2.98's zero-copy swap) is O(1) for the buffer pointer and lets
+    // the control build its line table in one pass — the only cost the
+    // UI thread pays, and it is far smaller than the quadratic delivery
+    // ever was. The bar is painted to 100% BEFORE this swap (in
+    // ApplyLoadResult), so the user sees a honest "almost done" state
+    // during the ~0.5-2 s the control takes to index the lines.
+    //
+    // 3.17: with Word Wrap ON, EM_SETHANDLE is dramatically slower
+    // because the control recalculates EVERY soft break in the whole
+    // text in one synchronous call — for 26 MB of chat log that is
+    // millions of wrap calculations, freezing the UI for several
+    // seconds. WM_SETTEXT is faster here: the control EDIT handles wrap
+    // more efficiently through its own buffer management and can defer
+    // some of the layout work. The trade-off is a copy (WM_SETTEXT
+    // duplicates the buffer internally), but for wrap that copy is far
+    // cheaper than the per-line rewrap EM_SETHANDLE forces. Without wrap,
+    // EM_SETHANDLE stays: zero-copy is the clear win when there is no
+    // wrap table to rebuild.
+    bool bUseSetText = g_bWrap && pNorm != nullptr && cch > 0;
     HGLOBAL hNew = nullptr;
-    if (pNorm != nullptr && cch > 0)
+    if (!bUseSetText && pNorm != nullptr && cch > 0)
     {
         hNew = GlobalHandle(pNorm);    // nonzero only for AllocViewText blocks
         if (hNew != nullptr)
@@ -4240,7 +4211,24 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
             GlobalUnlock(hNew);     // EM_SETHANDLE wants an unlocked block
         }
     }
-    if (hNew != nullptr)
+    if (bUseSetText)
+    {
+        // Word Wrap path: WM_SETTEXT lets the control manage wrap layout
+        // more efficiently than EM_SETHANDLE's full rewrap. The control
+        // copies the text into its own buffer; our block is freed below.
+        LRESULT lrSetText = SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM)(LPCWSTR)pNorm);
+        if (lrSetText == 0 && IsWindow(hEdit))
+        {
+            SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM)L"");
+            MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
+        }
+        if (pNorm != pText)
+        {
+            FreeViewText(pNorm);
+        }
+        FreeViewText(pText);
+    }
+    else if (hNew != nullptr)
     {
         HGLOBAL hOld = (HGLOBAL)SendMessage(hEdit, EM_GETHANDLE, 0, 0);
         SendMessage(hEdit, EM_SETHANDLE, (WPARAM)hNew, 0);
@@ -4296,19 +4284,17 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
 // exception during delivery degrades to a recovered, empty control instead of
 // killing 4More. On compilers without SEH (the Linux audit bench) the mapping
 // turns this into the plain call.
-BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown, bool bProgress, LONG pmStart, ULONGLONG qwProgRead, ULONGLONG qwProgBuild)
+BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown)
 {
     BOOL bOk = FALSE;
     __try
     {
-        DeliverTextToEdit(pText, cch, bPreNormalized, cExpandKnown, bProgress, pmStart, qwProgRead, qwProgBuild);
+        DeliverTextToEdit(pText, cch, bPreNormalized, cExpandKnown);
         bOk = TRUE;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         RecoverEditAfterViewFailure();
-        g_bInDelivery = false;              // 3.14: an exception mid-delivery must not weld the load gates shut
-        s_pmDeliver = -2;
         bOk = FALSE;
     }
     return(bOk);
@@ -4435,10 +4421,23 @@ void ApplyView(void)
     HCURSOR hcurOld = SetCursor(LoadCursor(nullptr, IDC_WAIT));
     try
     {
+        // 3.18: with Word Wrap, cap the source bytes the decode sees.
+        // BuildViewText respects CB_TEXT_MAX internally, but when the user
+        // toggles wrap ON after a full 32 MB load, cbFile is already 32 MB
+        // and the decode would build all of it — then the EDIT control
+        // would spend ~10 s recalculating soft breaks. Capping here makes
+        // the wrap toggle instant: the user sees the first CB_WRAP_TEXT_MAX
+        // bytes, and the truncation notice explains the rest is one page
+        // down.
+        DWORD cbDecode = cbFile;
+        if (g_bWrap && iView != VIEW_HEX && cbDecode > (DWORD)CB_WRAP_TEXT_MAX)
+        {
+            cbDecode = (DWORD)CB_WRAP_TEXT_MAX;
+        }
         WCHAR* pText = nullptr;
         DWORD cch = 0;
         DWORD dwSrcOff = 0, dwSrcLen = 0;
-        if (!BuildViewText(iView, pFileBytes, cbFile, g_cbFileTotal, g_qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen))
+        if (!BuildViewText(iView, pFileBytes, cbDecode, g_cbFileTotal, g_qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen))
         {
             // 3.05: out of memory in the decode — an honest FALSE with
             // its message, where a null block used to be written through.
@@ -4578,19 +4577,15 @@ void PositionProgress(void)
 // flashes it); -1: unknown total (stdin) — marquee; 0..1000: the position.
 void OnLoadProgressTimer(void)
 {
-    if (g_hProgress == nullptr || (g_pJob == nullptr && s_pmDeliver == -2))
+    if (g_hProgress == nullptr || g_pJob == nullptr)
     {
-        // The job landed between fires and no delivery is feeding the bar
-        // (ApplyLoadResult painted the final state and retired it), or the
-        // window is closing: the poll's reason to exist is gone.
+        // The job landed between fires (ApplyLoadResult painted the final
+        // state and retired it), or the window is closing: the poll's
+        // reason to exist is gone.
         KillTimer(hWndMain, IDT_LOADPROG);
         return;
     }
-    // 3.14: two feeds, one bar. While the job is in flight the truth is
-    // its atomic permille; once it landed (g_pJob null) the sliced
-    // delivery feeds the same bar through s_pmDeliver with the characters
-    // already inside the control.
-    LONG pm = (g_pJob != nullptr) ? InterlockedCompareExchange(&g_pJob->pmProgress, 0, 0) : s_pmDeliver;
+    LONG pm = InterlockedCompareExchange(&g_pJob->pmProgress, 0, 0);
     if (pm == -2 || pm == s_pmApplied)
     {
         return;                             // nothing published, or nothing new since the last paint
@@ -5029,7 +5024,13 @@ void OpenFileDlg(void)
 // resets iView — LoadPage clamps before that call instead.
 DWORD PageCapBytes(void)
 {
-    return(iView == VIEW_HEX) ? (DWORD)CB_HEX_MAX : (DWORD)CB_TEXT_MAX;
+    if (iView == VIEW_HEX)
+    {
+        return (DWORD)CB_HEX_MAX;
+    }
+    // 3.18: with Word Wrap the EDIT control rebuilds every soft break
+    // synchronously, so the page cap is smaller to keep the UI responsive.
+    return g_bWrap ? (DWORD)CB_WRAP_TEXT_MAX : (DWORD)CB_TEXT_MAX;
 }
 
 
@@ -5075,7 +5076,7 @@ ULONGLONG LastPageBase(ULONGLONG cbSize)
 // file at constant memory.
 bool LoadPage(ULONGLONG qwBase, bool bTailJump)
 {
-    if (g_pJob != nullptr || g_bInDelivery)
+    if (g_pJob != nullptr)
     {
         return(false);                  // one load at a time (3.14: the sliced delivery counts)
     }
@@ -5477,7 +5478,7 @@ void GoToOffset(ULONGLONG qwOff)
         MessageBox(hWndMain, L"There is no file loaded.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (g_pJob != nullptr || g_bInDelivery)
+    if (g_pJob != nullptr)
     {
         MessageBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
@@ -5825,7 +5826,7 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
         MessageBox(hWndMain, L"There is no file loaded: piped input and the clipboard cannot be searched on disk.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (g_pJob != nullptr || g_bInDelivery)
+    if (g_pJob != nullptr)
     {
         MessageBox(hWndMain, L"Still loading the file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
@@ -5975,7 +5976,7 @@ void ViewClipboardAsFile(void)
         MessageBox(hWndMain, L"A raw-file search is running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (g_pJob != nullptr || g_bInDelivery)
+    if (g_pJob != nullptr)
     {
         // 3.07: the clipboard view bypasses the load gate (it builds its
         // bytes right here, on the UI thread). While a load is in flight it

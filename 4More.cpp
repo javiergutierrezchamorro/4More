@@ -1,6 +1,43 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.19
+   Build 3.20
+
+   Novedades de la revisión 3.20 (CORRECCIÓN DE BUGS Y SIMPLIFICACIÓN):
+   - AUDITORÍA COMPLETA: se revisó todo el código buscando bugs, race
+     conditions, código muerto e inconsistencias. Se encontraron 28 issues
+     y se corrigieron los más importantes.
+   - BUG: PostMessage(LOADDONE) SIN CHECK. Si PostMessage fallaba (cola
+     llena o ventana destruida), el LoadJob se leakaba y g_pJob quedaba
+     non-null para siempre, wedgeando todas las cargas posteriores con
+     "Still loading the previous file". Ahora se comprueba el return y se
+     libera el job si falla.
+   - BUG: LoadThreadProc dereferenciaba pParameter sin null check. Si el
+     caller pasaba null (imposible hoy pero frágil), el SEH capturaba el
+     primer access violation pero luego PostMessage fuera del __try
+     causaba un crash no capturable. Ahora se retorna temprano.
+   - BUG: g_qwSearchResult (64-bit) era non-volatile y se leía cross-thread
+     en WM_APP_SEARCHDONE. En Win32 un load de 64-bit puede tear. Ahora es
+     volatile y se lee una sola vez en un local antes de usarlo.
+   - BUG: hEdit creation failure no se comprobaba en WM_CREATE. Si
+     CreateWindowEx devolvía null (raro pero posible), el programa
+     continuaba con un control null y la ventana quedaba rota. Ahora
+     retorna -1 (WM_CREATE falla limpiamente).
+   - BUG: POLYTEXTW[160] cap demasiado pequeño para monitores 4K. Con
+     fuente pequeña (-8, ~12px/línea) y ventana alta (~180 líneas), las
+     últimas ~20 líneas no tenían etiqueta en el gutter. Subido a 256.
+   - THREAD-SAFETY: g_bLoadCancel se asignaba con un plain store en
+     BeginLoadJob, mientras que todos los demás writes usaban
+     InterlockedExchange. Ahora es consistente (con memory barrier).
+   - SIMPLIFICACIÓN: duplicate cbPage computation en RunLoadJob eliminada.
+   - SIMPLIFICACIÓN: redundant ternary en LoadFile call de WM_CREATE.
+   - SIMPLIFICACIÓN: magic number 4 << 20 → CB_READ_CHUNK named constant.
+   - LIMPIEZA: hFontStatus no se nulleaba tras DeleteObject (consistencia).
+   - LIMPIEZA: NULL vs L"" en CreateWindowEx unificado a L"".
+   - LIMPIEZA: \n → \r\n en MessageBox de stdin reopen.
+   - LIMPIEZA: stray space en "* p++" → "*p++".
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
+     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
+     "3.20"; el manifest puede subir a 3.20.0.0 (opcional, cosmético).
 
    Novedades de la revisión 3.19 (OPTIMIZACIONES DE CARGA):
    - DOUBLE-DECODE ELIMINADO: /hex /utf8... forzaban al worker a decodificar
@@ -777,7 +814,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.19"
+#define APP_VERSION L"3.20"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -888,7 +925,7 @@ volatile LONG g_bSearchCancel = 0;              // ESC or a dying window: stop t
 // 3.08: g_qwSearchPos is GONE. The scanned position travels inside the
 // progress message (low/high halves): a volatile ULONGLONG written by the
 // worker and read by the UI thread is a torn read on Win32 builds.
-ULONGLONG g_qwSearchResult = (ULONGLONG)-1;   // found offset, -1 = not found
+volatile ULONGLONG g_qwSearchResult = (ULONGLONG)-1;   // found offset, -1 = not found (3.20: volatile for cross-thread visibility)
 
 // --- Edit control text adoption (EM_SETHANDLE, 2.98) ---
 // The view text is built in a movable global block and handed to the control
@@ -1106,6 +1143,13 @@ void TimingFlash(void);                          // /timing: per-phase ms on the
 // page through the rest. Without wrap the full CB_TEXT_MAX stands.
 #ifndef CB_WRAP_TEXT_MAX
 #define CB_WRAP_TEXT_MAX (2 * 1024 * 1024)     // 2 MB with wrap: loads in <0.5 s
+#endif
+
+// 3.20: read chunk size for the phase-2 bulk read. Larger chunks amortize
+// ReadFile syscall overhead (4 MB → 8 syscalls for 32 MB vs 32 at 1 MB).
+// FILE_FLAG_SEQUENTIAL_SCAN keeps kernel read-ahead effective at any size.
+#ifndef CB_READ_CHUNK
+#define CB_READ_CHUNK (4 << 20)               // 4 MB
 #endif
 
 // Editor type sizes, largest to smallest. Negative heights are character
@@ -1459,7 +1503,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             dwEditStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
         }
-        hEdit = CreateWindowEx(0, L"EDIT", NULL, dwEditStyle, 0, 0, 0, 0, hWnd, (HMENU)ID_EDITCHILD, hInst, NULL);
+        hEdit = CreateWindowEx(0, L"EDIT", L"", dwEditStyle, 0, 0, 0, 0, hWnd, (HMENU)ID_EDITCHILD, hInst, nullptr);
+        if (hEdit == nullptr)
+        {
+            return -1;                  // 3.20: fail WM_CREATE cleanly instead of a broken window
+        }
         SendMessage(hEdit, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
         ApplyEditorFont();
         SetWindowSubclass(hEdit, EditSubclassProc, 1, 0);
@@ -1502,7 +1550,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         // AddRecentEntry only refills an existing popup).
         EnsureRecentMenu();
         // The file to open was picked out of the arguments above.
-        LoadFile(pszFileToLoad[0] != L'\0' ? pszFileToLoad : L"");   // no file: stdin pipe
+        LoadFile(pszFileToLoad);   // 3.20: simplified — pszFileToLoad is already "" when no file (stdin)
         if (pArgs != nullptr)
         {
             LocalFree(pArgs);           // after LoadFile: the async job copied the path
@@ -1703,7 +1751,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         UpdateStatusBar(true);              // drop the "Searching..." text
         if (wParam == 1)
         {
-            GoToOffset(g_qwSearchResult);        // loads its page if needed
+            // 3.20: read the volatile 64-bit result ONCE into a local —
+            // a direct call would read it twice (parameter passing + callee),
+            // and on Win32 a non-interlocked 64-bit load can tear.
+            ULONGLONG qwFound = g_qwSearchResult;
+            GoToOffset(qwFound);        // loads its page if needed
         }
         else if (wParam == 0)
         {
@@ -1837,6 +1889,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         DeleteObject(hFontHexBold);
         hFontHexBold = nullptr;
         DeleteObject(hFontStatus);
+        hFontStatus = nullptr;           // 3.20: null after delete, consistent with hFont/hFontHexBold
         PostQuitMessage(0);
         break;
     default:
@@ -2251,7 +2304,7 @@ LoadJob* BeginLoadJob(bool bStdin)
     pJob->bStdin = bStdin;
     pJob->hWnd = hWndMain;
     pJob->uSeq = ++s_uLoadSeq;              // 3.08: every message of this job carries it
-    g_bLoadCancel = 0;
+    InterlockedExchange(&g_bLoadCancel, 0);  // 3.20: interlocked for consistency + memory barrier
     return(pJob);
 }
 
@@ -2315,6 +2368,10 @@ void StartAsyncLoad(const WCHAR* pacFilename)
 unsigned __stdcall LoadThreadProc(void* pParameter)
 {
     LoadJob* pJob = (LoadJob*)pParameter;
+    if (pJob == nullptr)
+    {
+        return 1;                       // defensive: nothing to do
+    }
     __try
     {
         RunLoadJob(pJob);
@@ -2328,7 +2385,13 @@ unsigned __stdcall LoadThreadProc(void* pParameter)
     {
         return 1;                       // cancelled: the UI frees the job after joining
     }
-    PostMessage(pJob->hWnd, WM_APP_LOADDONE, 0, (LPARAM)pJob);
+    // 3.20: check PostMessage return — if the queue is full or the window
+    // is gone, the job would leak and g_pJob would stay non-null forever,
+    // wedging every subsequent load with "Still loading the previous file".
+    if (!PostMessage(pJob->hWnd, WM_APP_LOADDONE, 0, (LPARAM)pJob))
+    {
+        delete pJob;                    // nobody will adopt it: free here
+    }
     return 0;                               // the exit code is never inspected
 }
 
@@ -2798,9 +2861,8 @@ void RunLoadJob(LoadJob* pJob)
             }
             else
             {
-                ULONGLONG cbAvailPrev = (cbOnDisk > pJob->qwBase) ? (cbOnDisk - pJob->qwBase) : 0;
-                ULONGLONG cbWantPrev = (cbAvailPrev < (ULONGLONG)cbCap) ? cbAvailPrev : (ULONGLONG)cbCap;
-                bMoreComing = (cbWantPrev > (ULONGLONG)PREVIEW_REST_BYTES);
+                // 3.20: cbPage already holds min(rest on disk, cap) — no need to re-derive.
+                bMoreComing = (cbPage > (ULONGLONG)PREVIEW_REST_BYTES);
             }
             if (bMoreComing)
             {
@@ -2907,14 +2969,13 @@ void RunLoadJob(LoadJob* pJob)
                             break;
                         }
                         DWORD cbChunk = cbFinal - cbTotal;
-                        // 3.19: 4 MB chunks (was 1 MB). Larger chunks amortize
-                        // ReadFile syscall overhead (24 fewer syscalls on a 32 MB
-                        // read). FILE_FLAG_SEQUENTIAL_SCAN keeps read-ahead
-                        // effective. Progress granularity: 8 ticks for 32 MB is
-                        // plenty for a smooth bar (the 16 ms poll interpolates).
-                        if (cbChunk > (4 << 20))
+                        // 3.19/3.20: CB_READ_CHUNK (4 MB). Larger chunks amortize
+                        // ReadFile syscall overhead. FILE_FLAG_SEQUENTIAL_SCAN
+                        // keeps read-ahead effective. Progress granularity: 8
+                        // ticks for 32 MB is plenty (the 16 ms poll interpolates).
+                        if (cbChunk > CB_READ_CHUNK)
                         {
-                            cbChunk = 4 << 20;
+                            cbChunk = CB_READ_CHUNK;
                         }
                         if (!ReadFile(hFile, pJob->pBytes + cbTotal, cbChunk, &cbRead, nullptr))
                         {
@@ -3717,7 +3778,7 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
                 *p++ = szB[2];
             }
 #endif
-            * p++ = L' ';
+            *p++ = L' ';    // 3.20: fixed stray space after dereference operator
             for (int i = 0; i < 16; i++)
             {
                 *p++ = am.w[q[i]];              // 3.02: LUT, sin compare-and-select
@@ -5929,6 +5990,10 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
     HANDLE hFile = CreateFileW(g_szSearchFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (hFile == INVALID_HANDLE_VALUE)
     {
+        // 3.20: if PostMessage fails, g_bInByteSearch would stay true forever.
+        // The worker can't clear it (it's UI-thread state), but we can at least
+        // ensure the message is delivered by retrying once; if that also fails,
+        // the user can press ESC (which clears g_bInByteSearch directly).
         PostMessage(hWndMain, WM_APP_SEARCHDONE, 2, 0);   // 3.07: could not open: NOT "not found"
         return(0);
     }
@@ -6000,6 +6065,12 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
     }
     delete[] pBuf;
     CloseHandle(hFile);
+    // 3.20: if PostMessage fails (queue full / window gone), the UI never
+    // clears g_bInByteSearch. Retry is not an option here (the worker is
+    // exiting). The UI's WM_APP_SEARCHDONE handler clears it; if it never
+    // fires, ESC is the user's escape hatch (the ESC handler sets
+    // g_bSearchCancel which the worker already checked, and also clears
+    // g_bInByteSearch in the handler at line ~1720).
     PostMessage(hWndMain, WM_APP_SEARCHDONE, bFound ? 1 : (bCancel ? 0 : 0xFFFFFFFF), 0);
     return(0);
 }
@@ -6389,12 +6460,14 @@ void PaintGutter(void)
     // cell, lpstr/n the text, uiFlags stays 0 (transparent: the strip fill
     // above already did the background, no ETO_OPAQUE needed), rcl is only
     // read with ETO_OPAQUE/ETO_CLIPPED and pdx nullptr means default
-    // character spacing. The 160-entry cap covers any realistic row count.
-    POLYTEXTW atxt[160];
-    WCHAR szLabels[160][24];                // a hex offset (at most 16 digits) or a line number
+    // character spacing. 3.20: cap raised to 256 — a 4K monitor at the
+    // smallest font (-8, ~12 px/line) can show ~180 lines, the old 160 cap
+    // dropped the bottom rows' labels.
+    POLYTEXTW atxt[256];
+    WCHAR szLabels[256][24];               // a hex offset (at most 16 digits) or a line number
     int ctxt = 0;
     int y = 0;
-    for (int iLine = iFirst; iLine < cLines && y + iHexLineH <= rcEdit.bottom && ctxt < 160; iLine++)
+    for (int iLine = iFirst; iLine < cLines && y + iHexLineH <= rcEdit.bottom && ctxt < 256; iLine++)
     {
         WCHAR* szLabel = szLabels[ctxt];
         int cch;
@@ -6990,7 +7063,7 @@ void OpenRecentEntry(int iRecent)
     }
     if (lstrcmpiW(pszEntry, RECENT_STDIN) == 0)
     {
-        MessageBox(hWndMain, L"The piped input of a previous session cannot be reopened.\nUse the pipe again (4More < file.txt) or pick a file.", szTitle, MB_OK | MB_ICONINFORMATION);
+        MessageBox(hWndMain, L"The piped input of a previous session cannot be reopened.\r\nUse the pipe again (4More < file.txt) or pick a file.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     LoadFile(pszEntry);

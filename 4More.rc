@@ -1,4 +1,9 @@
-﻿// 4More.rc — recursos del visor (Build 3.19)
+﻿// 4More.rc — recursos del visor (Build 3.20)
+//
+// 3.20: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
+// .cpp: corrección de bugs (PostMessage sin check, g_qwSearchResult non-volatile,
+// hEdit null check, POLYTEXTW cap) y simplificación de código. El manifest puede
+// subir a 3.20.0.0 (opcional, cosmético).
 //
 // 3.19: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
 // .cpp: double-decode eliminado (/hex /utf8 decodifican directo en el worker)

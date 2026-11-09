@@ -1,4 +1,13 @@
-﻿// 4More.rc — recursos del visor (Build 3.04)
+﻿// 4More.rc — recursos del visor (Build 3.05)
+//
+// 3.05: ACELERADORES DE FUENTE CON GEMELAS SHIFT. TranslateAccelerator
+// compara Shift/Ctrl/Alt de forma EXACTA y en los teclados donde '+' y '-'
+// viven detrás de Shift (el estadounidense, entre otros) Ctrl++/Ctrl+-
+// llegaban como VK_OEM_PLUS/MINUS con Shift pulsado: la entrada con sólo
+// CONTROL no saltaba NUNCA. Ahora cada una tiene su gemela CONTROL|SHIFT;
+// Ctrl+= a secas y el numpad siguen cubiertos. El About ya no mezcla
+// idiomas ("paginas" pasa a "pages"). Compilar junto al 4More.cpp 3.05
+// (APP_VERSION ya dice "3.05") y el About lo mostrará solo.
 //
 // 3.04: NI MENÚ NI ACELERADORES CAMBIAN. La segunda pasada de revisión fue
 // para el .cpp (la pasada CRLF escanea una vez, detectores más delgados,
@@ -142,10 +151,16 @@ BEGIN
     // Fuente: fila principal (= / _) y numpad (+ / -), sólo por la tabla:
     // el acelerador responde SIEMPRE que el foco esté en el programa,
     // así que la rama gemela del subclass se retiró en 3.03 (rama muerta).
+    // 3.05: TranslateAccelerator exige el estado EXACTO de Shift/Ctrl/Alt;
+    // un Ctrl++ de verdad (Shift dentro para producir '+') no saltaba con
+    // la variante CONTROL a secas: cada fila principal lleva su gemela
+    // CONTROL|SHIFT. Ctrl+= a secas y el numpad siguen cubiertos.
     VK_ADD,         ID_VIEW_FONTPLUS,       VIRTKEY, CONTROL, NOINVERT
     VK_SUBTRACT,    ID_VIEW_FONTMINUS,      VIRTKEY, CONTROL, NOINVERT
     VK_OEM_PLUS,    ID_VIEW_FONTPLUS,       VIRTKEY, CONTROL, NOINVERT
+    VK_OEM_PLUS,    ID_VIEW_FONTPLUS,       VIRTKEY, CONTROL, SHIFT, NOINVERT
     VK_OEM_MINUS,   ID_VIEW_FONTMINUS,      VIRTKEY, CONTROL, NOINVERT
+    VK_OEM_MINUS,   ID_VIEW_FONTMINUS,      VIRTKEY, CONTROL, SHIFT, NOINVERT
 END
 
 
@@ -170,7 +185,7 @@ BEGIN
     LTEXT           "", IDC_ABOUT_VERSION, 42, 22, 178, 8
     LTEXT           "", IDC_ABOUT_BUILD, 42, 34, 178, 8
     LTEXT           "", IDC_ABOUT_COMPILER, 42, 46, 178, 8
-    LTEXT           "Read-only file viewer: paginas, encodings, hex.", IDC_STATIC, 42, 58, 178, 8
+    LTEXT           "Read-only file viewer: pages, encodings, hex.", IDC_STATIC, 42, 58, 178, 8
     DEFPUSHBUTTON   "OK", IDOK, 90, 82, 50, 14, WS_GROUP
 END
 

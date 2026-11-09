@@ -1,6 +1,42 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.04
+   Build 3.05
+
+   Novedades de la revisión 3.05 (TERCERA PASADA: SIMPLIFICAR Y ACELERAR):
+   - LA PASADA CRLF YA NO CAMINA EL TEXTO DECODIFICADO EN UTF-16.
+     CountCRLFExpansionUtf16 cuenta la expansión sobre los BYTES crudos con
+     memchr (la mitad EOL de cada unidad va en el escaneo SIMD; la paridad
+     descarta los 0x0A/0x0D que viven DENTRO de un carácter, como U+0A00),
+     y PlanCRLFPass concentra la decisión para TODAS las vistas: el worker
+     deja de recorrer hasta 16M WCHAR por fichero UTF-16 y el portapapeles
+     deja de pagar su pasada WCHAR en el hilo UI en cada carga.
+   - LOS CAMBIOS DE VISTA SE PLANIFICAN IGUAL QUE UNA CARGA. ApplyView
+     entregaba el texto sin plan: ANSI/UTF-8 pagaban el escaneo completo y
+     EBCDIC — que nunca produce \r ni \n — pagaba UNA PASADA ENTERA INÚTIL
+     de 32M caracteres en cada switch. Ahora todo el programa pregunta al
+     mismo PlanCRLFPass.
+   - UNA RAMA UTF-16 EN VEZ DE DOS: las ramas LE y BE de BuildViewText eran
+     40 líneas gemelas (BOM, recorte, surrogate colgante, copia); una sola
+     con el orden de bytes como parámetro.
+   - 2 CORRECCIONES: Ctrl++ / Ctrl+- NO HACÍAN NADA en los teclados donde
+     '+' y '-' viven detrás de Shift (el estadounidense, entre otros):
+     TranslateAccelerator compara Shift/Ctrl/Alt de forma EXACTA y la tabla
+     sólo traía la variante CONTROL; cada una lleva ahora su gemela
+     CONTROL|SHIFT (Ctrl+= a secas y el numpad siguen valiendo). Y OOM en
+     BuildViewText almacenaba el bloque nulo de AllocViewText y escribía en
+     él — un access violation que sólo los abrigos SEH sobrevivían (el del
+     portapapeles ni ese camino cubría): ahora responde FALSE y cada
+     llamador muestra su aviso de memoria.
+   - CARRERA RESIDUAL, FUERA: el hilo de Find Bytes escanea su PROPIA copia
+     de la ruta (g_szSearchFile) en vez de g_szCurrentFile: la única
+     ventana que quedaba (un ResetViewer desde el camino de fallo de
+     SetView) se cierra con una copia.
+   - SIMPLIFICACIÓN: BuildIniPath pierde el escáner de barras a mano
+     (PathRemoveFileSpecW; shlwapi ya estaba incluida y enlazada);
+     IsBinaryData pierde dos guardas redundantes (memchr con cb==0 ya
+     responde NULL y cero controles nunca gana la regla del 10%);
+     LoadFileSync pasa a LoadStdin — es asíncrono desde 3.02 y el nombre
+     mentía; el About ya no dice "paginas" en mitad de una frase inglesa.
 
    Novedades de la revisión 3.04 (SEGUNDA PASADA: SIMPLIFICAR Y ACELERAR):
    - LA PASADA CRLF YA NO ESCANEA DOS VECES. El worker cuenta la expansión
@@ -272,7 +308,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.04"
+#define APP_VERSION L"3.05"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -345,6 +381,7 @@ HMENU g_hRecentMenu = nullptr;                  // the popup, built once at WM_C
 // --- Raw-file search worker (one search at a time, gated by g_bInByteSearch) ---
 BYTE g_abSearchPat[128];                        // pattern the worker scans for (copied before launch)
 DWORD g_cbSearchPat = 0;
+WCHAR g_szSearchFile[MAX_PATH] = {};            // 3.05: the worker's own copy of g_szCurrentFile (set at launch)
 HANDLE g_hSearchThread = nullptr;
 volatile LONG g_bSearchCancel = 0;              // ESC or a dying window: stop the scan
 volatile ULONGLONG g_qwSearchPos = 0;          // bytes scanned so far (status bar progress)
@@ -433,7 +470,7 @@ LRESULT CALLBACK EditSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PT
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void LoadFile(const WCHAR *pacFilename);
 LoadJob* BeginLoadJob(bool bStdin);            // shared setup of both load paths
-void LoadFileSync(void);                       // stdin path (startup); 3.02: async like the file loads
+void LoadStdin(void);                          // stdin path (startup); 3.02: async like the file loads
 void StartAsyncLoad(const WCHAR *pacFilename);  // file path: worker thread + WM_APP_LOADDONE
 unsigned __stdcall LoadThreadProc(void *pParameter);
 void RunLoadJob(LoadJob *pJob);                 // open+read+detect+decode; no UI calls from here
@@ -457,8 +494,8 @@ void SetView(int iNewView);
 void ApplyView(void);
 bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr);   // 3.02: los dos últimos responden la ventana de BYTES que se decodificó
 int DetectDefaultView(const BYTE* pBytes, DWORD cb);
-void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized); // deliver + own/free the buffer
-BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized); // DeliverTextToEdit wrapped in SEH
+void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1); // deliver + own/free the buffer
+BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1); // DeliverTextToEdit wrapped in SEH
 void AdoptEmptyText(void);                      // swap in an empty block (EM_SETHANDLE, 2.98)
 WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch);
 bool IsBinaryData(const BYTE* pBytes, DWORD cb);
@@ -1533,7 +1570,7 @@ void LoadFile(const WCHAR *pacFilename)
         }
         if (pacFilename[0] == L'\0')
         {
-                LoadFileSync();                 // stdin pipe: startup path, synchronous
+                LoadStdin();                    // stdin pipe: async like any load since 3.02
                 return;
         }
         if (lstrlenW(pacFilename) >= MAX_PATH)
@@ -1680,6 +1717,112 @@ static int CountCRLFExpansion(const BYTE* pBytes, DWORD cb)
                 p = pLf + 1;
         }
         return(cExpand);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 3.05: the UTF-16 twin of CountCRLFExpansion, on the RAW BYTES and for both
+// byte orders. The EOL half of the code unit (low byte in LE, high byte in BE)
+// goes through memchr, the CRT's SIMD scan; the 0x00 half and the neighbouring
+// unit decide lone \r / lone \n. Hits at the wrong parity are bytes INSIDE a
+// character (U+0A00, U+010A, ...) and never count. Same contract as its
+// 1-byte sibling: lone \r and lone \n each cost one character, \r\n costs
+// nothing. pBytes/cb describe whole code units (dwSrcLen = cwch * 2).
+static int CountCRLFExpansionUtf16(const BYTE* pBytes, DWORD cb, bool bBE)
+{
+        const DWORD iEol = bBE ? 1u : 0u;       // the byte inside the unit that carries 0x0A / 0x0D
+        int cExpand = 0;
+        // ---- lone \n: the unit before it must not be \r -------------------------
+        for (DWORD k = 0;; k++)
+        {
+                const BYTE* pA = (const BYTE*) memchr(pBytes + k, 0x0A, (size_t) (cb - k));
+                if (pA == nullptr)
+                {
+                        break;
+                }
+                k = (DWORD) (pA - pBytes);
+                if ((k & 1) == iEol)
+                {
+                        DWORD s = k - iEol;                     // first byte of the unit
+                        if (s + 1 < cb && pBytes[s + (1 - iEol)] == 0x00)       // the other half is NUL: a real EOL unit
+                        {
+                                if (s >= 2)
+                                {
+                                        DWORD t = s - 2;                // the unit before
+                                        if (pBytes[t + iEol] == 0x0D && pBytes[t + (1 - iEol)] == 0x00)
+                                        {
+                                                continue;               // \r\n: costs nothing
+                                        }
+                                }
+                                cExpand++;              // lone \n
+                        }
+                }
+        }
+        // ---- lone \r: the unit after it must not be \n --------------------------
+        for (DWORD k = 0;; k++)
+        {
+                const BYTE* pD = (const BYTE*) memchr(pBytes + k, 0x0D, (size_t) (cb - k));
+                if (pD == nullptr)
+                {
+                        break;
+                }
+                k = (DWORD) (pD - pBytes);
+                if ((k & 1) == iEol)
+                {
+                        DWORD s = k - iEol;
+                        if (s + 1 < cb && pBytes[s + (1 - iEol)] == 0x00)
+                        {
+                                if (s + 3 < cb)
+                                {
+                                        DWORD t = s + 2;                // the unit after
+                                        if (pBytes[t + iEol] == 0x0A && pBytes[t + (1 - iEol)] == 0x00)
+                                        {
+                                                continue;               // \r\n: costs nothing
+                                        }
+                                }
+                                cExpand++;              // lone \r
+                        }
+                }
+        }
+        return(cExpand);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 3.05: one plan for the CRLF pass of every view, decided on the RAW BYTES —
+// the shared answer the load worker and the view switches now ask. rbNeed
+// says whether the delivery still needs NormalizeNewlines at all; rcExpand
+// carries the expansion count already computed (>= 0) so the normalizer skips
+// its own scan, or -1 when there is no usable byte window to count on.
+static void PlanCRLFPass(int iView, const BYTE* pBytes, DWORD dwSrcOff, DWORD dwSrcLen, bool& rbNeed, int& rcExpand)
+{
+        rbNeed = false;
+        rcExpand = -1;
+        if (iView == VIEW_HEX)
+        {
+                return;                         // CRLF-only by construction: adopt as is
+        }
+        if (iView == VIEW_EBCDIC)
+        {
+                return;                         // its table maps the CR/LF cells to U+FFFD: no \r or \n survives
+        }
+        if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+        {
+                if (dwSrcLen >= 2)
+                {
+                        rcExpand = CountCRLFExpansionUtf16(pBytes + dwSrcOff, dwSrcLen, iView == VIEW_UTF16BE);
+                        rbNeed = (rcExpand != 0);
+                }
+                return;
+        }
+        // ANSI and UTF-8: \r and \n are one byte each and UTF-8 continuation
+        // bytes never collide with them, so the byte count IS the character
+        // count (Windows DBCS trail bytes never go below 0x40 either).
+        if (dwSrcLen > 0)
+        {
+                rcExpand = CountCRLFExpansion(pBytes + dwSrcOff, dwSrcLen);
+                rbNeed = (rcExpand != 0);
+        }
 }
 
 
@@ -1982,33 +2125,20 @@ void RunLoadJob(LoadJob *pJob)
                 {
                         WCHAR* pNorm = pText;
                         int cchNorm = (int) cch;
-                        g_msNormalize = 0;      // hex adopts directly: no CRLF pass anywhere
-                        // 3.02: the CRLF pass only runs when it can change
-                        // something. EBCDIC never needs it (its table maps the
-                        // CR/LF cells to U+FFFD: no \r or \n survives the decode)
-                        // and ANSI/UTF-8 ask the memchr preview (O2) whether any
-                        // lone \r or \n exists before paying the full pass.
-                        bool bNeedNorm = true;
+                        g_msNormalize = 0;      // hex and EBCDIC adopt directly: no CRLF pass anywhere
+                        // 3.05: ONE plan for every view (PlanCRLFPass), decided on
+                        // the RAW BYTES: hex and EBCDIC never need the pass (the
+                        // EBCDIC table maps the CR/LF cells to U+FFFD), ANSI/UTF-8
+                        // answer through the memchr preview and — new — UTF-16/BE
+                        // too, which used to pay a full per-WCHAR walk of up to
+                        // 16M characters per load.
+                        bool bNeedNorm = false;
                         int cExpand = -1;               // -1: NormalizeNewlines counts it itself
-                        if (pJob->iDetected == VIEW_EBCDIC)
+                        if (pText != nullptr && cch > 0)
                         {
-                                bNeedNorm = false;               // the decode never produced \r or \n
+                                PlanCRLFPass(pJob->iDetected, pJob->pBytes, dwSrcOff, dwSrcLen, bNeedNorm, cExpand);
                         }
-                        else if (pJob->iDetected == VIEW_ANSI || pJob->iDetected == VIEW_UTF8)
-                        {
-                                if (dwSrcLen > 0)
-                                {
-                                        // 3.04: the byte-level count IS the character count for
-                                        // the 1-byte views; hand it over so the normalizer skips
-                                        // its own full scan of the decoded text.
-                                        cExpand = CountCRLFExpansion(pJob->pBytes + dwSrcOff, dwSrcLen);
-                                        if (cExpand == 0)
-                                        {
-                                                bNeedNorm = false;               // already all CRLF: deliver as is
-                                        }
-                                }
-                        }
-                        if (bNeedNorm && pJob->iDetected != VIEW_HEX && pText != nullptr && cch > 0)
+                        if (bNeedNorm)
                         {
                                 ULONGLONG dwT2 = GetTickCount64();      // /timing: the CRLF pass runs here
                                 pNorm = NormalizeNewlines(pText, (int) cch, &cchNorm, cExpand);
@@ -2036,6 +2166,13 @@ void RunLoadJob(LoadJob *pJob)
                                 pJob->pText = pNorm;
                                 pJob->cchText = (DWORD) cchNorm;
                         }
+                }
+                else
+                {
+                        // 3.05: BuildViewText answered FALSE — out of memory, its own
+                        // contract now. Say so like any other load failure: an empty
+                        // viewer without an explanation is the worse outcome.
+                        pJob->bOOM = true;
                 }
         }
         catch (const std::bad_alloc&)
@@ -2184,13 +2321,14 @@ void RunJobSynchronously(LoadJob *pJob)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// stdin pipe (and redirection) at startup. 3.02 (O1): the job now goes through
+// stdin pipe (and redirection) at startup. 3.02 (O1): the job goes through
 // the SAME async path as a file load: "type enorme.log | 4more" used to run the
 // whole read inside WM_CREATE, so the window did not exist until the pipe hit
 // EOF — exactly the freeze the async file loads already fixed for drops. The
 // content lands through WM_APP_LOADDONE like any other load, and
-// LaunchLoadJob carries the no-threads fallback inline.
-void LoadFileSync(void)
+// LaunchLoadJob carries the no-threads fallback inline. 3.05: renamed from
+// LoadFileSync — async since 3.02, the old name lied.
+void LoadStdin(void)
 {
         LoadJob* pJob = BeginLoadJob(true);     // clears the old content too
         if (pJob == nullptr)
@@ -2211,7 +2349,9 @@ void LoadFileSync(void)
 // Tab, line breaks, form feed and escape are accepted as text.
 bool IsBinaryData(const BYTE* pBytes, DWORD cb)
 {
-        if (cb > 0 && memchr(pBytes, 0x00, cb) != nullptr)
+        // 3.05: no cb>0 guards — memchr with a zero count answers nullptr and
+        // zero control bytes can never beat the 10% rule below.
+        if (memchr(pBytes, 0x00, cb) != nullptr)
         {
                 return(true);                   // any NUL byte: binary for sure
         }
@@ -2224,7 +2364,7 @@ bool IsBinaryData(const BYTE* pBytes, DWORD cb)
                         cCtrl++;
                 }
         }
-        return(cb > 0 && (unsigned long long) cCtrl * 10 > cb);
+        return((unsigned long long) cCtrl * 10 > cb);
 }
 
 
@@ -2702,7 +2842,9 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
 // The bounds keep view switching instant and the memory sane even for a huge
 // file (in particular on Win32, where address space is 2 GB): decode buffer
 // <= 2 x CB_TEXT_MAX bytes worst case, edit-control buffer the same. Returns
-// false ONLY on out-of-memory (bad_alloc); the caller reports it.
+// false ONLY on out of memory — 3.05: checked HERE, because a null block used
+// to be stored and written through (an access violation that only the SEH
+// jackets happened to survive); the caller reports it.
 bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen)
 {
         *ppText = nullptr;
@@ -2732,6 +2874,10 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
                 DWORD cchHex = 0;
                 *ppText = BuildHexText(pBytes, cb, cbAll, qwBase, &cchHex);
+                if (*ppText == nullptr)
+                {
+                        return(false);                  // 3.05: OOM answers FALSE, never a null dump
+                }
                 *pcch = cchHex;
                 return(true);
         }
@@ -2788,6 +2934,10 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         *pdwSrcLen = (DWORD) cbSrc;
                 }
                 pText = AllocViewText((DWORD) cbSrc + 1 + 160);       // + notice room
+                if (pText == nullptr)
+                {
+                        return(false);                          // 3.05: OOM answers FALSE, not a null store
+                }
                 cch = 0;
                 if (cbSrc > 0)
                 {
@@ -2812,13 +2962,17 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         }
                 }
         }
-        else if (iViewBuild == VIEW_UTF16)              // Unicode: UTF-16 LE, with or without BOM
+        else if (iViewBuild == VIEW_UTF16 || iViewBuild == VIEW_UTF16BE)    // Unicode, either byte order
         {
                 // Everything below works on the RAW BYTES: aliasing them as
                 // WCHAR* (the old form) is only valid where sizeof(WCHAR)==2,
                 // which silently corrupts the read on any toolchain with a
                 // wider wchar_t (the Linux audit bench caught it with ASan).
-                bool bBom = (cb >= 2 && pBytes[0] == 0xFF && pBytes[1] == 0xFE);
+                // 3.05: ONE branch for LE and BE — the BOM bytes, the unit
+                // assembly and the surrogate guard pick their byte order from
+                // bBE; the two branches used to be 40 lines of twins.
+                bool bBE = (iViewBuild == VIEW_UTF16BE);
+                bool bBom = (cb >= 2 && pBytes[0] == (bBE ? 0xFE : 0xFF) && pBytes[1] == (bBE ? 0xFF : 0xFE));
                 DWORD off = bBom ? 2 : 0;               // the BOM is a decoding marker, not text
                 int cwch = (int) ((cb - off) / 2);      // whole 2-byte units only
                 if (cwch > (int) (CB_TEXT_MAX / 2))
@@ -2831,7 +2985,9 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                 }
                 if (bTruncated && cwch > 0)
                 {
-                        WORD w = (WORD) (pBytes[off + (DWORD) (cwch - 1) * 2] | ((WORD) pBytes[off + (DWORD) (cwch - 1) * 2 + 1] << 8));
+                        const BYTE* pLast = pBytes + off + (DWORD) (cwch - 1) * 2;
+                        WORD w = bBE ? (WORD) (((WORD) pLast[0] << 8) | (WORD) pLast[1])
+                                     : (WORD) ((WORD) pLast[0] | ((WORD) pLast[1] << 8));
                         if (w >= 0xD800 && w <= 0xDBFF)
                         {
                                 cwch--;                         // dangling high surrogate: drop it
@@ -2847,57 +3003,33 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         *pdwSrcLen = (DWORD) (cwch * 2);
                 }
                 pText = AllocViewText((DWORD) cwch + 1 + 160);
+                if (pText == nullptr)
+                {
+                        return(false);                          // 3.05: OOM answers FALSE, not a null store
+                }
 #if WCHAR_MAX <= 0xFFFF
-                // Native build (2-byte WCHAR, little-endian): the source bytes
-                // ARE the UTF-16 text, so the decode is one straight copy.
-                CopyMemory(pText, pBytes + off, (size_t) cwch * 2);
-#else
-                // Audit bench (4-byte wchar_t): widen each LE unit per element.
-                for (int i = 0; i < cwch; i++)
+                if (!bBE)
                 {
-                        pText[i] = (WCHAR) (pBytes[off + (DWORD) i * 2] | ((WCHAR) pBytes[off + (DWORD) i * 2 + 1] << 8));
+                        // Native build (2-byte WCHAR, little-endian): the source bytes
+                        // ARE the UTF-16 text, so the decode is one straight copy.
+                        CopyMemory(pText, pBytes + off, (size_t) cwch * 2);
                 }
-#endif
-                cch = cwch;
-        }
-        else if (iViewBuild == VIEW_UTF16BE)            // Unicode big-endian, with or without BOM
-        {
-                // Mirror of the LE branch with the bytes of every unit swapped;
-                // everything stays on the RAW BYTES for the same portability
-                // reasons (see the LE branch above).
-                bool bBom = (cb >= 2 && pBytes[0] == 0xFE && pBytes[1] == 0xFF);
-                DWORD off = bBom ? 2 : 0;
-                int cwch = (int) ((cb - off) / 2);
-                if (cwch > (int) (CB_TEXT_MAX / 2))
+                else
                 {
-                        cwch = (int) (CB_TEXT_MAX / 2);
-                }
-                if (qwBase + (ULONGLONG) (cwch * 2 + off) < cbAll)
-                {
-                        bTruncated = true;
-                }
-                if (bTruncated && cwch > 0)
-                {
-                        WORD w = (WORD) (((WORD) pBytes[off + (DWORD) (cwch - 1) * 2] << 8) | (WORD) pBytes[off + (DWORD) (cwch - 1) * 2 + 1]);
-                        if (w >= 0xD800 && w <= 0xDBFF)
+                        for (int i = 0; i < cwch; i++)
                         {
-                                cwch--;                 // dangling high surrogate: drop it
+                                pText[i] = (WCHAR) (((WCHAR) pBytes[off + (DWORD) i * 2] << 8) | (WCHAR) pBytes[off + (DWORD) i * 2 + 1]);
                         }
                 }
-                cbShown = (DWORD) (cwch * 2 + off);
-                if (pdwSrcOff != nullptr)
-                {
-                        *pdwSrcOff = off;                       // the BOM, when present
-                }
-                if (pdwSrcLen != nullptr)
-                {
-                        *pdwSrcLen = (DWORD) (cwch * 2);
-                }
-                pText = AllocViewText((DWORD) cwch + 1 + 160);
+#else
+                // Audit bench (4-byte wchar_t): widen each unit per element.
                 for (int i = 0; i < cwch; i++)
                 {
-                        pText[i] = (WCHAR) (((WCHAR) pBytes[off + (DWORD) i * 2] << 8) | (WCHAR) pBytes[off + (DWORD) i * 2 + 1]);
+                        WORD w = bBE ? (WORD) (((WORD) pBytes[off + (DWORD) i * 2] << 8) | (WORD) pBytes[off + (DWORD) i * 2 + 1])
+                                     : (WORD) ((WORD) pBytes[off + (DWORD) i * 2] | ((WORD) pBytes[off + (DWORD) i * 2 + 1] << 8));
+                        pText[i] = (WCHAR) w;
                 }
+#endif
                 cch = cwch;
         }
         else if (iViewBuild == VIEW_EBCDIC)             // IBM mainframe text (CP37/500 graphic set)
@@ -2972,6 +3104,10 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         *pdwSrcLen = cbShown;
                 }
                 pText = AllocViewText((DWORD) cbSrc + 1 + 160);
+                if (pText == nullptr)
+                {
+                        return(false);                          // 3.05: OOM answers FALSE, not a null store
+                }
                 for (int i = 0; i < cbSrc; i++)
                 {
                         pText[i] = et.w[pBytes[i]];
@@ -2996,6 +3132,10 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                         *pdwSrcLen = cbShown;
                 }
                 pText = AllocViewText((DWORD) cbSrc + 1 + 160);
+                if (pText == nullptr)
+                {
+                        return(false);                          // 3.05: OOM answers FALSE, not a null store
+                }
                 cch = 0;
                 if (cbSrc > 0)                          // defensive symmetry with the UTF-8 path
                 {
@@ -3078,14 +3218,16 @@ void AdoptEmptyText(void)
 // handle the control answers with is, by definition, the one it is done
 // with, so no tracking global is needed.
 //
-// bPreNormalized skips the CRLF normalization and its full scan: the hex
-// builder produces text that is CRLF-only by construction, and since 3.00
-// the load worker normalizes before anything reaches the UI thread. The copy
+// bPreNormalized skips the CRLF normalization and its full scan: hex and
+// EBCDIC text carries no \r or \n by construction, and since 3.00 the load
+// worker normalizes before anything reaches the UI thread. 3.05: when a pass
+// IS due, cExpandKnown hands in the expansion count PlanCRLFPass already
+// computed on the raw bytes (-1 = NormalizeNewlines counts it itself). The copy
 // path remains as the fallback (a block that is not HGLOBAL-backed, or an
 // empty delivery), keeping its refusal check: if the control cannot take
 // the text (out of memory, usually on Win32), it is cleared and the user
 // is told instead of leaving stale content on screen.
-void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized)
+void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown)
 {
         if (hEdit == nullptr)
         {
@@ -3103,7 +3245,7 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized)
                 // say so. Returning BEFORE the redraw lock leaves the control
                 // and the previous content exactly as they were.
                 int cchNorm = 0;
-                pNorm = NormalizeNewlines(pText, cch, &cchNorm);
+                pNorm = NormalizeNewlines(pText, cch, &cchNorm, cExpandKnown);  // 3.05: the count may already be made
                 if (pNorm == nullptr)
                 {
                         FreeViewText(pText);
@@ -3178,12 +3320,12 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized)
 // exception during delivery degrades to a recovered, empty control instead of
 // killing 4More. On compilers without SEH (the Linux audit bench) the mapping
 // turns this into the plain call.
-BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized)
+BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown)
 {
         BOOL bOk = FALSE;
         __try
         {
-                DeliverTextToEdit(pText, cch, bPreNormalized);
+                DeliverTextToEdit(pText, cch, bPreNormalized, cExpandKnown);
                 bOk = TRUE;
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
@@ -3317,13 +3459,29 @@ void ApplyView(void)
         {
                 WCHAR* pText = nullptr;
                 DWORD cch = 0;
-                if (BuildViewText(iView, pFileBytes, cbFile, g_cbFileTotal, g_qwBase, &pText, &cch))
+                DWORD dwSrcOff = 0, dwSrcLen = 0;
+                if (!BuildViewText(iView, pFileBytes, cbFile, g_cbFileTotal, g_qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen))
                 {
-                        // Hex text is CRLF-only by construction: skip the full
-                        // normalization scan of up to ~41M characters.
-                        DeliverTextToEdit(pText, (int) cch, iView == VIEW_HEX); // takes ownership of pText
-                        TimingFlash();          // /timing: view switches are measured too
+                        // 3.05: out of memory in the decode — an honest FALSE with
+                        // its message, where a null block used to be written through.
+                        SetCursor(hcurOld);
+                        MessageBox(hWndMain, L"Not enough memory to show this view.", szTitle, MB_OK | MB_ICONERROR);
+                        return;
                 }
+                // 3.05: the CRLF pass is planned on the RAW BYTES, the same
+                // PlanCRLFPass the load worker uses: hex and EBCDIC skip it
+                // outright (EBCDIC paid a full 32M-character scan on EVERY
+                // switch and found nothing: its decode produces no \r or \n),
+                // the other views answer it with the byte counters, and only a
+                // genuinely mixed page pays the copy pass.
+                bool bNeedNorm = false;
+                int cExpand = -1;
+                if (pText != nullptr && cch > 0)
+                {
+                        PlanCRLFPass(iView, pFileBytes, dwSrcOff, dwSrcLen, bNeedNorm, cExpand);
+                }
+                DeliverTextToEdit(pText, (int) cch, !bNeedNorm, cExpand); // takes ownership of pText
+                TimingFlash();          // /timing: view switches are measured too
                 SetCursor(hcurOld);
         }
         catch (const std::bad_alloc&)
@@ -4492,6 +4650,10 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
         // The dialog already bounds it, but a flat copy keeps the worker simple.
         g_cbSearchPat = cbPat;
         CopyMemory(g_abSearchPat, pPat, cbPat);
+        // 3.05: the worker reads its OWN snapshot of the path. Nothing else
+        // writes g_szCurrentFile while a scan runs, but the failure road of
+        // SetView could, and the copy makes the race impossible to spell.
+        lstrcpynW(g_szSearchFile, g_szCurrentFile, MAX_PATH);
         InterlockedExchange(&g_bSearchCancel, 0);
         g_qwSearchPos = 0;
         g_qwSearchResult = (ULONGLONG) -1;
@@ -4522,7 +4684,7 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
 unsigned __stdcall SearchThreadProc(void *pParameter)
 {
         UNREFERENCED_PARAMETER(pParameter);
-        HANDLE hFile = CreateFileW(g_szCurrentFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        HANDLE hFile = CreateFileW(g_szSearchFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
         if (hFile == INVALID_HANDLE_VALUE)
         {
                 PostMessage(hWndMain, WM_APP_SEARCHDONE, 0xFFFFFFFF, 0);   // could not open: not found
@@ -4615,10 +4777,10 @@ void ViewClipboardAsFile(void)
         }
         if (g_bInByteSearch)
         {
-                // 3.04: the ResetViewer below clears g_szCurrentFile while the
-                // search worker may still be reading it for CreateFileW, and
-                // drops the raw bytes under its feet. The clipboard waits, like
-                // every other load.
+                // One thing at a time: the viewer is mid-scan and the clipboard
+                // view swaps all the content under it. It waits, like every
+                // other load. (3.05: the worker no longer reads g_szCurrentFile
+                // at all — it scans its own snapshot — so this is pure UX.)
                 MessageBox(hWndMain, L"A raw-file search is running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
                 return;
         }
@@ -4731,9 +4893,26 @@ void ViewClipboardAsFile(void)
         {
                 WCHAR* pText = nullptr;
                 DWORD cch = 0;
-                if (BuildViewText(VIEW_UTF16, pFileBytes, cbFile, g_cbFileTotal, 0, &pText, &cch))
+                DWORD dwSrcOff = 0, dwSrcLen = 0;
+                if (BuildViewText(VIEW_UTF16, pFileBytes, cbFile, g_cbFileTotal, 0, &pText, &cch, &dwSrcOff, &dwSrcLen))
                 {
-                        DeliverTextSafely(pText, (int) cch, false); // owns and frees pText
+                        // 3.05: the same plan as the load worker — the raw bytes
+                        // answer whether a CRLF pass is due (the clipboard used
+                        // to pay the full WCHAR walk on the UI thread every time).
+                        bool bNeedNorm = false;
+                        int cExpand = -1;
+                        if (pText != nullptr && cch > 0)
+                        {
+                                PlanCRLFPass(VIEW_UTF16, pFileBytes, dwSrcOff, dwSrcLen, bNeedNorm, cExpand);
+                        }
+                        DeliverTextSafely(pText, (int) cch, !bNeedNorm, cExpand); // owns and frees pText
+                }
+                else
+                {
+                        // 3.05: OOM in the decode answers FALSE now: say so,
+                        // like the catch below.
+                        MessageBox(hWndMain, L"Not enough memory to show the clipboard.", szTitle, MB_OK | MB_ICONERROR);
+                        ResetViewer();
                 }
         }
         catch (const std::bad_alloc&)
@@ -5243,28 +5422,23 @@ void BuildIniPath(void)
         {
                 return;                         // no path, no persistence
         }
-        WCHAR* pchSlash = nullptr;
-        for (WCHAR* p = szExe; *p != L'\0'; p++)
-        {
-                if (*p == L'\\' || *p == L'/')
-                {
-                        pchSlash = p;
-                }
-        }
-        if (pchSlash == nullptr)
+        // 3.05: PathRemoveFileSpecW (shlwapi, already included and linked) does
+        // in one call what the hand-rolled slash scanner did: keeps the
+        // directory, drops the name and its slash. FALSE = a bare name with no
+        // directory: skip.
+        if (!PathRemoveFileSpecW(szExe))
         {
                 return;                         // a bare name with no directory: skip
         }
-        *(pchSlash + 1) = L'\0';                 // keep the directory, drop the file name
-        // 3.00: the directory plus "4More.ini" must fit: lstrcatW writes blind,
-        // and an executable parked in a ~255-character directory would push it
+        // The directory plus "\4More.ini" must fit: lstrcatW writes blind, and
+        // an executable parked in a ~255-character directory would push it
         // past the end of g_szIniPath.
-        if (lstrlenW(szExe) + 9 >= MAX_PATH)
+        if (lstrlenW(szExe) + 10 >= MAX_PATH)
         {
                 return;                         // no room: no persistence, no overflow
         }
         lstrcpynW(g_szIniPath, szExe, MAX_PATH);
-        lstrcatW(g_szIniPath, L"4More.ini");
+        lstrcatW(g_szIniPath, L"\\4More.ini");
 }
 
 

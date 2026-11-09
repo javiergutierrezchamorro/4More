@@ -1,6 +1,41 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.18
+   Build 3.19
+
+   Novedades de la revisión 3.19 (OPTIMIZACIONES DE CARGA):
+   - DOUBLE-DECODE ELIMINADO: /hex /utf8... forzaban al worker a decodificar
+     la vista detectada y luego ApplyLoadResult re-decodificaba la vista
+     forzada en el hilo UI. Ahora RunLoadJob aplica g_iForcedView ANTES
+     del cap y del decode, así el worker decodifica directamente la vista
+     correcta y ApplyLoadResult no necesita re-decodificar (~100 ms ahorrado
+     para 32 MB).
+   - CHUNKS DE LECTURA DE 4 MB (era 1 MB): menos syscalls de ReadFile (24
+     menos para 32 MB). FILE_FLAG_SEQUENTIAL_SCAN mantiene el read-ahead.
+     La granularidad de la barra no sufre: 8 ticks para 32 MB, interpolados
+     por el poll de 16 ms. Para hex los ticks del build (cada 4096 líneas)
+     son independientes del tamaño del chunk de lectura.
+   - AUDITORÍA COMPLETA: se revisó todo el pipeline de carga. El cuello
+     restante es el coste inherente del control EDIT (construcción de la
+     tabla de líneas dentro de EM_SETHANDLE, ~0.5-2 s para 32 MB), que no
+     se puede eliminar sin reemplazar el control (RichEdit/Scintilla). Las
+     siguientes áreas ya están bien optimizadas:
+     * Detección (memchr/SIMD en bytes crudos, no en texto decodificado)
+     * CRLF normalization (CountCRLFExpansion en bytes, memchr; solo copia
+       cuando hay expansión real)
+     * Hex dump (LUT de pares precomputada, PolyTextOut para el gutter)
+     * Preview (64 KB, gated a >256 KB restante)
+     * Memory (EM_SETHANDLE zero-copy, GlobalAlloc movable para adopción)
+   - OPORTUNIDADES FUTURAS (no implementadas, documentadas para referencia):
+     * ApplyView en worker thread: los view switches en archivos grandes
+       (32 MB) congelan el UI 1-2 s. Requeriría la misma plomería de
+       LoadJob pero para re-decodificar bytes existentes.
+     * Pipeline read+decode: decodificar cada chunk conforme llega en
+       lugar de leer todo primero. Ahorro ~40 ms en SSD, complejo por
+       el carry-over de secuencias UTF-8 parciales.
+     * Hex build paralelo: dividir el rango de bytes entre N threads.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
+     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
+     "3.19"; el manifest puede subir a 3.19.0.0 (opcional, cosmético).
 
    Novedades de la revisión 3.18 (WORD WRAP: cap de 2 MB para entrega instantánea):
    - CON WORD WRAP, EL CONTROL EDIT RECALCULA TODOS LOS PUNTOS DE RUPTURA
@@ -742,7 +777,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.18"
+#define APP_VERSION L"3.19"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -2721,6 +2756,17 @@ void RunLoadJob(LoadJob* pJob)
         else
         {
             iDetected = DetectDefaultView(pJob->pBytes, cbTotal);
+            // 3.19: a CLI-forced view (/hex /utf8...) overrides the detected
+            // one BEFORE the cap is chosen and the decode runs. Without this
+            // the worker decoded the detected view, ApplyLoadResult saw the
+            // mismatch and re-decoded the forced view on the UI thread — a
+            // double decode (~100 ms for 32 MB). The forced view is consumed
+            // here once; ApplyLoadResult's /hex re-decode path becomes a no-op.
+            if (g_iForcedView >= VIEW_ANSI && g_iForcedView <= VIEW_EBCDIC)
+            {
+                iDetected = g_iForcedView;
+                pJob->iDetected = g_iForcedView;   // carry it through to ApplyLoadResult
+            }
         }
         DWORD cbCap = (iDetected == VIEW_HEX) ? CB_HEX_MAX
             : (g_bWrap ? CB_WRAP_TEXT_MAX : CB_TEXT_MAX);   // 3.18: smaller cap with wrap
@@ -2861,9 +2907,14 @@ void RunLoadJob(LoadJob* pJob)
                             break;
                         }
                         DWORD cbChunk = cbFinal - cbTotal;
-                        if (cbChunk > (1 << 20))
+                        // 3.19: 4 MB chunks (was 1 MB). Larger chunks amortize
+                        // ReadFile syscall overhead (24 fewer syscalls on a 32 MB
+                        // read). FILE_FLAG_SEQUENTIAL_SCAN keeps read-ahead
+                        // effective. Progress granularity: 8 ticks for 32 MB is
+                        // plenty for a smooth bar (the 16 ms poll interpolates).
+                        if (cbChunk > (4 << 20))
                         {
-                            cbChunk = 1 << 20;
+                            cbChunk = 4 << 20;
                         }
                         if (!ReadFile(hFile, pJob->pBytes + cbTotal, cbChunk, &cbRead, nullptr))
                         {

@@ -1,4 +1,8 @@
-﻿// 4More.rc — recursos del visor (Build 3.18)
+﻿// 4More.rc — recursos del visor (Build 3.19)
+//
+// 3.19: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
+// .cpp: double-decode eliminado (/hex /utf8 decodifican directo en el worker)
+// y chunks de lectura de 4 MB (era 1 MB). El manifest puede subir a 3.19.0.0.
 //
 // 3.18: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
 // .cpp: con Word Wrap activado, el texto se limita a 2 MB (CB_WRAP_TEXT_MAX)

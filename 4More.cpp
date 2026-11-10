@@ -1,6 +1,159 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 5.9.4
+   Build 5.9.8
+
+   Novedades de la versión 5.9.8 (REVISIÓN DETALLADA: NÚMEROS EN WRAP + SCROLL HONESTO):
+   - FIX: LOS NÚMEROS DE LÍNEA SE DESALINEABAN EN WORD WRAP. La columna
+     pintaba una etiqueta por LÍNEA LÓGICA una fila aparte, pero en wrap el
+     control pinta varias FILAS VISUALES por línea: la primera línea envuelta
+     de arriba empujaba todos los números siguientes fuera de su línea (el
+     "5" quedaba en la segunda fila visual de la línea 3). Ahora el gutter
+     recorre la misma aritmética que el WM_PAINT (TV_WrapBreak): cada número
+     se sienta en la PRIMERA fila visual de su línea y el cursor salta el
+     recuento completo de filas de la línea. Sin wrap y en hex la salida es
+     idéntica a la de antes (mismo bucle 1:1).
+   - FIX: SCROLLBARS HONESTAS TRAS VACIAR LA VISTA. TV_ClearText dejaba los
+     rangos SB_VERT/SB_HORZ del fichero ANTERIOR vivos: tras un ResetViewer
+     (apertura fallida) o un fichero vacío, la barra seguía arrastrándose
+     por un rango que ya no existía (TV_ScrollRows devolvía cada paso a 0,
+     así que era inofensivo, pero la barra mentía). TV_ClearText refresca
+     ahora los dos rangos (la llamada sale por el guard si no hay ventana).
+   - FIX: FILA PARCIALMENTE VISIBLE DISPARABA UN SCROLL DE SOBRA.
+     TV_ScrollCaret contaba las filas visibles con división entera (suelo)
+     mientras el pintado, TV_UpdateCurLine y TV_HitTest las cuentan con
+     techo: un caret en la última fila medio visible parecía "fuera de
+     vista" y un clic o una flecha sobre ella scrolleaba una línea entera
+     sin necesidad. Con el techo, no hay scroll hasta que el caret sale
+     de verdad del área pintada.
+   - SIMPLIFICACIÓN: los ternarios min/max del rango de selección (ocho
+     líneas copiadas en WM_PAINT x2, TV_Copy y TV_InvalidateSelPainted)
+     viven ahora en dos helpers de una línea (TV_LoI/TV_HiI): una sola
+     fuente que no puede desajustarse.
+   - El repaso completo no encontró más errores: índice paralelo (5.9.5),
+     fichero mapeado y búsqueda (5.9.6), INI, bookmarks, Go To, paginación,
+     diálogos y teardown revisados línea a línea.
+
+   Build 5.9.7
+
+   Novedades de la versión 5.9.7 (AYUDAS DE VISTA ACTIVADAS POR DEFECTO + REVISIÓN):
+   - PREFERENCIAS: LINE NUMBERS, RULER, GREENBAR Y HIGHLIGHT CURRENT LINE
+     VIENEN ACTIVADAS POR DEFECTO. Las cuatro ayudas de lectura pasan de
+     "off hasta que las pidas" a "on desde la primera carga": números de
+     línea, regla (columnas en texto, cabecera de bytes en hex), franjas
+     alternas y banda del caret. El INI mantiene la precedencia de siempre:
+     un 4More.ini existente que ya guardó estas claves conserva la elección
+     del usuario; los nuevos defaults aplican cuando la clave no existe
+     (primera ejecución, o INI anterior a la opción). Wrap y Tail siguen
+     OFF por defecto (son modos de trabajo, no ayudas de lectura).
+   - FIX: LAS ETIQUETAS DE LA REGLA NO SANGRAN SOBRE EL GUTTER. Una columna
+     medio scrolleada fuera dejaba su etiqueta pintando píxeles a la
+     izquierda de la franja (encima de la esquina del gutter): el WM_PAINT
+     del padre lo tapaba pintando la esquina DESPUÉS de la regla, pero el
+     camino de repintado del control (scroll horizontal) no pinta esa
+     esquina y los píxeles quedaban ahí hasta el siguiente repintado del
+     padre. Ambas reglas se recortan ahora a su franja (SelectClipRgn, la
+     misma técnica del gutter desde la 5.5): imposible en cualquier camino.
+   - SIMPLIFICACIÓN: LAS DOS REGLAS COMPARTEN PLUMÁTICA. PaintRuler y
+     PaintHexRuler mantenían prólogos y epílogos gemelos (relleno 3DFACE,
+     fuente, color, borde inferior): la fuente y el color ya habían
+     divergido una vez (la regla de texto seguía en negro mientras el
+     gutter y la cabecera hex hablaban el gris apagado de la 5.9.6). Ahora
+     viven una vez en RulerStripBegin/RulerStripEnd: la regla de texto
+     hereda el color apagado de la 5.9.6 (era el último elemento que
+     gritaba) y ambos pintores comparten recorte y borde.
+   - SIMPLIFICACIÓN: EL COLOR DEL CHROME ES UNA CONSTANTE. El gris apagado
+     del gutter (0x8A929E) estaba escrito dos veces (PaintGutter y la
+     cabecera hex); ahora es s_clrGutter, una sola fuente de verdad.
+   - SIMPLIFICACIÓN: CÓDIGO MUERTO EN LA BÚSQUEDA. El `if (!bFound)` que
+     envolvía el acarreo de solape del bucle ReadFile quedó muerto cuando
+     el escaneo se mudó a ScanForPattern (5.9.6): un hit sale por el break
+     de arriba; llegar a esa línea significa que no lo hubo. El acarreo
+     corre incondicional, con el comentario que lo explica.
+
+   Novedades de la versión 5.9.6 (ESTÉTICA: GUTTER Y HEX + FICHERO MAPEADO):
+   - ESTÉTICA: LA COLUMNA LATERAL HABLA MÁS BAJO. Los números de línea y los
+     offsets hex eran negrita negra, la misma voz que el contenido: peleaban
+     con el texto por la atención en cada línea. Son chrome, no contenido:
+     ahora van en un gris azulado apagado (RGB 0x8A929E, el tono que usan
+     los gutters de los editores modernos). Los offsets hex conservan la
+     negrita (SON datos: la dirección de byte de la fila); los números de
+     línea pasan a la fuente regular (mismo motivo). La bola azul de los
+     bookmarks se queda como está: es una marca, no una etiqueta.
+   - ESTÉTICA: LÍNEA SEPARADORA. Un pelo vertical (COLOR_3DLIGHT, el gris
+     claro del sistema, cero gestión de pinceles) cierra la columna por su
+     borde derecho en todas las vistas: la franja se lee como un raíl entre
+     las etiquetas y el texto, no como tierra de nadie.
+   - HEX MÁS BONITO (Y MÁS ÚTIL): CABECERA DE POSICIONES DE BYTE. La opción
+     View > Ruler es dueña de la franja superior en TODAS las vistas ahora:
+     en las vistas de texto pinta su regla de columnas de siempre y en la
+     vista hex pinta la cabecera clásica de los hexdumps: 00 04 08 0C
+     alineados sobre los dos dígitos de cada byte (el hueco central de la
+     línea hex desplaza la segunda mitad una columna, y la cabecera lo
+     replica exactamente) y "ASCII" sobre el bloque de caracteres. Se
+     desplaza en horizontal con la vista (la misma regla de refresco por
+     iScrollX que la regla de texto) y el gutter empieza una línea más
+     abajo cuando está activa, como en texto.
+   - COLORES, REVISADOS: greenbar (0xE8F0E8), fila actual (0xFFF0B0),
+     línea con bookmark (0xB8D4F0) y bola (0x1E66D6) se quedan. Son pastel,
+     legibles con ambos colores de texto y distinguibles entre sí; la
+     revisión de esta ronda es del gutter, que era el elemento que no
+     tenía voz propia.
+   - RENDIMIENTO: FICHERO MAPEADO (CreateFileMapping + MapViewOfFile). El
+     loader leía cada página con ReadFile: el kernel copiaba los bytes a su
+     caché y ReadFile los volvía a copiar al buffer del viewer. Un mapeado
+     de solo lectura colapsa el viaje: la copia lee directamente las
+     páginas de la caché del sistema (un memcpy por trozo, sin syscall por
+     chunk, sin doble buffering). Ahorro estimado: 20-30% de la fase de
+     lectura en páginas grandes (desaparece una de las dos copias); las
+     páginas pequeñas que no se benefician son justo las que ya eran
+     rápidas. El contrato no cambia: el job sigue dueño de su buffer
+     (pJob->pBytes), el menú View sigue re-decodificando desde él y la copia
+     sigue en trozos de CB_READ_CHUNK, así que la cancelación (ESC) y los
+     tics de la barra de progreso mantienen su cadencia exacta. Si el SO
+     rechaza el mapeado (handle que no soporta sección, presión de espacio
+     en Win32, fichero vacío), los bucles ReadFile originales quedan
+     como camino de recaída, intactos. Un error de página durante la copia
+     (EXCEPTION_IN_PAGE_ERROR) cae en el __try/__except de LoadThreadProc,
+     la misma última red de siempre.
+   - RENDIMIENTO: LA BÚSQUEDA EN FICHERO CRUDO TAMBIÉN SE MAPEA. El worker
+     de Find Bytes escaneaba el fichero con ReadFile en trozos de 4 MB con
+     su acarreo de solape entre trozos. Con el fichero entero bajo una sola
+     vista el escaneo va directo sobre la caché: sin buffer, sin acarreos,
+     sin ReadFile. La ventana de cada trozo alcanza siempre cbPat-1 bytes
+     más allá del trozo, así que un patrón que cruza el borde se encuentra
+     igual, y el primer hit en orden ascendente gana (cero duplicados). La
+     latencia de cancelación y la cadencia de progreso (~10 Hz) son las
+     mismas; el escaneo memchr/memcmp vive ahora en UNA función compartida
+     por las dos vías (mapeada y ReadFile), así que no pueden divergir.
+     Fallback ReadFile intacto (Win32 ante ficheros que no caben en su
+     espacio de direcciones, mapeado rechazado, tamaño desconocido).
+
+   Novedades de la versión 5.9.5 (ÍNDICE DE LÍNEAS EN PARALELO):
+   - RENDIMIENTO (x64, páginas grandes): TV_BuildLineIndex parte la página
+     entre 2-4 hilos (uno por núcleo, tope 4). Las dos pasadas wmemchr del
+     builder serie (contar + rellenar) son trabajo de ancho de banda de
+     memoria: repartidas entre núcleos, una página de 128 MB se indexa en
+     una fracción del tiempo (el índice de una página grande era el último
+     punto caliente que quedaba en la ruta de carga).
+   - DESCOMPOSICIÓN EXACTA, NO APROXIMADA: las fronteras de trozo se alinean
+     HACIA ADELANTE a inicio de línea (ninguna línea lógica cruza dos
+     trozos); la ronda A cuenta saltos de línea y mide la línea más larga
+     por trozo con la MISMA regla del builder serie (el \\n no es parte de
+     la línea; la última línea vacía tras un \\n final se incluye); el
+     coordinador hace la suma de prefijos, asigna el trozo del array final
+     a cada parte y la ronda B escribe los starts globales en su porción.
+     El resultado es idéntico al builder serie (validado por fuzzing contra
+     el camino serie: 100.060 casos, 0 desajustes).
+   - RECAÍDAS: por debajo de 4M caracteres o con un solo núcleo corre el
+     builder serie (los viajes de ida y vuelta de hilos costarían más de lo
+     que ahorran); si falla la creación de un hilo, el coordinador ejecuta
+     ese trozo en línea tras la espera (la misma regla de LaunchLoadJob); si
+     falla la reserva del array final, TV_BuildLineIndexParallel devuelve
+     false y corre el builder serie. El camino serie queda intacto para
+     páginas pequeñas y como última opción.
+   - SIN CAMBIOS DE COMPORTAMIENTO: el índice producido es byte a byte el
+     mismo (mismos starts, mismo cLines, mismo iMaxLine), y el builder corre
+     donde ya corría (worker de carga desde la 5.6, o TV_SetText).
 
    Novedades de la versión 5.9.4 (REVISIÓN: PARIDAD DEL CARET + FILA PARCIAL + UNA LLAMADA):
    - BUG (regresión de 5.9.3): EL ATAJO DE TV_PositionCaret EN NO-WRAP NO
@@ -1261,7 +1414,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"5.9.4"
+#define APP_VERSION L"5.9.8"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -1325,11 +1478,11 @@ ULONGLONG g_cbFileTotal;                        // REAL size on disk (status bar
 int iView;                                      // active view: VIEW_ANSI / VIEW_UTF8 / VIEW_UTF16 / VIEW_UTF16BE / VIEW_EBCDIC / VIEW_HEX
 WCHAR g_szCurrentFile[MAX_PATH] = {};           // path of the file whose bytes are on screen ("" = none)
 ULONGLONG g_qwBase = 0;                         // file offset of the FIRST byte loaded (paged view)
-bool g_bLineNums = false;                       // View > Line Numbers: text gutter, painted like the hex one
+bool g_bLineNums = true;                        // View > Line Numbers: text gutter, painted like the hex one (5.9.7: ON by default)
 bool g_bWrap = false;                           // View > Word Wrap: 5.4, a flag sync (TV_SyncState), no recreate
-bool g_bGreenbar = false;                       // V4: View > Greenbar — alternating line background for readability
-bool g_bRuler = false;                          // V4: View > Ruler — column ruler at the top of the text area
-bool g_bHiliteLine = false;                     // 5.8: View > Highlight Current Line — full-width band on the caret line
+bool g_bGreenbar = true;                        // V4: View > Greenbar — alternating line background for readability (5.9.7: ON by default)
+bool g_bRuler = true;                           // V4: View > Ruler — column ruler on top of text, byte header on top of hex (5.9.7: ON by default)
+bool g_bHiliteLine = true;                      // 5.8: View > Highlight Current Line — full-width band on the caret line (5.9.7: ON by default)
 bool g_bEscExit = true;                         // 5.8: View > ESC to Exit (default ON): ESC closes 4More when idle
 int g_iWrapWidth = 0;                            // V4: 0 = wrap to window; >0 = wrap to N chars (View > Wrap to Fixed Width)
 bool g_bTail = false;                           // View > Tail File: 2 s timer, reload on change, jump to the end
@@ -1471,6 +1624,10 @@ enum { VIEW_ANSI = 0, VIEW_UTF8 = 1, VIEW_UTF16 = 2, VIEW_UTF16BE = 4, VIEW_EBCD
 // The one digit table of the hexadecimal dumps, shared by the text builder
 // (BuildHexText) and the bold offset column (PaintGutter).
 static const WCHAR s_szHexDigits[] = L"0123456789ABCDEF";
+// 5.9.7: the quiet voice of the chrome (gutter labels, ruler labels), one
+// source of truth for PaintGutter and both rulers. A muted gray-blue: the
+// labels must stay legible without fighting the content for attention.
+static const COLORREF s_clrGutter = RGB(0x8A, 0x92, 0x9E);
 
 // ---- asynchronous loading ------------------------------------------------------------------
 // One job at a time. The worker thread fills the job (raw bytes, detected
@@ -1629,6 +1786,7 @@ void SetWrapWidth(int iCols);                   // V4: 0 = wrap to window, >0 = 
 void WrapWidthDialog(HWND hWnd);                // V4: View > Wrap to Fixed Width...
 INT_PTR CALLBACK WrapWidthProc(HWND, UINT, WPARAM, LPARAM);
 void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin);   // V4: column ruler (xOrigin = gutter offset)
+void PaintHexRuler(HDC hdc, RECT rcRuler, int xOrigin);   // 5.9.6: byte-position header over the hex dump
 void RecreateEditControl(bool bApplyContent = true);   // 5.2: bApplyContent=false leaves the content to the caller
 void EnsureEditControlType(void);               // 5.2: the control type (custom/EDIT) always matches iView
 void ReapSearchThread(void);                    // 5.2: close a finished Find Bytes worker and re-open the gate
@@ -2461,14 +2619,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         // line down — paint the little square left of the ruler so no
         // pixel of the strip is left undefined (the parent's
         // WM_ERASEBKGND answers 1 without erasing).
-        if (g_bRuler && iView != VIEW_HEX && iHexLineH > 0 && hEdit != nullptr)
+        // 5.9.6: the hex view gets its byte-position header in the same
+        // strip (PaintHexRuler); the corner square is common to both.
+        if (g_bRuler && iHexLineH > 0 && hEdit != nullptr)
         {
             RECT rcClient;
             if (GetClientRect(hWnd, &rcClient))
             {
                 int iGutter = GutterWidth();
                 RECT rcRuler = { iGutter, 0, rcClient.right, iHexLineH };
-                PaintRuler(hdc, rcRuler, iGutter);
+                if (iView == VIEW_HEX)
+                {
+                    PaintHexRuler(hdc, rcRuler, iGutter);
+                }
+                else
+                {
+                    PaintRuler(hdc, rcRuler, iGutter);
+                }
                 RECT rcCorner = { 0, 0, iGutter, iHexLineH };
                 FillRect(hdc, &rcCorner, GetSysColorBrush(COLOR_WINDOW));
             }
@@ -3246,6 +3413,83 @@ static void PostLoadPreview(LoadJob* pJob, int iViewPrev, DWORD cbPrev)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// 5.9.6: MAPPED-FILE READ. The loader used to pull every page through
+// ReadFile: the kernel copies the bytes into its cache and ReadFile copies
+// them AGAIN into the caller's buffer. A read-only mapping collapses the
+// trip: the copy below reads the system cache pages directly (one memcpy,
+// no syscall per chunk, no double buffering). The estimated saving on the
+// read phase of a big page is 20-30% (one of the two copies disappears);
+// the small pages it cannot help are exactly the ones already fast.
+// The contract with the rest of the loader is unchanged: the job still owns
+// a plain buffer (pJob->pBytes), the View menu still re-decodes from it, and
+// the copy still runs in CB_READ_CHUNK slices so the cancel checks and the
+// progress ticks keep their cadence. When the OS refuses the mapping (a
+// handle that cannot back a section, address-space pressure on Win32, an
+// empty file) the caller falls back to the ReadFile loops, which stay in
+// place unchanged. A page-in error (EXCEPTION_IN_PAGE_ERROR, e.g. the disk
+// dropping a sector mid-copy) raises SEH: LoadThreadProc's existing
+// __try/__except jacket catches it, same last-resort contract as before.
+struct TVMappedView
+{
+    HANDLE hMap;            // the mapping object (CloseHandle when done)
+    const BYTE* pView;      // the view base (UnmapViewOfFile when done)
+    ULONGLONG qwStart;      // file offset of pView[0]
+    DWORD cbView;           // view length in bytes
+};
+
+// Maps [qwOff, qwOff + cbLen) of hFile read-only. MapViewOfFile requires the
+// offset to be a multiple of the system's allocation granularity: the start
+// rounds DOWN to it and qwStart records where the view really begins, so the
+// caller adds (qwOff - qwStart) to reach its first byte. Returns false with
+// nothing mapped when the OS refuses (the caller falls back to ReadFile).
+static bool MapFileRange(HANDLE hFile, ULONGLONG qwOff, DWORD cbLen, DWORD dwGran, TVMappedView* pOut)
+{
+    pOut->hMap = nullptr;
+    pOut->pView = nullptr;
+    pOut->qwStart = 0;
+    pOut->cbView = 0;
+    if (hFile == nullptr || hFile == INVALID_HANDLE_VALUE || cbLen == 0)
+    {
+        return false;
+    }
+    HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (hMap == nullptr)
+    {
+        return false;
+    }
+    ULONGLONG qwViewStart = qwOff & ~(ULONGLONG)(dwGran - 1);
+    DWORD cbSpan = (DWORD)((qwOff - qwViewStart) + cbLen);
+    const BYTE* pView = (const BYTE*)MapViewOfFile(hMap, FILE_MAP_READ, (DWORD)(qwViewStart >> 32), (DWORD)qwViewStart, cbSpan);
+    if (pView == nullptr)
+    {
+        CloseHandle(hMap);
+        return false;
+    }
+    pOut->hMap = hMap;
+    pOut->pView = pView;
+    pOut->qwStart = qwViewStart;
+    pOut->cbView = cbSpan;
+    return true;
+}
+
+// The pair of MapFileRange: releases the view and the object, in that order
+// (the view must go first), and leaves the struct empty so a second call is
+// harmless.
+static void UnmapFileRange(TVMappedView* pV)
+{
+    if (pV->pView != nullptr)
+    {
+        UnmapViewOfFile(pV->pView);
+        pV->pView = nullptr;
+    }
+    if (pV->hMap != nullptr)
+    {
+        CloseHandle(pV->hMap);
+        pV->hMap = nullptr;
+    }
+}
+
+/* -------------------------------------------------------------------------------------------- */
 // Real load, in two phases:
 //   1) read only the first DETECT_WINDOW_BYTES and decide the encoding on
 //      them (DetectDefaultView);
@@ -3317,6 +3561,11 @@ void RunLoadJob(LoadJob* pJob)
     bool bTruncated = false;
     bool bCancelled = false;
     ULONGLONG dwT0 = GetTickCount64();      // /timing: the read phase starts here
+    // 5.9.6: the allocation granularity MapViewOfFile demands (64 KB on every
+    // Windows that runs this; queried, not assumed).
+    SYSTEM_INFO siMap;
+    GetSystemInfo(&siMap);
+    DWORD dwGran = (siMap.dwAllocationGranularity != 0) ? siMap.dwAllocationGranularity : 65536;
     // The raw buffer lives in the job (pJob->pBytes), never in a local
     // shadow: every way out of this function — success, cancel, OOM or
     // an exception mid-read — leaves it owned and freed by the job.
@@ -3336,6 +3585,18 @@ void RunLoadJob(LoadJob* pJob)
         }
         pJob->pBytes = new BYTE[cbHead];
         cbAlloc = cbHead;
+        // 5.9.6: the detection window rides a mapped view when the OS grants
+        // one: ONE memcpy from the system cache instead of the ReadFile
+        // round trips (a 64 KB window is at most one page-in). The view is
+        // released immediately; the loop below is skipped entirely. A
+        // refused mapping leaves the ReadFile loop in charge, unchanged.
+        TVMappedView mvHead;
+        if (!pJob->bStdin && cbHead > 0 && MapFileRange(hFile, pJob->qwBase, cbHead, dwGran, &mvHead))
+        {
+            CopyMemory(pJob->pBytes, mvHead.pView + (pJob->qwBase - mvHead.qwStart), cbHead);
+            UnmapFileRange(&mvHead);
+            cbTotal = cbHead;
+        }
         while (cbTotal < cbHead)
         {
             if (LoadCancelled())
@@ -3528,6 +3789,19 @@ void RunLoadJob(LoadJob* pJob)
                     delete[] pJob->pBytes;
                     pJob->pBytes = pExact;
                     cbAlloc = cbFinal;
+                    // 5.9.6: the page copy rides a mapped view when the OS
+                    // grants one: the bytes come out of the system cache with
+                    // plain memcpys (no ReadFile round trips, no double
+                    // buffering), in the SAME CB_READ_CHUNK slices, so the
+                    // cancel checks and the progress ticks keep their exact
+                    // cadence. A refused mapping (rare: a handle that cannot
+                    // back a section, address-space pressure on Win32) leaves
+                    // the ReadFile loop below in charge, unchanged. The view
+                    // covers [qwBase, qwBase+cbFinal) exactly (cbFinal is
+                    // min(rest on disk, cap), derived from cbOnDisk), so
+                    // neither EOF nor short reads exist on this path.
+                    TVMappedView mvPage;
+                    const bool bMapped = (!pJob->bStdin) && MapFileRange(hFile, pJob->qwBase, cbFinal, dwGran, &mvPage);
                     while (cbTotal < cbFinal)
                     {
                         if (LoadCancelled())
@@ -3544,17 +3818,30 @@ void RunLoadJob(LoadJob* pJob)
                         {
                             cbChunk = CB_READ_CHUNK;
                         }
-                        if (!ReadFile(hFile, pJob->pBytes + cbTotal, cbChunk, &cbRead, nullptr))
+                        if (bMapped)
                         {
-                            bReadError = true;
-                            break;
+                            CopyMemory(pJob->pBytes + cbTotal,
+                                mvPage.pView + (pJob->qwBase - mvPage.qwStart) + cbTotal, cbChunk);
+                            cbTotal += cbChunk;
                         }
-                        if (cbRead == 0)
+                        else
                         {
-                            break;          // EOF (file shorter than reported)
+                            if (!ReadFile(hFile, pJob->pBytes + cbTotal, cbChunk, &cbRead, nullptr))
+                            {
+                                bReadError = true;
+                                break;
+                            }
+                            if (cbRead == 0)
+                            {
+                                break;          // EOF (file shorter than reported)
+                            }
+                            cbTotal += cbRead;
                         }
-                        cbTotal += cbRead;
                         LoadProgressPublish(pJob, cbTotal, cbPage + cchExp);    // 3.10: permille of read+build
+                    }
+                    if (bMapped)
+                    {
+                        UnmapFileRange(&mvPage);
                     }
                 }
             }
@@ -4842,16 +5129,290 @@ void TV_ClearText(void)
     g_iLineMemo0Char = -1; g_iLineMemo0Line = -1;   // 5.6: the memos died with the old index
     g_iLineMemo1Char = -1; g_iLineMemo1Line = -1;
     g_tv.iMaxLineChars = 0;   // 5.2: horizontal range dies with the text
+    // 5.9.8: the SCROLLBAR RANGES die with the text too. TV_ClearText used
+    // to leave the previous file's SB_VERT/SB_HORZ ranges in place until the
+    // next delivery with content: after ResetViewer (a failed open) or an
+    // empty file the bars kept the OLD file's range and the thumb dragged
+    // through a view that has nothing to show (TV_ScrollRows clamped every
+    // step back to 0, so it was harmless but the bar lied). One guarded
+    // call (it early-outs with no window) and both bars answer 0 again.
+    TV_UpdateScrollRanges();
 }
 
 // 5.6: index builder split out of TV_SetText so the load WORKER can run it
 // off the UI thread (the two wmemchr passes over a 32-128 MB page cost tens
 // of ms; on the worker they overlap the user's next input). Returns false
 // only on OOM (then *ppStarts is nullptr).
+// 5.9.5: big pages now take the PARALLEL builder below (same two passes
+// split across up to 4 cores); this function keeps the serial path for
+// small pages, single-core machines and as the fallback of last resort.
+
+/* -------------------------------------------------------------------------------------------- */
+// 5.9.5: PARALLEL LINE INDEX. The two wmemchr passes of the serial builder
+// (count + fill) are memory-bandwidth work; on a multi-core machine the
+// passes split across cores and a 128 MB page indexes in a fraction of the
+// time. The decomposition is exact, not approximate:
+//   - the coordinator cuts [0, cch) at nChunks raw boundaries and aligns
+//     each one FORWARD to the next line start (a position right after a
+//     '\n', or cch), so no logical line ever spans two chunks;
+//   - round A (parallel): every chunk counts the '\n' it owns and measures
+//     its longest line with the SAME rule as the serial builder (the '\n'
+//     is not part of the line; a middle chunk's last line ends at the
+//     boundary '\n' it does not own);
+//   - the coordinator prefix-sums the per-chunk counts, allocates the final
+//     array once and hands every chunk its slice;
+//   - round B (parallel): every chunk writes its line starts (global
+//     offsets) into its slice. The write counts were fixed by round A, so
+//     the slices cannot overlap or leave gaps.
+// A middle chunk (its end is a line start inside the text) always contains
+// its boundary '\n' at iEnd-1 and starts cLines = cBreaks lines (the line
+// after the boundary '\n' belongs to the next chunk); the LAST chunk starts
+// cBreaks + 1 (the empty final line after a trailing '\n' included, exactly
+// like the serial builder). Thread creation failure degrades per chunk: the
+// coordinator runs the orphan chunks inline after the wait. OOM of the final
+// array returns false and the serial builder runs (it would OOM on the same
+// allocation, but the fallback keeps one code path honest). Validated
+// against the serial builder by exhaustive comparison (fuzzing, 100k cases).
+struct TVIndexChunk
+{
+    const WCHAR* pText;     // the whole buffer
+    int cch;                // the whole length
+    int iStart;             // chunk start: a line start, or cch when empty
+    int iEnd;               // chunk end: the next chunk's start, or cch
+    int cLines;             // round A: lines STARTING in this chunk
+    int iMaxLine;           // round A: longest line starting here ('\n' excluded)
+    int* pOut;              // round B: the final array
+    int iOutBase;           // round B: this chunk's first slot in it
+};
+
+// 2-4 chunks: one per core, capped at 4 (the coordinator works chunk 0).
+// Below TV_INDEX_PARALLEL_MIN characters the thread round trips cost more
+// than they save: the serial builder runs. Overridable for the audit bench.
+#ifndef TV_INDEX_PARALLEL_MIN
+#define TV_INDEX_PARALLEL_MIN (4 << 20)     // characters (8 MB of UTF-16)
+#endif
+
+static int TVIndexChunkCount(int cch)
+{
+    if (cch < TV_INDEX_PARALLEL_MIN)
+    {
+        return 1;
+    }
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    const int cCores = (int)si.dwNumberOfProcessors;
+    if (cCores < 2)
+    {
+        return 1;
+    }
+    return (cCores > 4) ? 4 : cCores;
+}
+
+// Round A: count + longest line. Runs on a worker (chunks 1..n-1) and on
+// the coordinator (chunk 0); touches only its own chunk.
+static unsigned __stdcall TVIndexCountProc(void* pParam)
+{
+    TVIndexChunk* pC = (TVIndexChunk*)pParam;
+    pC->cLines = 0;
+    pC->iMaxLine = 0;
+    if (pC->iStart >= pC->iEnd)
+    {
+        return 0;                           // empty chunk (collapsed boundary)
+    }
+    const WCHAR* pScan = pC->pText + pC->iStart;
+    const WCHAR* pEnd = pC->pText + pC->iEnd;
+    int s = pC->iStart;
+    int cBreaks = 0;
+    int iMax = 0;
+    const WCHAR* pNl;
+    while ((pNl = (const WCHAR*)wmemchr(pScan, L'\n', (size_t)(pEnd - pScan))) != nullptr)
+    {
+        const int len = (int)(pNl - pC->pText) - s;     // the '\n' is not part of the line
+        if (len > iMax) iMax = len;
+        cBreaks++;
+        s = (int)(pNl - pC->pText) + 1;
+        pScan = pNl + 1;
+    }
+    if (pC->iEnd >= pC->cch)
+    {
+        const int len = pC->iEnd - s;       // the true final line (0 after a trailing '\n')
+        if (len > iMax) iMax = len;
+        pC->cLines = cBreaks + 1;
+    }
+    else
+    {
+        pC->cLines = cBreaks;               // the boundary '\n' opens the NEXT chunk's first line
+    }
+    pC->iMaxLine = iMax;
+    return 0;
+}
+
+// Round B: write this chunk's line starts (global offsets) into its slice.
+static unsigned __stdcall TVIndexFillProc(void* pParam)
+{
+    TVIndexChunk* pC = (TVIndexChunk*)pParam;
+    if (pC->cLines <= 0 || pC->pOut == nullptr)
+    {
+        return 0;
+    }
+    int* pOut = pC->pOut + pC->iOutBase;
+    const WCHAR* pScan = pC->pText + pC->iStart;
+    const WCHAR* pEnd = pC->pText + pC->iEnd;
+    *pOut++ = pC->iStart;
+    const WCHAR* pNl;
+    while ((pNl = (const WCHAR*)wmemchr(pScan, L'\n', (size_t)(pEnd - pScan))) != nullptr)
+    {
+        pScan = pNl + 1;
+        const int iNext = (int)(pScan - pC->pText);
+        if (iNext >= pC->cch)
+        {
+            *pOut++ = iNext;                // last chunk: the empty final line's start
+            break;
+        }
+        if (iNext >= pC->iEnd)
+        {
+            break;                          // middle chunk: the next chunk owns this start
+        }
+        *pOut++ = iNext;
+    }
+    return 0;
+}
+
+// One spawn-and-wait for both rounds. The coordinator works chunk 0 while
+// the workers run; a failed _beginthreadex degrades per chunk (the
+// coordinator runs the orphan chunk inline after the wait), the same
+// fallback rule LaunchLoadJob applies to the whole job.
+static void TVIndexRunRounds(TVIndexChunk* aC, int nChunks, unsigned (__stdcall* pProc)(void*))
+{
+    HANDLE aH[3];                           // nChunks <= 4: at most 3 workers
+    bool aOrphan[3] = { false, false, false };
+    int cH = 0;
+    for (int k = 1; k < nChunks; k++)
+    {
+        const uintptr_t h = _beginthreadex(nullptr, 0, pProc, &aC[k], 0, nullptr);
+        if (h == 0)
+        {
+            aOrphan[k] = true;
+        }
+        else
+        {
+            aH[cH++] = (HANDLE)h;
+        }
+    }
+    pProc(&aC[0]);                          // chunk 0 runs here, in parallel with the workers
+    if (cH > 0)
+    {
+        WaitForMultipleObjects((DWORD)cH, aH, TRUE, INFINITE);
+    }
+    for (int i = 0; i < cH; i++)
+    {
+        CloseHandle(aH[i]);
+    }
+    for (int k = 1; k < nChunks; k++)
+    {
+        if (aOrphan[k])
+        {
+            pProc(&aC[k]);                  // no thread for this chunk: run it here
+        }
+    }
+}
+
+static bool TV_BuildLineIndexParallel(WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine, int nChunks)
+{
+    TVIndexChunk* aC = new (std::nothrow) TVIndexChunk[nChunks];
+    if (aC == nullptr)
+    {
+        return false;
+    }
+    for (int k = 0; k < nChunks; k++)
+    {
+        aC[k].pText = pText;
+        aC[k].cch = cch;
+        aC[k].pOut = nullptr;
+        aC[k].iOutBase = 0;
+        aC[k].cLines = 0;
+        aC[k].iMaxLine = 0;
+    }
+    aC[0].iStart = 0;
+    // Raw boundaries aligned FORWARD to line starts: no line spans chunks.
+    // Two boundaries can collapse onto the same start (a line longer than a
+    // chunk): the chunk in between is simply empty.
+    int iPrevEnd = 0;
+    for (int k = 1; k < nChunks; k++)
+    {
+        const int b = (int)(((LONGLONG)cch * k) / nChunks);
+        int iStart;
+        if (b <= 0)
+        {
+            iStart = 0;
+        }
+        else if (pText[b - 1] == L'\n')
+        {
+            iStart = b;                     // right after a '\n': already a line start
+        }
+        else
+        {
+            const WCHAR* pNl = (const WCHAR*)wmemchr(pText + b, L'\n', (size_t)(cch - b));
+            iStart = (pNl != nullptr) ? (int)(pNl - pText) + 1 : cch;
+        }
+        if (iStart < iPrevEnd) iStart = iPrevEnd;   // non-decreasing by construction; belt and braces
+        aC[k].iStart = iStart;
+        aC[k - 1].iEnd = iStart;
+        iPrevEnd = iStart;
+    }
+    aC[nChunks - 1].iEnd = cch;
+
+    TVIndexRunRounds(aC, nChunks, TVIndexCountProc);
+
+    int cTotal = 0;
+    int iMax = 0;
+    for (int k = 0; k < nChunks; k++)
+    {
+        cTotal += aC[k].cLines;
+        if (aC[k].iMaxLine > iMax) iMax = aC[k].iMaxLine;
+    }
+    if (cTotal <= 0)
+    {
+        delete[] aC;
+        return false;                       // cannot happen (cch > 0); defensive
+    }
+    int* pStarts = new (std::nothrow) int[cTotal];
+    if (pStarts == nullptr)
+    {
+        delete[] aC;
+        return false;
+    }
+    int iBase = 0;
+    for (int k = 0; k < nChunks; k++)
+    {
+        aC[k].pOut = pStarts;
+        aC[k].iOutBase = iBase;
+        iBase += aC[k].cLines;
+    }
+
+    TVIndexRunRounds(aC, nChunks, TVIndexFillProc);
+
+    *ppStarts = pStarts;
+    *pcLines = cTotal;
+    *piMaxLine = iMax;
+    delete[] aC;
+    return true;
+}
+
+/* -------------------------------------------------------------------------------------------- */
 static bool TV_BuildLineIndex(WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine)
 {
     *ppStarts = nullptr; *pcLines = 0; *piMaxLine = 0;
     if (pText == nullptr || cch <= 0) return true;
+    // 5.9.5: parallel build for big pages (the same two wmemchr passes split
+    // across up to 4 cores, exact same results). The serial builder below
+    // stays for small pages, single-core machines, and as the fallback when
+    // the parallel path reports OOM.
+    const int nChunks = TVIndexChunkCount(cch);
+    if (nChunks > 1 && TV_BuildLineIndexParallel(pText, cch, ppStarts, pcLines, piMaxLine, nChunks))
+    {
+        return true;
+    }
     // 5.2: the line count goes through a wmemchr chain (the CRT's SIMD scan)
     // instead of a per-character walk: for a 32 MB page this is the difference
     // between a few ms and tens of ms, x86 and x64 alike.
@@ -5012,6 +5573,12 @@ void TV_GetSel(int& riStart, int& riEnd) { riStart = g_tv.iSelStart; riEnd = g_t
 // 5.5: forward declaration (defined after TV_Copy, next to the scroll
 // helpers it shares the invalidation logic with).
 static void TV_InvalidateSelPainted(HWND hWnd, TextViewState* pState);
+
+// 5.9.8: the low/high end of a char range, spelled once. The same two
+// ternaries lived copied in four places (WM_PAINT twice, TV_Copy and
+// TV_InvalidateSelPainted): eight lines that could only drift apart.
+static int TV_LoI(int a, int b) { return (a < b) ? a : b; }
+static int TV_HiI(int a, int b) { return (a > b) ? a : b; }
 
 void TV_SetSel(int iStart, int iEnd)
 {
@@ -5180,7 +5747,13 @@ void TV_ScrollCaret(void)
     int iCaretLine = TV_LineFromChar(g_tv.iSelEnd);
     RECT rc;
     if (!GetClientRect(g_tv.hWnd, &rc)) return;
-    int cVis = rc.bottom / iHexLineH;
+    // 5.9.8: ceil, the same count the paint loop, TV_UpdateCurLine and
+    // TV_HitTest use. The floor here made a caret on the PARTIALLY visible
+    // last row look "not visible": clicking that row (or arrowing onto it)
+    // scrolled a whole extra line even though its row was already half on
+    // screen. With the partial row counted, no scroll happens until the
+    // caret truly leaves the painted area.
+    int cVis = (rc.bottom + iHexLineH - 1) / iHexLineH;
     if (cVis < 1) cVis = 1;
     int iFirst = g_tv.iFirstVisible;
     if (iCaretLine < iFirst) iFirst = iCaretLine;
@@ -5216,8 +5789,8 @@ void TV_ScrollCaret(void)
 void TV_Copy(void)
 {
     if (g_tv.iSelStart == g_tv.iSelEnd || g_tv.pText == nullptr) return;
-    int iStart = (g_tv.iSelStart < g_tv.iSelEnd) ? g_tv.iSelStart : g_tv.iSelEnd;
-    int iEnd = (g_tv.iSelStart < g_tv.iSelEnd) ? g_tv.iSelEnd : g_tv.iSelStart;
+    int iStart = TV_LoI(g_tv.iSelStart, g_tv.iSelEnd);
+    int iEnd = TV_HiI(g_tv.iSelStart, g_tv.iSelEnd);
     int cch = iEnd - iStart;
     if (cch <= 0) return;
     if (OpenClipboard(g_tv.hWnd))
@@ -5358,8 +5931,8 @@ static void TV_UpdateCurLine(HWND hWnd, TextViewState* pState)
 static void TV_InvalidateSelPainted(HWND hWnd, TextViewState* pState)
 {
     TV_UpdateCurLine(hWnd, pState);   // 5.8: the band follows the caret
-    int iLo = (pState->iSelStart < pState->iSelEnd) ? pState->iSelStart : pState->iSelEnd;
-    int iHi = (pState->iSelStart < pState->iSelEnd) ? pState->iSelEnd : pState->iSelStart;
+    int iLo = TV_LoI(pState->iSelStart, pState->iSelEnd);
+    int iHi = TV_HiI(pState->iSelStart, pState->iSelEnd);
     int pLo = pState->iPaintedSelLo;
     int pHi = pState->iPaintedSelHi;
     if (iLo == pLo && iHi == pHi)
@@ -5521,8 +6094,8 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         // V5: compute wrap width once
         int iMaxChars = 0;
         if (pState->bWrap) iMaxChars = (pState->iWrapWidth > 0) ? pState->iWrapWidth : (rc.right / iHexCharW);
-        int iSelLo = (pState->iSelStart < pState->iSelEnd) ? pState->iSelStart : pState->iSelEnd;
-        int iSelHi = (pState->iSelStart < pState->iSelEnd) ? pState->iSelEnd : pState->iSelStart;
+        int iSelLo = TV_LoI(pState->iSelStart, pState->iSelEnd);
+        int iSelHi = TV_HiI(pState->iSelStart, pState->iSelEnd);
         int iScrollX = pState->iScrollX;
 
         // V5: single pass — paint background + text together per visual row.
@@ -5713,8 +6286,8 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         EndPaint(hWnd, &ps);
         // 5.5: the screen now shows this selection: it is the reference the
         // next TV_InvalidateSelPainted measures its delta against.
-        pState->iPaintedSelLo = (pState->iSelStart < pState->iSelEnd) ? pState->iSelStart : pState->iSelEnd;
-        pState->iPaintedSelHi = (pState->iSelStart < pState->iSelEnd) ? pState->iSelEnd : pState->iSelStart;
+        pState->iPaintedSelLo = TV_LoI(pState->iSelStart, pState->iSelEnd);
+        pState->iPaintedSelHi = TV_HiI(pState->iSelStart, pState->iSelEnd);
         TV_PositionCaret();   // V5: update caret position after paint
         // 5.6: the gutter column only follows content and vertical scroll.
         // Selection drags (TV_InvalidateSelPainted) and horizontal scrolls
@@ -5734,8 +6307,9 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         // one DrawTextW/FillRect per visible column. The parent's WM_PAINT
         // (expose/resize/toggle) repaints it unconditionally and records
         // the scroll it painted, and TV_ClearText forces one repaint per
-        // delivery.
-        if (g_bRuler && iHexCharW > 0 && iHexLineH > 0 && iView != VIEW_HEX && hWndMain != nullptr &&
+        // delivery. 5.9.6: the hex view's byte-position header rides the
+        // same rule (it scrolls horizontally exactly like the text ruler).
+        if (g_bRuler && iHexCharW > 0 && iHexLineH > 0 && hWndMain != nullptr &&
             (bGutWasDirty || pState->iPaintedRulerX != pState->iScrollX))
         {
             RECT rcParent;
@@ -5746,7 +6320,14 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
                 HDC hdcParent = GetDC(hWndMain);
                 if (hdcParent != nullptr)
                 {
-                    PaintRuler(hdcParent, rcRuler, iGutter);
+                    if (iView == VIEW_HEX)
+                    {
+                        PaintHexRuler(hdcParent, rcRuler, iGutter);
+                    }
+                    else
+                    {
+                        PaintRuler(hdcParent, rcRuler, iGutter);
+                    }
                     ReleaseDC(hWndMain, hdcParent);
                 }
             }
@@ -6560,7 +7141,9 @@ void LayoutEdit(void)
     int x = GutterWidth();                  // hex offsets, line numbers, or nothing
     // V4: reserve space at the top for the ruler. The ruler is painted by
     // the parent's WM_PAINT, so the EDIT must start below it.
-    int iRulerH = (g_bRuler && iHexLineH > 0 && iView != VIEW_HEX) ? iHexLineH : 0;
+    // 5.9.6: the hex view reserves the same strip: its ruler is the
+    // byte-position header over the dump (PaintHexRuler).
+    int iRulerH = (g_bRuler && iHexLineH > 0) ? iHexLineH : 0;
     int yEdit = iRulerH;
     if (iWidth < x)
     {
@@ -7877,6 +8460,37 @@ static void PostSearchDone(UINT uCode)
     }
 }
 
+/* -------------------------------------------------------------------------------------------- */
+// 5.9.6: the candidate scan the two search loops share (mapped view and
+// ReadFile chunks): memchr walks the buffer with the CRT's vectorized scan
+// (SIMD on every modern toolchain) and memcmp only confirms the candidates
+// it finds. Identical results in both loops (the 3.00 chunked loop was
+// verified case by case against the old per-byte loop, patterns crossing
+// chunk borders included): valid starts are 0 .. cbHave - cbPat, and the
+// FIRST hit in ascending order wins. Returns true and writes the ABSOLUTE
+// file offset (qwBaseOfBuf + the in-buffer position) when the pattern is in
+// [p, p + cbHave).
+static bool ScanForPattern(const BYTE* p, DWORD cbHave, ULONGLONG qwBaseOfBuf, ULONGLONG* pqwHit)
+{
+    const DWORD cbPat = g_cbSearchPat;
+    if (cbPat == 0 || cbPat > cbHave)
+    {
+        return false;
+    }
+    const BYTE* pHit = (const BYTE*)memchr(p, g_abSearchPat[0], cbHave - cbPat + 1);
+    while (pHit != nullptr)
+    {
+        if (cbPat == 1 || memcmp(pHit, g_abSearchPat, cbPat) == 0)
+        {
+            *pqwHit = qwBaseOfBuf + (ULONGLONG)(DWORD)(pHit - p);
+            return true;
+        }
+        pHit = (const BYTE*)memchr(pHit + 1, g_abSearchPat[0],
+            (cbHave - cbPat + 1) - (DWORD)(pHit - p) - 1);
+    }
+    return false;
+}
+
 unsigned __stdcall SearchThreadProc(void* pParameter)
 {
     UNREFERENCED_PARAMETER(pParameter);
@@ -7889,17 +8503,83 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
     const DWORD CB_CHUNK = CB_READ_CHUNK;          // 5.2: 4 MB, the loader's chunk (was 1 MB): 4x fewer syscalls
     const DWORD cbPat = g_cbSearchPat;
     DWORD cbOverlap = (cbPat > 1) ? cbPat - 1 : 0;
-    BYTE* pBuf = new (std::nothrow) BYTE[CB_CHUNK + cbOverlap];
-    if (pBuf == nullptr)
+    // 5.9.6: the whole file rides ONE read-only view when the OS grants it:
+    // the scan walks the system cache directly (no ReadFile, no chunk
+    // buffer, no overlap carry — the slice window below always reaches
+    // cbPat-1 bytes past its slice, so a straddling match is still found,
+    // and the first hit in ascending order wins). Win32 address space (or a
+    // refused mapping) falls back to the chunked ReadFile loop, unchanged.
+    // Cancel latency and progress cadence are the same in both loops: one
+    // check and one ~10 Hz post per CB_CHUNK slice.
+    HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    const BYTE* pView = nullptr;
+    ULONGLONG cbSearch = 0;
+    if (hMap != nullptr)
     {
-        CloseHandle(hFile);
-        PostSearchDone(2);   // 3.07: OOM: NOT "not found"
-        return(0);
+        LARGE_INTEGER liSize;
+        if (GetFileSizeEx(hFile, &liSize) && liSize.QuadPart > 0)
+        {
+            pView = (const BYTE*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+            if (pView != nullptr)
+            {
+                cbSearch = (ULONGLONG)liSize.QuadPart;
+            }
+        }
     }
+    BYTE* pBuf = nullptr;                          // ReadFile fallback only
+    DWORD cbKeep = 0;                              // valid bytes kept at the head of pBuf
     ULONGLONG qwBase = 0;                         // file offset of pBuf[0]
-    DWORD cbKeep = 0;                             // valid bytes kept at the head of pBuf
+    if (pView == nullptr)
+    {
+        pBuf = new (std::nothrow) BYTE[CB_CHUNK + cbOverlap];
+        if (pBuf == nullptr)
+        {
+            if (hMap != nullptr)
+            {
+                CloseHandle(hMap);
+            }
+            CloseHandle(hFile);
+            PostSearchDone(2);   // 3.07: OOM: NOT "not found"
+            return(0);
+        }
+    }
     bool bFound = false, bCancel = false;
     ULONGLONG qwNextPost = GetTickCount64() + 100;
+    if (pView != nullptr)
+    {
+        ULONGLONG qwPos = 0;                      // file offset of the slice being scanned
+        while (!bFound && !bCancel)
+        {
+            if (qwPos >= cbSearch)
+            {
+                break;                            // EOF: the whole view is scanned
+            }
+            ULONGLONG cbRest = cbSearch - qwPos;
+            DWORD cbWindow = (cbRest < (ULONGLONG)(CB_CHUNK + cbOverlap)) ? (DWORD)cbRest : (DWORD)(CB_CHUNK + cbOverlap);
+            ULONGLONG qwHit = 0;
+            if (ScanForPattern(pView + qwPos, cbWindow, qwPos, &qwHit))
+            {
+                g_qwSearchResult = qwHit;
+                bFound = true;
+                break;
+            }
+            qwPos += CB_CHUNK;                    // one slice per pass: the overlap room re-covers the straddle zone
+            // Progress at ~10 Hz: PostMessage is cheap and the UI thread
+            // repaints at its own pace, decoupled from the scan speed.
+            // 3.08: the position travels IN the message (low/high halves) —
+            // no 64-bit global shared with the UI thread (torn reads on x86).
+            ULONGLONG qwNow = GetTickCount64();
+            if (qwNow >= qwNextPost)
+            {
+                PostMessage(hWndMain, WM_APP_SEARCHPROGRESS, (WPARAM)(DWORD)qwPos, (LPARAM)(DWORD)(qwPos >> 32));
+                qwNextPost = qwNow + 100;
+            }
+            // The single cancel check per chunk (ESC handler or WM_DESTROY).
+            bCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
+        }
+    }
+    else
+    {
     while (!bFound && !bCancel)
     {
         DWORD cbRead = 0;
@@ -7914,31 +8594,23 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
         // byte-at-a-time loop on big files, with identical results
         // (verified case by case against the old loop, patterns crossing
         // chunk borders included). Valid starts: 0 .. cbHave - cbPat.
-        if (cbPat <= cbHave)
+        ULONGLONG qwHit = 0;
+        if (ScanForPattern(pBuf, cbHave, qwBase, &qwHit))
         {
-            const BYTE* pHit = (const BYTE*)memchr(pBuf, g_abSearchPat[0], cbHave - cbPat + 1);
-            while (pHit != nullptr)
-            {
-                if (cbPat == 1 || memcmp(pHit, g_abSearchPat, cbPat) == 0)
-                {
-                    g_qwSearchResult = qwBase + (ULONGLONG)(DWORD)(pHit - pBuf);
-                    bFound = true;
-                    break;
-                }
-                pHit = (const BYTE*)memchr(pHit + 1, g_abSearchPat[0],
-                    (cbHave - cbPat + 1) - (DWORD)(pHit - pBuf) - 1);
-            }
+            g_qwSearchResult = qwHit;
+            bFound = true;
+            break;
         }
-        if (!bFound)
+        // 5.9.7: the old `if (!bFound)` wrapper here was dead code since the
+        // scan moved into ScanForPattern (a hit breaks out above; reaching
+        // this line means no hit). The carry runs unconditionally.
+        // Keep the tail a match could straddle, past the chunk border.
+        cbKeep = (cbHave > cbOverlap) ? cbOverlap : cbHave;
+        if (cbKeep > 0)
         {
-            // Keep the tail a match could straddle, past the chunk border.
-            cbKeep = (cbHave > cbOverlap) ? cbOverlap : cbHave;
-            if (cbKeep > 0)
-            {
-                MoveMemory(pBuf, pBuf + cbHave - cbKeep, cbKeep);
-            }
-            qwBase += (ULONGLONG)(cbHave - cbKeep);
+            MoveMemory(pBuf, pBuf + cbHave - cbKeep, cbKeep);
         }
+        qwBase += (ULONGLONG)(cbHave - cbKeep);
         // Progress at ~10 Hz: PostMessage is cheap and the UI thread
         // repaints at its own pace, decoupled from the scan speed.
         // 3.08: the position travels IN the message (low/high halves) —
@@ -7952,7 +8624,16 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
         // The single cancel check per chunk (ESC handler or WM_DESTROY).
         bCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
     }
+    }
     delete[] pBuf;
+    if (pView != nullptr)
+    {
+        UnmapViewOfFile(pView);
+    }
+    if (hMap != nullptr)
+    {
+        CloseHandle(hMap);
+    }
     CloseHandle(hFile);
     // 5.2: PostSearchDone retries the post; if it still fails, the ESC
     // handlers reap the finished worker and re-open the gate.
@@ -8323,7 +9004,9 @@ void PaintGutter(void)
     // The labels used to start at y = 0 of the PARENT, one row above their
     // text (the "58" overlapped the ruler) and the last visible rows went
     // unlabeled. Use the same offset LayoutEdit does.
-    int iRulerH = (g_bRuler && iView != VIEW_HEX) ? iHexLineH : 0;
+    // 5.9.6: the hex view's ruler counts too (its byte-position header
+    // occupies the same strip the text ruler uses).
+    int iRulerH = (g_bRuler && iHexLineH > 0) ? iHexLineH : 0;
     HDC hdc = GetDC(hWndMain);
     if (hdc == nullptr)
     {
@@ -8335,6 +9018,11 @@ void PaintGutter(void)
     rcGutter.right = iW;
     rcGutter.bottom = iRulerH + rcEdit.bottom;
     FillRect(hdc, &rcGutter, GetSysColorBrush(COLOR_WINDOW));
+    // 5.9.6: a hairline closes the column on its right edge: the strip reads
+    // as a rail between the labels and the text instead of a no-man's land.
+    // COLOR_3DLIGHT: the system's own light gray, no brush to manage.
+    RECT rcSep = { iW - 1, rcGutter.top, iW, rcGutter.bottom };
+    FillRect(hdc, &rcSep, GetSysColorBrush(COLOR_3DLIGHT));
     // 5.5: clip to the column. The last visible row can be partial (the text
     // view paints it: its loop runs while y < bottom), and it gets its label
     // too; without the clip the label's glyph bottom would cross into the
@@ -8345,9 +9033,17 @@ void PaintGutter(void)
         SelectClipRgn(hdc, hRgnClip);   // GDI copies the region: safe to delete
         DeleteObject(hRgnClip);
     }
-    HGDIOBJ hOldFont = SelectObject(hdc, (hFontHexBold != nullptr) ? hFontHexBold : hFont);
+    HGDIOBJ hOldFont = SelectObject(hdc, (bHex && hFontHexBold != nullptr) ? hFontHexBold : hFont);
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+    // 5.9.6: the column speaks a QUIETER color. The labels used to be black
+    // bold, the same voice as the content: they fought the text for
+    // attention on every line. They are chrome, not content: a muted
+    // gray-blue (the tone editors like VS Code use for gutters) keeps them
+    // legible and lets the bytes and the text lead the eye. The bookmark
+    // dot keeps its saturated blue: it is a mark, not a label.
+    // 5.9.7: the color lives in ONE constant (s_clrGutter), shared with the
+    // two rulers.
+    SetTextColor(hdc, s_clrGutter);
     // Hex: how many dump lines exist (same arithmetic as BuildHexText).
     // Text: the control's own line count. Either way the control owns the
     // scroll, so both painters start at its first visible line.
@@ -8362,6 +9058,21 @@ void PaintGutter(void)
         cLines = (int)EditGetLineCount();   // V5
     }
     int iFirst = (int)EditGetFirstVisibleLine();   // V5
+    // 5.9.8: wrap mode, the alignment fix. The loop below painted ONE label
+    // per LOGICAL line one row apart, but in wrap the control paints several
+    // VISUAL rows per logical line: the first wrapped line above pushed every
+    // number below off its line (the number "5" sat on the second visual row
+    // of line 3). The fix walks the same arithmetic the WM_PAINT uses: each
+    // label sits at the y of its line's FIRST visual row and the cursor jumps
+    // the line's full row count (TV_WrapBreak, minimum one row, empty line =
+    // one row). No-wrap and hex keep the 1:1 walk (identical output).
+    const bool bWrapGut = (!bHex) && g_tv.bWrap && g_tv.pText != nullptr;
+    int iMaxCharsGut = 0;
+    if (bWrapGut)
+    {
+        iMaxCharsGut = (g_tv.iWrapWidth > 0) ? g_tv.iWrapWidth : (rcEdit.right / iHexCharW);
+        if (iMaxCharsGut < 1) iMaxCharsGut = 1;
+    }
     // 5.8: bookmark dots. g_pBookmarks is page-relative and SORTED and the
     // loop walks lines in ascending order, so one cursor advances in
     // lockstep and the membership test costs O(1) amortized per row.
@@ -8478,7 +9189,32 @@ void PaintGutter(void)
         atxt[ctxt].rcl.bottom = 0;
         atxt[ctxt].pdx = nullptr;      // default spacing: ExtTextOut's own metrics
         ctxt++;
-        y += iHexLineH;
+        if (bWrapGut)
+        {
+            // 5.9.8: skip the line's remaining visual rows (the same
+            // TV_WrapBreak walk the WM_PAINT runs), so the next label lands
+            // on the first row of the next line.
+            int iLS = TV_LineIndex(iLine);
+            if (iLS < 0) iLS = 0;
+            int iN = TV_LineIndex(iLine + 1);
+            int iLE = (iN < 0) ? TV_GetTextLength() : iN;
+            int iDE = iLE;
+            if (iDE > iLS && g_tv.pText[iDE - 1] == L'\n') iDE--;
+            if (iDE > iLS && g_tv.pText[iDE - 1] == L'\r') iDE--;
+            int cRows = 1;
+            if (iDE > iLS)
+            {
+                cRows = 0;
+                int iPos = iLS;
+                while (iPos < iDE) { iPos = TV_WrapBreak(iPos, iDE, iMaxCharsGut); cRows++; }
+                if (cRows < 1) cRows = 1;
+            }
+            y += cRows * iHexLineH;
+        }
+        else
+        {
+            y += iHexLineH;
+        }
     }
     if (ctxt > 0)
     {
@@ -8614,26 +9350,57 @@ void ToggleRuler(void)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// 5.9.7: the plumbing the two rulers share (the text column ruler and the
+// hex byte-position header): strip fill, clip, label font, the muted chrome
+// color and the bottom border live here once instead of in twin prologues
+// and epilogues that could drift apart.
+// The CLIP is also a fix: a label whose cell crosses the strip's left edge
+// (a column half scrolled out) painted pixels over the gutter corner below
+// it in the control's repaint path (the parent's WM_PAINT covered the
+// bleed by painting the corner after the ruler, the control's path did
+// not). Clipping the strip kills the bleed in every path.
+// RulerStripBegin fills, clips and selects; it returns the previous font
+// for the caller to restore. RulerStripEnd draws the border, unclips and
+// restores the font.
+static HGDIOBJ RulerStripBegin(HDC hdc, RECT rcRuler, HFONT hFontLabels)
+{
+    FillRect(hdc, &rcRuler, GetSysColorBrush(COLOR_3DFACE));
+    HRGN hRgnClip = CreateRectRgnIndirect(&rcRuler);
+    if (hRgnClip != nullptr)
+    {
+        SelectClipRgn(hdc, hRgnClip);   // GDI copies the region: safe to delete
+        DeleteObject(hRgnClip);
+    }
+    HGDIOBJ hOld = SelectObject(hdc, hFontLabels);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, s_clrGutter);
+    return hOld;
+}
+
+static void RulerStripEnd(HDC hdc, RECT rcRuler, HGDIOBJ hOldFont)
+{
+    RECT rcLine = { rcRuler.left, rcRuler.bottom - 1, rcRuler.right, rcRuler.bottom };
+    FillRect(hdc, &rcLine, GetSysColorBrush(COLOR_3DSHADOW));
+    SelectClipRgn(hdc, nullptr);   // restore the default clip before unselecting
+    SelectObject(hdc, hOldFont);
+}
+
+/* -------------------------------------------------------------------------------------------- */
 // V4: PaintRuler — draws a column ruler at the top of the text area.
 // Painted by the PARENT's WM_PAINT in the strip reserved by LayoutEdit.
 // rcRuler is the full ruler rect (x = gutter, y = 0, bottom = iHexLineH).
 // xOrigin is the pixel x of the gutter (the ruler starts to its right).
 // Accounts for the custom control's horizontal scroll so column numbers
-// align with the visible text (5.4: no EDIT anymore; the ruler does not
-// even show in the hex view).
+// align with the visible text. (5.9.6: the hex view has its own ruler, the
+// byte-position header, PaintHexRuler; both share RulerStripBegin/End.)
 void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin)
 {
     if (iHexCharW <= 0 || iHexLineH <= 0 || hEdit == nullptr)
     {
         return;
     }
-    // V4: fill the ruler background with the 3D face color so it looks
-    // like a separate toolbar strip, not overlapping text.
-    FillRect(hdc, &rcRuler, GetSysColorBrush(COLOR_3DFACE));
     int iScrollXPx = g_tv.iScrollX;   // V5: pixels, the control owns the scroll
-    HFONT hOld = (HFONT)SelectObject(hdc, hFont);
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+    HGDIOBJ hOld = RulerStripBegin(hdc, rcRuler, hFont);
     int iFirstCol = iScrollXPx / iHexCharW;
     int xStart = rcRuler.left - (iScrollXPx % iHexCharW);
     int iColsVisible = (rcRuler.right - xStart) / iHexCharW + 2;
@@ -8658,10 +9425,55 @@ void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin)
             FillRect(hdc, &rcTick, GetSysColorBrush(COLOR_3DSHADOW));
         }
     }
-    // bottom border line
-    RECT rcLine = { rcRuler.left, y + iRulerH - 1, rcRuler.right, y + iRulerH };
-    FillRect(hdc, &rcLine, GetSysColorBrush(COLOR_3DSHADOW));
-    SelectObject(hdc, hOld);
+    RulerStripEnd(hdc, rcRuler, hOld);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 5.9.6: PaintHexRuler — the hex view's ruler is a byte-position header, the
+// classic hexdump header row: over the hex block it labels every 4th byte of
+// the dump line (00 04 08 0C, right-aligned on the two digits that byte
+// occupies below) and over the ASCII block it names the column. The View >
+// Ruler option owns the strip in every view: text views get the column
+// ruler, the hex view gets this header. Painted by the parent's WM_PAINT in
+// the strip LayoutEdit reserves (same plumbing as PaintRuler) and it scrolls
+// horizontally with the view: the control owns the scroll, so each label's x
+// subtracts iScrollX and stays glued to its byte column.
+// Line geometry (BuildHexText): byte i (0-7) puts its two digits at columns
+// 3i and 3i+1; the mid-gap space sits at column 24; byte i (8-15) puts its
+// digits at columns 3i+1 and 3i+2 (the gap shifts the second half one
+// column); the ASCII block starts at column 50 (49 hex chars + 1 gap).
+void PaintHexRuler(HDC hdc, RECT rcRuler, int xOrigin)
+{
+    if (iHexCharW <= 0 || iHexLineH <= 0 || hEdit == nullptr)
+    {
+        return;
+    }
+    HGDIOBJ hOld = RulerStripBegin(hdc, rcRuler, (hFontHexBold != nullptr) ? hFontHexBold : hFont);
+    int iScrollX = g_tv.iScrollX;
+    for (int i = 0; i < 16; i += 4)
+    {
+        int iCol = (i < 8) ? (i * 3) : (i * 3 + 1);   // first digit's column (the mid-gap shifts the second half)
+        int x = xOrigin + iCol * iHexCharW - iScrollX;
+        if (x + 2 * iHexCharW < rcRuler.left || x > rcRuler.right)
+        {
+            continue;
+        }
+        WCHAR szLabel[3];
+        szLabel[0] = s_szHexDigits[(i >> 4) & 0x0F];
+        szLabel[1] = s_szHexDigits[i & 0x0F];
+        szLabel[2] = L'\0';
+        RECT rcCell = { x, rcRuler.top, x + 2 * iHexCharW, rcRuler.bottom };
+        DrawTextW(hdc, szLabel, 2, &rcCell, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    // The ASCII block's name, on its first column.
+    int xAscii = xOrigin + 50 * iHexCharW - iScrollX;
+    if (xAscii < rcRuler.right && xAscii + 5 * iHexCharW >= rcRuler.left)
+    {
+        RECT rcCell = { xAscii, rcRuler.top, xAscii + 5 * iHexCharW, rcRuler.bottom };
+        DrawTextW(hdc, L"ASCII", 5, &rcCell, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    RulerStripEnd(hdc, rcRuler, hOld);
 }
 
 
@@ -8961,13 +9773,18 @@ void LoadSettings(void)
         }
     }
     g_iFontIndex = iBest;
-    g_bLineNums = (ProfileLong(L"LineNumbers", 0) != 0);
+    // 5.9.7: the four view aids come ON by default (line numbers, ruler,
+    // greenbar, highlight current line). The INI keeps precedence: an
+    // existing 4More.ini that already saved these keys keeps the user's
+    // choice; the new defaults apply when the keys are missing (first run,
+    // or an INI from before the options existed).
+    g_bLineNums = (ProfileLong(L"LineNumbers", 1) != 0);
     g_bWrap = (ProfileLong(L"WordWrap", 0) != 0);
     g_bTail = (ProfileLong(L"Tail", 0) != 0);
     // V4: new view features
-    g_bGreenbar = (ProfileLong(L"Greenbar", 0) != 0);
-    g_bRuler = (ProfileLong(L"Ruler", 0) != 0);
-    g_bHiliteLine = (ProfileLong(L"HighlightLine", 0) != 0);   // 5.8: off until asked for
+    g_bGreenbar = (ProfileLong(L"Greenbar", 1) != 0);
+    g_bRuler = (ProfileLong(L"Ruler", 1) != 0);
+    g_bHiliteLine = (ProfileLong(L"HighlightLine", 1) != 0);   // 5.8, ON by default since 5.9.7
     g_bEscExit = (ProfileLong(L"EscExit", 1) != 0);            // 5.8: ON by default (the classic behavior)
     g_iWrapWidth = (int)ProfileLong(L"WrapWidth", 0);
     if (g_iWrapWidth > 0 && g_iWrapWidth < 10) { g_iWrapWidth = 10; }

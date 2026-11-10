@@ -8,6 +8,7 @@
 #define IDD_ABOUTBOX                    103
 #define IDD_GOTO                        129
 #define IDD_FINDBYTES                   130
+#define IDD_WRAPWIDTH                   131
 #define ID_ABOUT                        104
 #define ID_EXIT                         105
 #define IDI_MY4MORE                     107
@@ -60,6 +61,9 @@
 #define IDC_GOTO_EDIT                   1106
 #define IDC_BYTES_EDIT                  1107
 #define IDC_BYTES_HEX                   1108
+// 5.9.13: the Wrap Width dialog's own edit (the dialog used IDD_GOTO's
+// controls, showing a wrong caption and stray radio buttons, since V4)
+#define IDC_WRAP_COLS                   1109
 #define IDC_STATIC                      -1
 
 // Next default values for new objects
@@ -67,9 +71,9 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
-#define _APS_NEXT_RESOURCE_VALUE        131
+#define _APS_NEXT_RESOURCE_VALUE        132
 #define _APS_NEXT_COMMAND_VALUE         32822
-#define _APS_NEXT_CONTROL_VALUE         1109
+#define _APS_NEXT_CONTROL_VALUE         1110
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

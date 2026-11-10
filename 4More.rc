@@ -1,4 +1,31 @@
-﻿// 4More.rc — recursos del visor (Build 5.9.4)
+﻿// 4More.rc — recursos del visor (Build 5.9.13)
+//
+// 5.9.13: LOS DIÁLOGOS CAMBIAN. View > Wrap to Fixed Width deja de reusar
+// la plantilla IDD_GOTO (título "Go To", radios Line/Offset sin función,
+// texto de ayuda del Go To) y estrena IDD_WRAPWIDTH propia: título "Wrap to
+// Fixed Width", etiqueta "Columns:", ayuda propia y botones OK/Cancel. El
+// control nuevo IDC_WRAP_COLS (1109) vive en resource.h. Ni menú ni
+// aceleradores cambian. El manifest sube a 5.9.13.0.0.
+//
+// 5.9.12: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. La revisión es del
+// .cpp (columna deseada del caret recortada al display end; TV_WrapChars
+// pinza a >= 1). El manifest sube a 5.9.12.0.0.
+//
+// 5.9.11: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. La revisión es del
+// .cpp (VK_UP/DOWN/END usan TV_DispEnd, paridad con el refactoring de
+// 5.9.10) y del .vcxproj (toolset v145→v143, Debug preprocessor defs +
+// stdcpp17). El manifest sube a 5.9.11.0.0.
+//
+// 5.9.10: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Limpieza del .cpp:
+// los recortes CR/LF y el cálculo del ancho de wrap pasan a helpers únicos
+// (TV_DispEnd, TV_WrapChars) y TV_SetText deja de refrescar los rangos de
+// scroll dos veces por entrega. El manifest sube a 5.9.10.0.0.
+//
+// 5.9.9: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. La revisión es del
+// .cpp: corrupción de pila en el índice paralelo (aOrphan[3] con 4 trozos),
+// doble free del job si la ventana muere durante la carga, columna de
+// offsets hex ausente en la primera carga y scrollbar vertical desfasada
+// tras alternar wrap. El manifest sube a 5.9.9.0.0.
 //
 // 5.9: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. La revisión es del
 // .cpp: la línea con bookmark se pinta con fondo azul (siempre, con o sin
@@ -12,7 +39,7 @@
 // 5.5: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. La revisión es del .cpp:
 // las últimas filas volvían a quedarse sin número de línea (el bucle del
 // gutter comparaba coordenadas del padre contra el alto del control) y el
-// repaint de selección/caret pasa a ser mínimo. El manifest sube a 5.7.0.0.
+// repaint de selección/caret pasa a ser mínimo. El manifest sube a 5.5.0.0.
 //
 // 4.0: AÑADE 3 ITEMS AL MENÚ VIEW (Greenbar, Ruler, Wrap to Fixed Width).
 // Los 3 IDs nuevos (ID_VIEW_GREENBAR, ID_VIEW_RULER, ID_VIEW_WRAPWIDTH)
@@ -328,6 +355,26 @@ BEGIN
     LTEXT           "The WHOLE file on disk is scanned in a worker thread (ESC cancels).", IDC_STATIC, 12, 64, 240, 16
     DEFPUSHBUTTON   "&Find", IDOK, 152, 94, 50, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 206, 94, 50, 14
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Cuadro Ajuste de Línea a Ancho Fijo
+// 5.9.13: plantilla propia. Desde la V4 el diálogo reusaba IDD_GOTO y el
+// usuario veía el título "Go To", la etiqueta "Go to:" y los radios
+// Line/Offset, que aquí no pinta nadie. La lógica (WrapWidthProc) no
+// cambia: ParseU64, cap a 10000, vacío o basura = ancho fijo desactivado.
+
+IDD_WRAPWIDTH DIALOGEX 0, 0, 210, 68
+STYLE DS_MODALFRAME | WS_CAPTION | WS_SYSMENU | WS_POPUP
+CAPTION "Wrap to Fixed Width"
+FONT 8, "MS Shell Dlg 2", 400, 0, 0x1
+BEGIN
+    LTEXT           "&Columns:", IDC_STATIC, 12, 14, 40, 8
+    EDITTEXT        IDC_WRAP_COLS, 60, 12, 60, 14, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "Wrap every line at this many columns (10-10000). 0 turns fixed width off.", IDC_STATIC, 12, 34, 186, 16
+    DEFPUSHBUTTON   "OK", IDOK, 96, 50, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 152, 50, 50, 14
 END
 
 

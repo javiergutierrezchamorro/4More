@@ -1,6 +1,149 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 5.9.8
+   Build 5.9.13
+
+   Novedades de la versión 5.9.13 (REVISIÓN: DIÁLOGO DE WRAP WIDTH + SEH EN LA BÚSQUEDA):
+   - FIX: "WRAP TO FIXED WIDTH..." ABRÍA EL DIÁLOGO "GO TO". WrapWidthDialog
+     reusaba la plantilla IDD_GOTO desde la V4: el usuario veía el título
+     "Go To", la etiqueta "Go to:", los radios Line/Offset (Line marcado y
+     sin función alguna) y el texto de ayuda del Go To, con el edit
+     rellenado a "80". Estrena ahora su propia plantilla IDD_WRAPWIDTH
+     (título "Wrap to Fixed Width", etiqueta "Columns:", ayuda propia,
+     botones OK/Cancel) y el control IDC_WRAP_COLS (1109). La lógica de
+     WrapWidthProc no cambia: ParseU64, cap a 10000, entrada vacía o
+     basura = ancho fijo desactivado.
+   - FIX: LA BÚSQUEDA DE BYTES NO TENÍA RED DE SEH EN EL CAMINO MAPEADO.
+     Un EXCEPTION_IN_PAGE_ERROR leyendo la vista mapeada (el disco suelta
+     un sector a mitad de escaneo, un fichero de red se cae) subía sin
+     capturar desde el hilo worker y mataba el proceso con el cartel de
+     "4More must close". El loader lo atrapa en el __try de
+     LoadThreadProc desde siempre; el worker de búsqueda no tenía
+     jacket. Los dos bucles de escaneo (mapeado y ReadFile) viven ahora
+     dentro de uno, y el error se reporta como "could not scan" (wParam
+     2), el mismo parte que ya usa un fallo de apertura o de memoria.
+     Todos los locales son POD, así que el __try cumple la regla de
+     unwinding de MSVC; en el banco de auditoría las sentencias siguen
+     mapeando a if (1) / else if (0).
+   - FIX MENOR: EDIT > SELECT ALL NO LLEVABA EL CARET A LA VISTA. El
+     comando de menú/acelerador hacía TV_SetSel(0, len) y se quedaba
+     ahí: con una página larga, la selección quedaba pintada pero el
+     caret (su final) seguía fuera de pantalla. El Ctrl+A interno del
+     control sí llamaba TV_ScrollCaret, pero es una rama muerta hoy (el
+     acelerador se come la tecla antes de que llegue al control). Ahora
+     el comando pasa también por TV_ScrollCaret.
+   - SIMPLIFICACIÓN: TV_WrapBreak RECIBE EL TEXTO. El helper del punto
+     de ruptura leía g_tv.pText por detrás (la última dependencia
+     global escondida dentro de un helper); los cinco consumidores le
+     pasan el puntero que ya tienen en la mano (pState->pText o
+     g_tv.pText, el mismo bloque en la práctica). El código generado no
+     cambia.
+   - SIMPLIFICACIÓN: TV_SyncState COMPARTE EL CICLO DE VIDA DE PINCELES.
+     Los gemelos crear/retirar del greenbar y de la banda de la línea
+     actual (dos ternarios espejo que solo podían divergir) viven ahora
+     en TV_SyncBrush(bOn, hbr, clr), idempotente.
+   - RECURSOS: IDD_WRAPWIDTH (131) y IDC_WRAP_COLS (1109) nuevos;
+     _APS_NEXT sube en consecuencia. El manifest sube a 5.9.13.0.0.
+   - El repaso del resto del fichero no encontró más errores: el ciclo
+     de vida del LoadJob (5.9.9), el índice de líneas en paralelo, el
+     fichero mapeado, la paginación, los diálogos y el teardown se
+     re-verificaron línea a línea. Las rutas calientes quedan como
+     están: el propio changelog documenta (5.9.10) que unificar los
+     walks de wrap toca la aritmética de filas y el riesgo no compensa.
+
+   Novedades de la versión 5.9.12 (REVISIÓN: COLUMNA DEL CARET + DEFENSA WRAP):
+   - FIX MENOR: AL SEMBRAR g_iCaretCol DESDE UN CARET SOBRE EL CR/LF, LA
+     COLUMNA DESEADA INCLUÍA LOS CARACTERES INVISIBLES DEL FINAL DE LÍNEA.
+     VK_RIGHT puede dejar el caret encima del \r o del \n; el primer
+     VK_UP/VK_DOWN tomaba iSelEnd - iLS como columna preferida y esa
+     columna "fantasma" sobrevivía a saltos verticales (inofensivo por el
+     clamp a iDE de la línea destino, pero no es la semántica de los
+     editores: la columna deseada es la del último carácter visible).
+     Ahora el seed se recorta con TV_DispEnd de la línea actual.
+   - DEFENSA: TV_WrapChars devuelve al menos 1 cuando calcula desde el
+     ancho de cliente (iClientWidth / iHexCharW). HitTest y el gutter ya
+     pinzaban el resultado; PositionCaret y WM_PAINT no. Con una ventana
+     más estrecha que un carácter el cociente es 0 y el camino de wrap
+     degradaba a "sin wrap" de forma implícita. Un solo sitio, misma
+     pinza en todos los consumidores.
+   - El repaso del resto del fichero no encontró más errores. Ni menú ni
+     aceleradores ni diálogos ni IDs cambian. El manifest sube a 5.9.12.0.0.
+
+   Novedades de la versión 5.9.11 (REVISIÓN: PARIDAD DE TV_DispEnd + BUILD):
+   - SIMPLIFICACIÓN: VK_UP/VK_DOWN y VK_END usan TV_DispEnd. El refactoring
+     de 5.9.10 factorizó el recorte del rabo CR/LF ("display end") en
+     TV_DispEnd desde SIETE sitios, pero dejó DOS sitios más en
+     TextViewProc —los manejadores de flechas verticales y de End— con la
+     misma aritmética inline: cuatro líneas idénticas que solo podían
+     divergir. Ahora son una llamada al helper; el compilador la inlinea y
+     el código generado no cambia.
+   - BUILD: el .vcxproj corrige PlatformToolset v145 → v143 (v145 no
+     existe; v143 es el toolset de VS2022). Las configuraciones Debug
+     ganan los preprocessor defines que solo tenía Release (NOMINMAX,
+     _WIN32_WINNT=0x0601, WIN32_LEAN_AND_MEAN, PSAPI_VERSION=2) y
+     LanguageStandard stdcpp17, sin el cual los magic statics thread-safe
+     (HexDigits, HexPairs, EbcdicTable, CtrlMap, LocaleInfo) no están
+     garantizados en Debug.
+   - El repaso del resto del fichero no encontró más errores: ni menú ni
+     aceleradores ni diálogos ni IDs cambian. El manifest sube a 5.9.11.0.0.
+
+   Novedades de la versión 5.9.10 (LIMPIEZA: UN SOLO SITIO PARA CADA ARITMÉTICA):
+   - SIMPLIFICACIÓN: TV_DispEnd(pText, iLS, iLE). El recorte del rabo CR/LF
+     ("display end" de una línea lógica) vivía copiado en SIETE sitios
+     (posicionamiento del caret, hit test, WM_PAINT y gutter): catorce líneas
+     idénticas que solo podían divergir. Ahora es UNA función static; el
+     compilador la inlinea y el código generado no cambia.
+   - SIMPLIFICACIÓN: TV_WrapChars(iWrapWidth, iClientWidth). El ternario del
+     ancho de wrap en caracteres (fijo del usuario o ancho de cliente sobre
+     la rejilla) vivía copiado en CUATRO sitios (caret, hit test, WM_PAINT y
+     gutter). Un helper, sin cambio de comportamiento (la pinza < 1 se queda
+     donde estaba).
+   - SIMPLIFICACIÓN: TV_SetText ya no llama TV_UpdateScrollRanges después de
+     TV_SyncState: desde 5.9.9 el final de TV_SyncState refresca los rangos,
+     y cada entrega ejecutaba la pasada DOS veces (idempotente, pero era
+     trabajo doble). ApplyEditorFont conserva su llamada propia (no pasa por
+     TV_SyncState).
+   - RENDIMIENTO: sin cambios en las rutas calientes. El repaso confirma lo
+     que el changelog ya documenta: índice de líneas en el worker con
+     wmemchr SIMD, pintado en una pasada con ETO_OPAQUE, gutter en UN
+     PolyTextOutW, búsqueda binaria con memo LRU en TV_LineFromChar. Los
+     walks de wrap duplicados entre TV_HitTest/TV_PositionCaret/PaintGutter
+     se dejan como están: unificarlos toca la aritmética de filas y el
+     riesgo no compensa.
+
+   Novedades de la versión 5.9.9 (REVISIÓN: CORRUPCIÓN DE PILA + DOBLE FREE + GUTTER HEX + SCROLL):
+   - CRÍTICO: ESCRITURA FUERA DEL ARRAY EN EL ÍNDICE PARALELO. El array
+     aOrphan[3] de TVIndexRunRounds se indexa por TROZO (k = 1..nChunks-1),
+     no por hueco de worker: con 4 trozos y un fallo de _beginthreadex en el
+     último, la marca del trozo huérfano escribía y leía aOrphan[3], un byte
+     PAST el final (corrupción de pila). El array vale ahora 4 entradas,
+     una por trozo posible. En la práctica normal (ningún fallo de hilo) el
+     código generado es idéntico.
+   - CRÍTICO: DOBLE LIBERACIÓN DEL JOB SI LA VENTANA MUERE EN LA CARRERA.
+     LoadThreadProc borraba el job en cuanto PostMessage(WM_APP_LOADDONE)
+     fallaba, pero WM_DESTROY también lo borra tras el join del worker: si
+     la ventana muere entre el check de LoadCancelled() del worker y el
+     post (cola llena o ventana ya muerta), el job se liberaba DOS veces.
+     Ahora el worker reintenta el post 20 veces x 100 ms (una cola llena es
+     transitoria) y, si se rinde SIN cancelación, marca la bandera global
+     g_bLoadJobWorkerFreed ANTES del delete (el job puede ya no existir
+     cuando WM_DESTROY la lea) y solo entonces lo libera; si hubo
+     cancelación, nunca libera (el dueño tras el join es la UI). WM_DESTROY
+     borra g_pJob solo si la bandera sigue a 0. BeginLoadJob la resetea a 0
+     (un job cada vez, hilo UI).
+   - FIX: LA COLUMNA DE OFFSETS HEX FALTABA EN LA PRIMERA CARGA. PaintGutter
+     exigía pFileBytes != nullptr para pintar la vista hex, pero durante la
+     etapa de preview (WM_APP_LOADPREVIEW) los bytes crudos aún no llegaron:
+     la columna de offsets tardaba en aparecer hasta terminar la página. El
+     pintor hex solo usa cbFile y g_qwBase: el guard mira ahora cbFile == 0
+     (y Line Numbers solo para las vistas de texto).
+   - FIX: SCROLL VERTICAL DESFASADO TRAS ALTERNAR WRAP. TV_SyncState cambia
+     el estilo WS_HSCROLL con SWP_FRAMECHANGED | SWP_NOSIZE, que NO dispara
+     WM_SIZE: la página de SB_VERT quedaba medida con el alto de cliente
+     ANTERIOR y el pulgar iba una línea desfasado hasta el próximo resize.
+     TV_SyncState refresca ahora los rangos al final (TV_UpdateScrollRanges,
+     idempotente: TV_SetText ya la llama después de su propio sync).
+   - El repaso del resto del fichero no encontró más errores: ni menú ni
+     aceleradores ni diálogos ni IDs cambian. El manifest sube a 5.9.9.0.0.
 
    Novedades de la versión 5.9.8 (REVISIÓN DETALLADA: NÚMEROS EN WRAP + SCROLL HONESTO):
    - FIX: LOS NÚMEROS DE LÍNEA SE DESALINEABAN EN WORD WRAP. La columna
@@ -1414,7 +1557,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"5.9.8"
+#define APP_VERSION L"5.9.13"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -1708,6 +1851,11 @@ struct LoadJob
 LoadJob* g_pJob = nullptr;                      // != nullptr while a load is in flight
 HANDLE g_hLoadThread = nullptr;                 // handle of the load worker (async mode)
 volatile LONG g_bLoadCancel = 0;                // set by the UI to stop the worker
+// 5.9.9: set by the load worker itself right before it deletes the job after a
+// failed WM_APP_LOADDONE post. Lives OUTSIDE the job (the job may already be
+// freed when WM_DESTROY reads it). BeginLoadJob resets it to 0 (one job at a
+// time, UI thread); WM_DESTROY deletes g_pJob only if the worker did not.
+volatile LONG g_bLoadJobWorkerFreed = 0;
 static unsigned int s_uLoadSeq = 0;             // 3.08: grows by one per job (UI thread only)
 
 // 3.08: the load worker's first paint (WM_APP_LOADPREVIEW). One small
@@ -2186,9 +2334,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             TV_Copy();
             break;
         case ID_SELECTALL:
-            // 5.4: the custom control serves every view
+            // 5.4: the custom control serves every view. 5.9.13: the caret
+            // (the END of the selection) comes into view, like the Ctrl+A
+            // branch of the control — a branch dead today, because the
+            // accelerator consumes the key before it reaches the control:
+            // this menu path is the only Select All that ever runs.
             TV_SetSel(0, TV_GetTextLength());
-            UpdateStatusBar();
+            TV_ScrollCaret();       // 5.9.13: scrolls, positions the caret
+            UpdateStatusBar();      // (ScrollCaret already does; explicit for its empty-view early-outs)
             break;
         case ID_FIND:
             OpenFindDialog(hWnd);
@@ -2704,7 +2857,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     // now nullptr, never dereferenced) and the LoadJob
                     // destructor releases any buffer the worker had
                     // already filled.
-                    delete g_pJob;
+                    // 5.9.9: EXCEPT when the worker itself freed the job
+                    // after a failed done-post (window already gone): it
+                    // sets g_bLoadJobWorkerFreed before the delete, so a
+                    // second delete here would be a double free. The flag
+                    // is read AFTER the successful join, so the worker's
+                    // store is visible.
+                    if (InterlockedCompareExchange(&g_bLoadJobWorkerFreed, 0, 0) == 0)
+                    {
+                        delete g_pJob;
+                    }
                 }
                 // If the worker is still stuck (a dead network path, say),
                 // abandon the job instead of hanging the exit: the process
@@ -3036,6 +3198,7 @@ LoadJob* BeginLoadJob(bool bStdin)
     pJob->hWnd = hWndMain;
     pJob->uSeq = ++s_uLoadSeq;              // 3.08: every message of this job carries it
     InterlockedExchange(&g_bLoadCancel, 0);  // 3.20: interlocked for consistency + memory barrier
+    InterlockedExchange(&g_bLoadJobWorkerFreed, 0); // 5.9.9: reset per job (one job at a time, UI thread)
     return(pJob);
 }
 
@@ -3119,9 +3282,30 @@ unsigned __stdcall LoadThreadProc(void* pParameter)
     // 3.20: check PostMessage return — if the queue is full or the window
     // is gone, the job would leak and g_pJob would stay non-null forever,
     // wedging every subsequent load with "Still loading the previous file".
+    // 5.9.9: a full queue is transient, so retry for up to 2 s before giving
+    // up. And when the post finally fails because the window DIED, WM_DESTROY
+    // is about to (or already did) wait for this thread and then delete the
+    // job: freeing it here too would be a double free. The worker marks
+    // g_bLoadJobWorkerFreed BEFORE the delete (the job itself may be gone when
+    // WM_DESTROY reads the flag) and never frees when it was cancelled — a
+    // cancel always means the UI thread owns the job after the join.
     if (!PostMessage(pJob->hWnd, WM_APP_LOADDONE, 0, (LPARAM)pJob))
     {
-        delete pJob;                    // nobody will adopt it: free here
+        int nRetry = 0;
+        while (!LoadCancelled() && nRetry < 20)
+        {
+            Sleep(100);                     // let the UI queue drain
+            nRetry++;
+            if (PostMessage(pJob->hWnd, WM_APP_LOADDONE, 0, (LPARAM)pJob))
+            {
+                return 0;                   // delivered on a retry: UI frees it
+            }
+        }
+        if (!LoadCancelled())
+        {
+            InterlockedExchange(&g_bLoadJobWorkerFreed, 1);
+            delete pJob;                    // nobody will adopt it: free here
+        }
     }
     return 0;                               // the exit code is never inspected
 }
@@ -5285,7 +5469,10 @@ static unsigned __stdcall TVIndexFillProc(void* pParam)
 static void TVIndexRunRounds(TVIndexChunk* aC, int nChunks, unsigned (__stdcall* pProc)(void*))
 {
     HANDLE aH[3];                           // nChunks <= 4: at most 3 workers
-    bool aOrphan[3] = { false, false, false };
+    // 5.9.9: indexed by CHUNK (k = 1..nChunks-1), not by worker slot — the
+    // old bool[3] was written and read at aOrphan[3] when the 4th chunk's
+    // thread creation failed: one byte past the end of the array (stack UB).
+    bool aOrphan[4] = { false, false, false, false };
     int cH = 0;
     for (int k = 1; k < nChunks; k++)
     {
@@ -5500,8 +5687,28 @@ void TV_SetText(WCHAR* pText, int cch, int* pLineStarts, int cLines, int iMaxLin
         g_tv.cLines = cLines;
         g_tv.iMaxLineChars = iMaxLine;
     }
-    TV_SyncState();            // wrap/style/brush in step with the new view
-    TV_UpdateScrollRanges();   // 5.7: the one ranges helper
+    TV_SyncState();            // wrap/style/brush in step with the new view;
+                               // 5.9.10: its tail already refreshes the scroll
+                               // ranges (the 5.9.9 fix), so the explicit
+                               // TV_UpdateScrollRanges() call here was a
+                               // redundant second pass on every delivery.
+}
+
+// 5.9.13: the create/retire half of the two flag-tied brushes (greenbar,
+// current-line band) spelled once. Idempotent: the brush exists iff its
+// flag is on. The bookmark brushes live outside this pair: bookmarks come
+// and go OUTSIDE TV_SyncState (F2, page loads, view switches).
+static void TV_SyncBrush(bool bOn, HBRUSH& rhbr, COLORREF clr)
+{
+    if (bOn && rhbr == nullptr)
+    {
+        rhbr = CreateSolidBrush(clr);
+    }
+    else if (!bOn && rhbr != nullptr)
+    {
+        DeleteObject(rhbr);
+        rhbr = nullptr;
+    }
 }
 
 void TV_SyncState(void)
@@ -5533,27 +5740,11 @@ void TV_SyncState(void)
     // la PRIMERA carga sin franjas (hbrGreen quedaba null) hasta que el
     // usuario alternaba la opcion dos veces.
     g_tv.bGreenbar = g_bGreenbar;
-    if (g_tv.bGreenbar && g_tv.hbrGreen == nullptr)
-    {
-        g_tv.hbrGreen = CreateSolidBrush(RGB(0xE8, 0xF0, 0xE8));
-    }
-    else if (!g_tv.bGreenbar && g_tv.hbrGreen != nullptr)
-    {
-        DeleteObject(g_tv.hbrGreen);
-        g_tv.hbrGreen = nullptr;
-    }
+    TV_SyncBrush(g_tv.bGreenbar, g_tv.hbrGreen, RGB(0xE8, 0xF0, 0xE8));
     // 5.8: the current-line band brush lives and dies here too, with the
     // flag that uses it (same lifecycle as the greenbar brush).
     g_tv.bHilite = g_bHiliteLine;
-    if (g_tv.bHilite && g_tv.hbrHilite == nullptr)
-    {
-        g_tv.hbrHilite = CreateSolidBrush(RGB(0xFF, 0xF0, 0xB0));   // soft yellow: readable under both text colors
-    }
-    else if (!g_tv.bHilite && g_tv.hbrHilite != nullptr)
-    {
-        DeleteObject(g_tv.hbrHilite);
-        g_tv.hbrHilite = nullptr;
-    }
+    TV_SyncBrush(g_tv.bHilite, g_tv.hbrHilite, RGB(0xFF, 0xF0, 0xB0));   // soft yellow: readable under both text colors
     // 5.9: the bookmarked-line brush is created once and lives for the
     // session: bookmarks come and go OUTSIDE TV_SyncState (F2, page loads,
     // view switches), so unlike the greenbar brush it cannot be tied to a
@@ -5562,6 +5753,12 @@ void TV_SyncState(void)
     {
         g_tv.hbrBookmark = CreateSolidBrush(RGB(0xB8, 0xD4, 0xF0));   // soft blue, readable under black text
     }
+    // 5.9.9: the frame change above (SWP_FRAMECHANGED with SWP_NOSIZE) does
+    // NOT fire WM_SIZE, so the SB_VERT page kept the client height measured
+    // BEFORE the HSCROLL style came or went: after toggling wrap the thumb
+    // was one line off until the next resize. Refresh the ranges here;
+    // idempotent (TV_SetText calls it again after its own sync).
+    TV_UpdateScrollRanges();
     g_tv.iPaintedCurLine = -1;   // 5.8: no band on screen yet after any state sync
 }
 
@@ -5622,15 +5819,50 @@ int TV_LineIndex(int iLine)
 static void TV_ScrollRows(HWND hWnd, TextViewState* pState, int iNewFirst);
 static void TV_ScrollX(HWND hWnd, TextViewState* pState, int iNewX);
 
-static int TV_WrapBreak(int iPos, int iLineEnd, int iMaxChars)
+static int TV_WrapBreak(const WCHAR* pText, int iPos, int iLineEnd, int iMaxChars)
 {
     int cch = iLineEnd - iPos;
     if (iMaxChars <= 0 || cch <= iMaxChars) return iLineEnd;
     for (int i = iPos + iMaxChars; i > iPos; i--)
     {
-        if (g_tv.pText[i] == L' ' || g_tv.pText[i] == L'\t') return i + 1;
+        if (pText[i] == L' ' || pText[i] == L'\t') return i + 1;
     }
     return iPos + iMaxChars;
+}
+
+// 5.9.10: the display end of a logical line [iLS, iLE): the range minus its
+// CR/LF tail. The same two ifs lived copied at seven call sites (caret
+// positioning, hit testing, WM_PAINT, the gutter); one helper keeps the
+// arithmetic in ONE place. static: the compiler inlines it, the generated
+// code does not change.
+static int TV_DispEnd(const WCHAR* pText, int iLS, int iLE)
+{
+    int iDE = iLE;
+    if (iDE > iLS && pText[iDE - 1] == L'\n') iDE--;
+    if (iDE > iLS && pText[iDE - 1] == L'\r') iDE--;
+    return(iDE);
+}
+
+// 5.9.10: the wrap width in characters: the fixed width the user chose, or
+// the client width on the character grid. The same ternary lived at four
+// call sites (caret, hit test, WM_PAINT, gutter); one helper, no behavior
+// change (the < 1 clamp stays at the two sites that had it).
+static int TV_WrapChars(int iWrapWidth, int iClientWidth)
+{
+    // 5.9.12: fixed width wins; otherwise client width on the character
+    // grid, never less than 1 (a window narrower than one cell used to
+    // yield 0 and the wrap path silently degraded). Callers that already
+    // clamped stay correct; PositionCaret / WM_PAINT gain the same floor.
+    if (iWrapWidth > 0)
+    {
+        return iWrapWidth;
+    }
+    if (iHexCharW <= 0)
+    {
+        return 1;
+    }
+    int n = iClientWidth / iHexCharW;
+    return (n < 1) ? 1 : n;
 }
 
 // V5: position the caret based on iSelEnd. Computes (x, y) by walking
@@ -5650,7 +5882,7 @@ static void TV_PositionCaret(void)
     int iMaxChars = 0;
     if (g_tv.bWrap)
     {
-        iMaxChars = (g_tv.iWrapWidth > 0) ? g_tv.iWrapWidth : (rc.right / iHexCharW);
+        iMaxChars = TV_WrapChars(g_tv.iWrapWidth, rc.right);   // 5.9.10: one helper
     }
 
     // Walk visible lines to find the visual row containing the caret.
@@ -5672,9 +5904,7 @@ static void TV_PositionCaret(void)
                 // 5.9.3 shortcut drew it past the last visible char instead.
                 // Same arithmetic as every other iDE in this file.
                 int iLE = (iCaretLine + 1 < g_tv.cLines) ? g_tv.pLineStarts[iCaretLine + 1] : g_tv.cch;
-                int iDE = iLE;
-                if (iDE > iLineStart && g_tv.pText[iDE - 1] == L'\n') iDE--;
-                if (iDE > iLineStart && g_tv.pText[iDE - 1] == L'\r') iDE--;
+                int iDE = TV_DispEnd(g_tv.pText, iLineStart, iLE);   // 5.9.10: one helper
                 if (iCaret <= iDE)
                 {
                     SetCaretPos((iCaret - iLineStart) * iHexCharW - g_tv.iScrollX, y);
@@ -5698,9 +5928,7 @@ static void TV_PositionCaret(void)
     {
         int iLS = TV_LineIndex(iLine);
         int iLE = (iLine + 1 < g_tv.cLines) ? g_tv.pLineStarts[iLine + 1] : g_tv.cch;
-        int iDE = iLE;
-        if (iDE > iLS && g_tv.pText[iDE - 1] == L'\n') iDE--;
-        if (iDE > iLS && g_tv.pText[iDE - 1] == L'\r') iDE--;
+        int iDE = TV_DispEnd(g_tv.pText, iLS, iLE);   // 5.9.10: one helper
 
         if (iLine == iCaretLine)
         {
@@ -5708,7 +5936,7 @@ static void TV_PositionCaret(void)
             int iPos = iLS;
             while (iPos <= iDE && y < rc.bottom)
             {
-                int iCE = (g_tv.bWrap && iMaxChars > 0) ? TV_WrapBreak(iPos, iDE, iMaxChars) : iDE;
+                int iCE = (g_tv.bWrap && iMaxChars > 0) ? TV_WrapBreak(g_tv.pText, iPos, iDE, iMaxChars) : iDE;
                 if (iCE > iDE) iCE = iDE;
                 if (iCaret >= iPos && iCaret <= iCE)
                 {
@@ -5729,7 +5957,7 @@ static void TV_PositionCaret(void)
         {
             cRows = 0;
             int iPos = iLS;
-            while (iPos < iDE) { iPos = TV_WrapBreak(iPos, iDE, iMaxChars); cRows++; }
+            while (iPos < iDE) { iPos = TV_WrapBreak(g_tv.pText, iPos, iDE, iMaxChars); cRows++; }
             if (cRows < 1) cRows = 1;
         }
         y += cRows * iHexLineH;
@@ -6000,24 +6228,20 @@ static int TV_HitTest(TextViewState* pState, int x, int y)
         if (iLine >= pState->cLines) iLine = pState->cLines - 1;   // past the end: last line
         int iLS = pState->pLineStarts[iLine];
         int iLE = (iLine + 1 < pState->cLines) ? pState->pLineStarts[iLine + 1] : pState->cch;
-        int iDE = iLE;
-        if (iDE > iLS && pState->pText[iDE - 1] == L'\n') iDE--;
-        if (iDE > iLS && pState->pText[iDE - 1] == L'\r') iDE--;
+        int iDE = TV_DispEnd(pState->pText, iLS, iLE);   // 5.9.10: one helper
         int iPos = iLS + iCol;
         return (iPos > iDE) ? iDE : iPos;
     }
     // wrap: walk the visible lines counting their visual rows
     RECT rc;
     if (!GetClientRect(pState->hWnd, &rc)) return 0;
-    int iMaxChars = (pState->iWrapWidth > 0) ? pState->iWrapWidth : (rc.right / iHexCharW);
+    int iMaxChars = TV_WrapChars(pState->iWrapWidth, rc.right);   // 5.9.10: one helper
     if (iMaxChars < 1) iMaxChars = 1;
     for (int iLine = pState->iFirstVisible; iLine < pState->cLines; iLine++)
     {
         int iLS = pState->pLineStarts[iLine];
         int iLE = (iLine + 1 < pState->cLines) ? pState->pLineStarts[iLine + 1] : pState->cch;
-        int iDE = iLE;
-        if (iDE > iLS && pState->pText[iDE - 1] == L'\n') iDE--;
-        if (iDE > iLS && pState->pText[iDE - 1] == L'\r') iDE--;
+        int iDE = TV_DispEnd(pState->pText, iLS, iLE);   // 5.9.10: one helper
         if (iDE <= iLS)
         {
             // empty line: one visual row
@@ -6028,7 +6252,7 @@ static int TV_HitTest(TextViewState* pState, int x, int y)
         int iPos = iLS;
         while (iPos < iDE)
         {
-            int iCE = TV_WrapBreak(iPos, iDE, iMaxChars);
+            int iCE = TV_WrapBreak(pState->pText, iPos, iDE, iMaxChars);
             if (iCE > iDE) iCE = iDE;
             if (iCE <= iPos) iCE = iPos + 1;
             if (iRow == 0)
@@ -6043,10 +6267,7 @@ static int TV_HitTest(TextViewState* pState, int x, int y)
     // clicked below every visible row: the end of the last line
     int iLast = pState->cLines - 1;
     int iLS = pState->pLineStarts[iLast];
-    int iLE = pState->cch;
-    int iDE = iLE;
-    if (iDE > iLS && pState->pText[iDE - 1] == L'\n') iDE--;
-    if (iDE > iLS && pState->pText[iDE - 1] == L'\r') iDE--;
+    int iDE = TV_DispEnd(pState->pText, iLS, pState->cch);   // 5.9.10: one helper
     return iDE;
 }
 
@@ -6093,7 +6314,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
 
         // V5: compute wrap width once
         int iMaxChars = 0;
-        if (pState->bWrap) iMaxChars = (pState->iWrapWidth > 0) ? pState->iWrapWidth : (rc.right / iHexCharW);
+        if (pState->bWrap) iMaxChars = TV_WrapChars(pState->iWrapWidth, rc.right);   // 5.9.10: one helper
         int iSelLo = TV_LoI(pState->iSelStart, pState->iSelEnd);
         int iSelHi = TV_HiI(pState->iSelStart, pState->iSelEnd);
         int iScrollX = pState->iScrollX;
@@ -6142,10 +6363,8 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         for (int iLine = iLine0; iLine < pState->cLines && y < yBottom; iLine++)
         {
             int iLineStart = pState->pLineStarts[iLine];
-            int iLineEnd = (iLine + 1 < pState->cLines) ? pState->pLineStarts[iLine + 1] : pState->cch;
-            int iDispEnd = iLineEnd;
-            if (iDispEnd > iLineStart && pState->pText[iDispEnd - 1] == L'\n') iDispEnd--;
-            if (iDispEnd > iLineStart && pState->pText[iDispEnd - 1] == L'\r') iDispEnd--;
+            int iLE = (iLine + 1 < pState->cLines) ? pState->pLineStarts[iLine + 1] : pState->cch;
+            int iDispEnd = TV_DispEnd(pState->pText, iLineStart, iLE);   // 5.9.10: one helper
 
             // V5: greenbar background for this logical line; 5.8: the
             // caret line wins the band when the option is on; 5.9: a
@@ -6200,7 +6419,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             {
                 while (iPos < iDispEnd && y < yBottom)
                 {
-                    int iChunkEnd = (pState->bWrap && iMaxChars > 0) ? TV_WrapBreak(iPos, iDispEnd, iMaxChars) : iDispEnd;
+                    int iChunkEnd = (pState->bWrap && iMaxChars > 0) ? TV_WrapBreak(pState->pText, iPos, iDispEnd, iMaxChars) : iDispEnd;
                     if (iChunkEnd > iDispEnd) iChunkEnd = iDispEnd;
                     if (iChunkEnd <= iPos) iChunkEnd = iPos + 1;   // safety: always advance
                     int cchChunk = iChunkEnd - iPos;
@@ -6371,15 +6590,24 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             if (iT < 0 || iT >= pState->cLines) return 0;
             if (g_iCaretCol < 0)
             {
-                g_iCaretCol = pState->iSelEnd - TV_LineIndex(iL);
-                if (g_iCaretCol < 0) g_iCaretCol = 0;
+                // 5.9.12: preferred column is relative to the DISPLAY end of
+                // the current line. A caret parked on the CR/LF (reachable
+                // with VK_RIGHT) must not seed a phantom column past the
+                // last visible character — editors keep the visible column.
+                int iLS0 = TV_LineIndex(iL);
+                int iN0 = TV_LineIndex(iL + 1);
+                int iLE0 = (iN0 < 0) ? pState->cch : iN0;
+                int iDE0 = TV_DispEnd(pState->pText, iLS0, iLE0);
+                int iCol = pState->iSelEnd - iLS0;
+                if (iCol < 0) iCol = 0;
+                if (iLS0 >= 0 && iCol > iDE0 - iLS0) iCol = iDE0 - iLS0;
+                if (iCol < 0) iCol = 0;
+                g_iCaretCol = iCol;
             }
             int iLS2 = TV_LineIndex(iT);
             int iN2 = TV_LineIndex(iT + 1);
             int iLE2 = (iN2 < 0) ? pState->cch : iN2;
-            int iDE2 = iLE2;
-            if (iDE2 > iLS2 && pState->pText[iDE2 - 1] == L'\n') iDE2--;
-            if (iDE2 > iLS2 && pState->pText[iDE2 - 1] == L'\r') iDE2--;
+            int iDE2 = TV_DispEnd(pState->pText, iLS2, iLE2);   // 5.9.11: one helper (was inline CR/LF strip)
             int iPos = iLS2 + g_iCaretCol;
             if (iPos > iDE2) iPos = iDE2;
             pState->iSelEnd = iPos;
@@ -6396,7 +6624,15 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             return 0;
         case VK_END:
             if (bCtrl) { JumpFilePage(true); return 0; }   // 5.4: last page (lived in EditSubclassProc)
-            { int iL = TV_LineFromChar(pState->iSelEnd); int iN = TV_LineIndex(iL + 1); pState->iSelEnd = (iN < 0) ? pState->cch : iN; if (pState->iSelEnd > 0 && pState->pText[pState->iSelEnd - 1] == L'\n') pState->iSelEnd--; if (pState->iSelEnd > 0 && pState->pText[pState->iSelEnd - 1] == L'\r') pState->iSelEnd--; }
+            {
+                // 5.9.11: TV_DispEnd (was inline CR/LF strip — same arithmetic,
+                // one source of truth instead of a copy that could drift).
+                int iL = TV_LineFromChar(pState->iSelEnd);
+                int iLS = TV_LineIndex(iL);
+                int iLE = (iL + 1 < pState->cLines) ? TV_LineIndex(iL + 1) : pState->cch;
+                if (iLS < 0) iLS = 0;
+                pState->iSelEnd = TV_DispEnd(pState->pText, iLS, iLE);
+            }
             if (!bShift) pState->iSelStart = pState->iSelEnd;
             g_iCaretCol = -1;
             TV_ScrollCaret();
@@ -8544,7 +8780,17 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
         }
     }
     bool bFound = false, bCancel = false;
+    bool bScanError = false;               // 5.9.13: the scan raised an exception mid-way
     ULONGLONG qwNextPost = GetTickCount64() + 100;
+    // 5.9.13: SEH jacket around BOTH scan loops. A mapped view can raise
+    // EXCEPTION_IN_PAGE_ERROR at any touch of its pages (a bad sector, a
+    // network file that vanished mid-scan); the load worker catches that
+    // in LoadThreadProc's jacket, but this thread had none and the process
+    // died with the "4More must close" box. All locals here are POD, so
+    // the MSVC no-unwinding rule is met; on the audit bench the statements
+    // map to if (1) / else if (0) as always.
+    __try
+    {
     if (pView != nullptr)
     {
         ULONGLONG qwPos = 0;                      // file offset of the slice being scanned
@@ -8625,6 +8871,15 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
         bCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
     }
     }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        // 5.9.13: EXCEPTION_IN_PAGE_ERROR (or any other fault) while
+        // scanning. The handles and the buffer stay owned by the cleanup
+        // below; report "could not scan" (2) — the honest part, never a
+        // silent "not found".
+        bScanError = true;
+    }
     delete[] pBuf;
     if (pView != nullptr)
     {
@@ -8637,7 +8892,7 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
     CloseHandle(hFile);
     // 5.2: PostSearchDone retries the post; if it still fails, the ESC
     // handlers reap the finished worker and re-open the gate.
-    PostSearchDone(bFound ? 1 : (bCancel ? 0 : 0xFFFFFFFF));
+    PostSearchDone(bFound ? 1 : (bCancel ? 0 : (bScanError ? 2 : 0xFFFFFFFF)));   // 5.9.13: the scan-error part joins the mapping
     return(0);
 }
 
@@ -8984,7 +9239,15 @@ void PaintGutter(void)
     {
         return;
     }
-    if (bHex ? (pFileBytes == nullptr || cbFile == 0) : !g_bLineNums)
+    // 5.9.9: hex needs only cbFile (offsets come from g_qwBase + row arithmetic),
+    // not the raw bytes: pFileBytes stays null during the preview stage of a
+    // first load, so the offsets column used to be missing until the page
+    // finished loading. Text views still need the Line Numbers flag.
+    if (cbFile == 0)
+    {
+        return;
+    }
+    if (!bHex && !g_bLineNums)
     {
         return;
     }
@@ -9070,7 +9333,7 @@ void PaintGutter(void)
     int iMaxCharsGut = 0;
     if (bWrapGut)
     {
-        iMaxCharsGut = (g_tv.iWrapWidth > 0) ? g_tv.iWrapWidth : (rcEdit.right / iHexCharW);
+        iMaxCharsGut = TV_WrapChars(g_tv.iWrapWidth, rcEdit.right);   // 5.9.10: one helper
         if (iMaxCharsGut < 1) iMaxCharsGut = 1;
     }
     // 5.8: bookmark dots. g_pBookmarks is page-relative and SORTED and the
@@ -9198,15 +9461,13 @@ void PaintGutter(void)
             if (iLS < 0) iLS = 0;
             int iN = TV_LineIndex(iLine + 1);
             int iLE = (iN < 0) ? TV_GetTextLength() : iN;
-            int iDE = iLE;
-            if (iDE > iLS && g_tv.pText[iDE - 1] == L'\n') iDE--;
-            if (iDE > iLS && g_tv.pText[iDE - 1] == L'\r') iDE--;
+            int iDE = TV_DispEnd(g_tv.pText, iLS, iLE);   // 5.9.10: one helper
             int cRows = 1;
             if (iDE > iLS)
             {
                 cRows = 0;
                 int iPos = iLS;
-                while (iPos < iDE) { iPos = TV_WrapBreak(iPos, iDE, iMaxCharsGut); cRows++; }
+                while (iPos < iDE) { iPos = TV_WrapBreak(g_tv.pText, iPos, iDE, iMaxCharsGut); cRows++; }
                 if (cRows < 1) cRows = 1;
             }
             y += cRows * iHexLineH;
@@ -9517,14 +9778,14 @@ INT_PTR CALLBACK WrapWidthProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
     switch (message)
     {
     case WM_INITDIALOG:
-        SetDlgItemTextW(hDlg, IDC_GOTO_EDIT, L"80");
-        SendDlgItemMessageW(hDlg, IDC_GOTO_EDIT, EM_SETSEL, 0, -1);
+        SetDlgItemTextW(hDlg, IDC_WRAP_COLS, L"80");
+        SendDlgItemMessageW(hDlg, IDC_WRAP_COLS, EM_SETSEL, 0, -1);
         return (INT_PTR)TRUE;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK)
         {
             WCHAR szVal[32];
-            GetDlgItemTextW(hDlg, IDC_GOTO_EDIT, szVal, _countof(szVal));
+            GetDlgItemTextW(hDlg, IDC_WRAP_COLS, szVal, _countof(szVal));
             // 5.9.1: ParseU64 does the parsing (its prototype is already in
             // sight at the top of the file): the hand-rolled digit loop
             // duplicated its walk and its overflow guard. Refused input
@@ -9548,7 +9809,10 @@ INT_PTR CALLBACK WrapWidthProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
 
 void WrapWidthDialog(HWND hWnd)
 {
-    DialogBox(hInst, MAKEINTRESOURCE(IDD_GOTO), hWnd, WrapWidthProc);
+    // 5.9.13: its own template (IDD_WRAPWIDTH). It reused IDD_GOTO since V4,
+    // so the user saw the "Go To" caption, the "Go to:" label, the Line/
+    // Offset radios (none of which belong here) and the Go To help text.
+    DialogBox(hInst, MAKEINTRESOURCE(IDD_WRAPWIDTH), hWnd, WrapWidthProc);
 }
 
 

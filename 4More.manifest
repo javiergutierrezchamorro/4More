@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="4More" version="3.15.0.0" processorArchitecture="*"/>
+  <assemblyIdentity type="win32" name="4More" version="5.9.4.0" processorArchitecture="*"/>
   <description>4More - read-only file viewer</description>
   <dependency>
     <dependentAssembly>

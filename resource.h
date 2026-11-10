@@ -42,6 +42,13 @@
 #define ID_VIEW_WRAP                    32804
 #define ID_VIEW_FONTPLUS                32805
 #define ID_VIEW_FONTMINUS               32806
+// V4: new view features (greenbar, ruler, wrap-to-width)
+#define ID_VIEW_GREENBAR                32817
+#define ID_VIEW_RULER                   32818
+#define ID_VIEW_WRAPWIDTH               32819
+// 5.8: opciones nuevas del menú View (banda de la línea actual, ESC to Exit)
+#define ID_VIEW_HILITE                  32820
+#define ID_VIEW_ESCEXIT                 32821
 // Recent Files (2.96): bloque contiguo de 10 IDs dinámicos, resuelto antes del switch WM_COMMAND (no hay case estático para ellos).
 #define ID_FILE_RECENT_FIRST            32807
 #define ID_FILE_RECENT_LAST             (ID_FILE_RECENT_FIRST + 9)
@@ -61,7 +68,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
 #define _APS_NEXT_RESOURCE_VALUE        131
-#define _APS_NEXT_COMMAND_VALUE         32817
+#define _APS_NEXT_COMMAND_VALUE         32822
 #define _APS_NEXT_CONTROL_VALUE         1109
 #define _APS_NEXT_SYMED_VALUE           110
 #endif

@@ -1,6 +1,453 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 3.20
+   Build 5.9.4
+
+   Novedades de la versión 5.9.4 (REVISIÓN: PARIDAD DEL CARET + FILA PARCIAL + UNA LLAMADA):
+   - BUG (regresión de 5.9.3): EL ATAJO DE TV_PositionCaret EN NO-WRAP NO
+     REPLICABA EL CASO DEL CARET SOBRE EL CR/LF. El atajo dibujaba el caret
+     pasado el último carácter visible cuando iSelEnd caía encima del \\r o
+     el \\n de su línea (alcanzable con las flechas); el camino antiguo
+     caía al fallback SetCaretPos(0, y): columna 0 de la fila. El atajo
+     calcula ahora el final visible de la línea (el mismo iDE de todo el
+     fichero) y replica el fallback exacto: cero cambio de comportamiento,
+     solo aritmética directa en el caso normal.
+   - OPTIMIZACIÓN: SALIDA TEMPRANA EN TV_PositionCaret CUANDO LA LÍNEA DEL
+     CARET ESTÁ ENCIMA DE LA VISTA (wrap). El bucle antiguo recorría todas
+     las líneas visibles contando filas para concluir que no estaba; ahora
+     sale sin recorrer nada.
+   - RENDIMIENTO: LA FILA DEL CARET SIN SELECCIÓN TAMBIÉN EN UNA LLAMADA.
+     La condición de la 5.9.3 enviaba la fila que contiene un caret
+     colapsado (selección vacía) al camino de tres partes, que dibujaba los
+     mismos píxeles con dos ExtTextOutW y un FillRect. Con
+     iSelLo < iSelHi en la condición, esa fila usa la llamada única.
+   - SIMPLIFICACIÓN: EL COLOR DE FILA SE ELIGE UNA VEZ COMO PAR
+     (pincel, COLORREF). Antes el pincel y el COLORREF de la llamada única
+     eran dos cadenas de ternarios paralelas que podían divergir; ahora el
+     COLORREF (clrBg) se elige junto al pincel (hbrBg) y la llamada única
+     lo consume. GetSysColor(COLOR_WINDOW) se consulta una vez por paint.
+   - BUG MENOR: TV_UpdateCurLine Y LAS FILAS PARCIALES. El recuento de
+     filas visibles usaba división entera (suelo) mientras el bucle de
+     pintado sí dibuja la última fila parcialmente visible: un cambio de
+     banda sobre esa fila no se invalidaba y la banda vieja persistía
+     hasta el siguiente repintado. Ahora cuenta la fila parcial (techo,
+     igual que TV_InvalidateSelPainted).
+
+   Novedades de la versión 5.9.3 (PINTADO EN UNA LLAMADA + CARET SIN BUCLE):
+   - RENDIMIENTO: CADA FILA PLANA SE PINTA CON UNA SOLA LLAMADA GDI. Antes
+     cada fila visual hacía FillRect (fondo) + ExtTextOutW (texto): dos
+     llamadas al sistema por fila. Ahora las filas SIN selección usan una
+     sola ExtTextOutW con ETO_OPAQUE: el rectángulo completo de la fila se
+     rellena con el color de fondo de la fila (bookmark, banda del caret,
+     greenbar o ventana, los mismos colores exactos que los pinceles
+     cacheados) y el texto se dibuja encima en la misma llamada. Las filas
+     que solapan con la selección conservan el camino de tres partes porque
+     su fondo no es uniforme. Un repintado completo de una ventana de 60
+     filas pasa de unas 120 llamadas GDI a unas 60.
+   - RENDIMIENTO: TV_PositionCaret SIN BUCLE EN MODO NO-WRAP. Esta función
+     corre al final de CADA WM_PAINT y antes recorría todas las líneas
+     visibles contando filas. En modo no-wrap cada línea lógica es
+     exactamente una fila visual, así que ahora es aritmética directa
+     (línea - primera visible) * alto de línea; el bucle solo queda en
+     wrap, donde es imprescindible. Era el último punto caliente por
+     repintado del caso común.
+   - EVALUADO Y DESCARTADO: DirectWrite. El control pinta texto
+     monoespaciado con avance fijo medido (iHexCharW) y una llamada por
+     fila, ya con CLEARTYPE_QUALITY en la fuente (Consolas). DirectWrite no
+     aceleraría ese camino: añadiría fábricas D2D/DWrite, layout por glifo
+     y rompería el blit directo de ScrollWindowEx y la matemática de
+     columnas x = col * iHexCharW, con reescritura grande del pintado para
+     una ganancia dudosa en texto monoespaciado. Queda documentado como
+     decisión, no como pendiente.
+
+   Novedades de la versión 5.9.2 (BOOKMARKS QUE SOBREVIVEN + SITIO GUARDADO + PINTA ANTES):
+   - USABILIDAD: LOS BOOKMARKS YA NO SE PIERDEN AL CAMBIAR DE VISTA. Antes
+     SetView borraba todos los bookmarks en cada cambio de codificación
+     (UTF a hex y vuelta, se perdían). Ahora cada bookmark es el PAR
+     (línea de la vista en pantalla, offset ABSOLUTO de fichero del primer
+     byte de la línea): el offset es el ancla que sobrevive al cambio y
+     RebindBookmarksToView recalcula las líneas de la vista que aterriza
+     (hex: /16; EBCDIC: una sola línea; texto: LineAtOffset). Dos offsets
+     que colapsen a la misma línea (dos líneas de texto dentro de una fila
+     hex) se funden en una. Los bookmarks siguen muriendo con la página
+     (un fichero o una página nueva re-basan los bytes).
+   - USABILIDAD: EL CAMBIO DE VISTA CONSERVA EL SITIO. El cambio de vista
+     reseteaba el caret al principio del texto. Ahora la línea del caret
+     se ancla a su offset de fichero ANTES de reconstruir y vuelve con
+     PositionAtOffset después: cambias de UTF a hex y el caret sigue en la
+     misma zona del fichero.
+   - BUG DE USABILIDAD: TOGGLE WRAP Y WRAP A ANCHO FIJO BORRABAN LOS
+     BOOKMARKS SIN MOTIVO. El ClearBookmarks venía de la 5.2 (el rewrap
+     renumeraba las líneas al re-decodificar); desde la 5.4 el wrap es de
+     PINTADO y las líneas lógicas no se renumeran, así que los dos
+     ClearBookmarks (ToggleWrap y SetWrapWidth) sobraron. Con F2 puestos,
+     alternar wrap ya no los borra.
+   - RENDIMIENTO PERCIBIDO: PINTAR ANTES. La entrega de contenido solo
+     invalidaba: el primer fotograma esperaba a la bomba de mensajes, por
+     detrás de la entrada ya encolada (el ratón del clic que lo disparó,
+     entre otra). DeliverTextToEdit hace ahora un UpdateWindow del control
+     y del marco al terminar: el contenido nuevo aparece en el acto (y el
+     paint del marco trae consigo gutter y regla), tanto en un cambio de
+     vista como cuando aterriza una página o un fichero.
+   - USABILIDAD: GO TO PREFILLA LA LÍNEA ACTUAL (antes siempre "1"): el
+     diálogo abre con la línea donde estás, preseleccionada para
+     sustituirla al teclear.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos ni IDs.
+     El manifest sube a 5.9.2.0.0.
+
+   Novedades de la versión 5.9.1 (REVISIÓN: GDI SIN DESPERDICIO + SIMPLIFICACIÓN):
+   - OPTIMIZACIÓN: PaintGutter ya no crea y destruye el pincel y el lápiz
+     de la bola de bookmark en CADA repintado (dos objetos GDI de más por
+     paint, más un par de SelectObject por cada fila marcada). Ahora se
+     crean UNA vez (la primera que hacen falta), viven en TextViewState
+     junto a hbrBookmark y se seleccionan una sola vez por repintado,
+     antes del bucle de filas. El repintado del gutter con bookmarks deja
+     de tocar el heap de GDI.
+   - SIMPLIFICACIÓN: el diálogo de Wrap Width usa ParseU64 (el prototipo
+     ya existía) en lugar de su bucle de dígitos a mano: misma validación
+     de desbordamiento, menos código duplicado. Entrada basura o mayor que
+     10000 sigue degradando igual (cap a 10000, o ancho fijo desactivado).
+   - SIN CAMBIOS DE RECURSOS ni de comportamiento visible: ni menú ni
+     aceleradores ni diálogos ni IDs. El manifest sube a 5.9.1.0.0.
+
+   Novedades de la versión 5.9 (LÍNEA DE BOOKMARK AZUL + BOLA EN HEX):
+   - NUEVO: LA LÍNEA MARCADA CON BOOKMARK SE PINTA CON FONDO AZUL, igual
+     que la banda de Highlight Current Line pero en azul suave. Es
+     SIEMPRE así: con Line Numbers o sin ellos, en las vistas de texto y
+     en la hex (el control es único y sirve todas las vistas). El WM_PAINT
+     lleva un cursor sobre g_pBookmarks (ordenada, como el del gutter):
+     el test de pertenencia cuesta O(1) amortizado por fila y el fondo
+     elegido es bookmark > banda del caret > greenbar > blanco (la
+     selección sigue pintando encima con su ETO_OPAQUE de siempre).
+   - NUEVO: LA BOLA AZUL TAMBIÉN EN MODO HEX. PaintGutter ya no limita la
+     bola a las vistas de texto: la dibuja siempre que el bookmark caiga
+     en una fila etiquetada de la columna, offsets incluidos. En las
+     vistas de texto sigue atada a Line Numbers (sin columna no hay dónde
+     dibujarla); en hex la columna existe siempre.
+   - El pincel azul vive en TV_SyncState (creación única, no atada a un
+     flag: los bookmarks entran y salen por F2 y por las cargas de página,
+     fuera del alcance de TV_SyncState).
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos ni IDs.
+     El manifest sube a 5.9.0.0.
+
+   Novedades de la versión 5.8 (FOCO DE DIÁLOGOS + MARCAS VISUALES + OPCIONES):
+   - BUG: EL FOCO SE QUEDABA EN EL EDIT TRAS UNA BÚSQUEDA. SearchNext hacía
+     SetFocus(hEdit) al encontrar una coincidencia, así que con el diálogo
+     Find abierto el ESC (y cualquier tecla) iba al visor y no al diálogo.
+     Ahora el foco solo vuelve al control si el diálogo Find NO está
+     abierto; y como cinturón, los dos manejadores de ESC cierran el
+     diálogo Find si sigue abierto ANTES de mirar la salida del programa.
+   - NUEVO: LOS BOOKMARKS SE VEN. Con Line Numbers activo, PaintGutter
+     dibuja un círculo azul en la zona izquierda de la columna junto a
+     cada línea marcada (antes F2 no dejaba rastro visual alguno).
+     ToggleBookmark marca la columna como sucia y repinta: el círculo
+     aparece/desaparece al instante. F2 ya alternaba (poner/quitar);
+     sigue haciéndolo, ahora a la vista.
+   - NUEVO: VIEW > HIGHLIGHT CURRENT LINE (ID_VIEW_HILITE, INI
+     "HighlightLine", por defecto OFF). El WM_PAINT del control rellena
+     toda la línea del caret con un amarillo suave (pincel cacheado en
+     TV_SyncState, como el greenbar). TV_UpdateCurLine (llamado desde
+     TV_InvalidateSelPainted, por donde pasa CUALQUIER cambio de
+     selección/caret) invalida solo las filas de la línea que pierde y
+     la que gana la banda; en wrap invalida el control entero (las filas
+     por línea varían).
+   - NUEVO: VIEW > ESC TO EXIT (ID_VIEW_ESCEXIT, INI "EscExit", por
+     defecto ON, como siempre funcionó). Con la opción OFF, ESC solo
+     cancela una búsqueda de bytes o cierra el diálogo Find: la salida
+     queda en Alt+X (nuevo acelerador de File > Exit), Alt+F4 o menú.
+   - NUEVO: ALT+X = FILE > EXIT. Fila nueva en la tabla de aceleradores
+     y el menú lo anuncia ("Exit\tAlt+X").
+   - resource.h: dos IDs nuevos (32820, 32821). El manifest sube a
+     5.8.0.0.
+
+   Novedades de la versión 5.7 (CLIC EN WRAP + COLUMNA PERSISTENTE + REGLA BAJO DEMANDA):
+   - BUG: EL CLIC Y EL ARRASTRE FALLABAN EN MODO WRAP. WM_LBUTTONDOWN y
+     WM_MOUSEMOVE mapeaban fila visual -> línea lógica 1:1, así que en un
+     párrafo envuelto en 5 filas, clicar la fila 3 ponía el caret en la
+     LÍNEA 3 (otra) y arrastrar seleccionaba saltando entre líneas. Ahora
+     un único TV_HitTest recorre las filas visibles contando sub-filas (la
+     misma aritmética que el pintado) y responde el carácter exacto, en
+     wrap y sin wrap. De paso: una columna negativa ya no se cuela y
+     arrastrar por debajo de la última fila extiende hasta el final en
+     vez de ignorarse. El bloque de 15 líneas estaba DUPLICADO en los dos
+     mensajes: muere la duplicación.
+   - BUG: VK_UP/VK_DOWN PERDIAN LA COLUMNA (el caret saltaba a la columna
+     0 de la línea contigua). Ahora se recuerda la columna deseada
+     (g_iCaretCol) como los editores estándar: los movimientos verticales
+     la conservan aunque pasen por líneas cortas, y cualquier movimiento
+     horizontal (flechas, Home/End, clic) la invalida.
+   - RENDIMIENTO: LA REGLA SOLO CUANDO TOCA. El WM_PAINT del control
+     repintaba la regla (fill + un DrawTextW/FillRect por columna visible)
+     en CADA pintado, también en un drag de selección que no la afecta.
+     El estado recuerda el iScrollX que dejó pintado (iPaintedRulerX): la
+     regla se repinta solo si cambió el scroll horizontal o hubo cambio de
+     contenido/fuente. El WM_PAINT del padre (exposición/resize) sigue
+     pintándola siempre y actualiza el recuerdo.
+   - RENDIMIENTO: MEMO DE DOS ENTRADAS en TV_LineFromChar. Con una
+     selección activa, TV_InvalidateSelPainted pregunta por los DOS
+     extremos en cada cambio: el memo de una entrada fallaba siempre
+     (caracteres alternantes) y pagaba la búsqueda binaria dos veces.
+   - RENDIMIENTO: CB_READ_CHUNK POR ARQUITECTURA: 8 MB en x64 (una página
+     de 128 MB son 16 lecturas en vez de 32), 4 MB en x86 como antes.
+   - SIMPLIFICACIÓN: los rangos de scrollbar que TV_SetText y
+     ApplyEditorFont mantenían como bloques gemelos viven ahora en un
+     único TV_UpdateScrollRanges.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
+     El manifest sube a 5.7.0.0.
+
+   Novedades de la versión 5.6 (ÍNDICE EN EL WORKER + GUTTER BAJO DEMANDA + CAPS x64):
+   - RENDIMIENTO: EL ÍNDICE DE LÍNEAS SE CONSTRUYE EN EL WORKER. Las dos
+     pasadas wmemchr de TV_SetText (contar + rellenar) se ejecutaban en el
+     hilo de UI dentro de la entrega, justo cuando la barra ya está al 100%:
+     para una página de 32 MB eran decenas de ms de UI bloqueada. Ahora el
+     worker de carga las ejecuta justo tras decodificar/normalizar
+     (TV_BuildLineIndex) y la entrega ADOPTA el índice (TV_SetText con
+     pLineStarts/cLines/iMaxLineChars preconstruidos): la entrega es O(1)
+     (intercambio de punteros, sin escaneo) y la UI solo pinta el primer
+     fotograma. Si el worker se queda sin memoria, TV_SetText cae al
+     construcción inline de siempre. Las rutas sin worker (preview de 64 KB,
+     ApplyView, portapapeles) siguen construyendo el índice en línea.
+   - RENDIMIENTO: GUTTER SOLO CUANDO TOCA. El estado del control lleva
+     bGutterDirty: la columna de números/offsets se repinta solo cuando
+     cambia el contenido, el scroll vertical o la fuente. Un drag de
+     selección, un scroll horizontal o un repintado de selección ya no
+     pagan el fill + PolyTextOutW de la columna en cada tick (antes se
+     repintaba la columna en CADA WM_PAINT del control). El WM_PAINT del
+     padre (exposición/resize) sigue pintándola siempre.
+   - RENDIMIENTO: MEMO DE TV_LineFromChar. La búsqueda binaria
+     carácter->línea guarda su último resultado: TV_PositionCaret y
+     TV_InvalidateSelPainted preguntan por los MISMOS caracteres en cada
+     repintado (el caret no se mueve mientras se hace scroll o se arrastra
+     una selección); una comparación sustituye la búsqueda.
+   - CAPS POR ARQUITECTURA (#ifdef _WIN64): CB_TEXT_MAX sube a 128 MB en
+     x64 (el índice ya no se construye en la UI y el espacio de direcciones
+     de 2 GB de x86 sigue limitando a 32 MB) y CB_HEX_MAX a 32 MB en x64
+     (8 MB en x86). El build x64 abre páginas 4 veces mayores con el mismo
+     coste de entrega.
+   - SIMPLIFICACIÓN: MUERE CB_WRAP_TEXT_MAX (el cap de 2 MB para vistas con
+     ajuste de línea, de la era del EDIT estándar). El control custom envuelve
+     por fila visible en el pintado desde V5, así que el cap solo truncaba
+     contenido que el visor ya maneja: con wrap activo se muestra la página
+     completa (hasta CB_TEXT_MAX) y el toggle de wrap sigue siendo instantáneo.
+     PageCapBytes, RunLoadJob y ApplyView pierden su rama de wrap.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
+     El manifest sube a 5.6.0.0.
+
+   Novedades de la versión 5.5 (ÚLTIMAS FILAS SIN NÚMERO + REPAINT MÍNIMO):
+   - CRÍTICO: LAS ÚLTIMAS FILAS QUEDABAN SIN NÚMERO DE LÍNEA (con la regla
+     activa, las 1-2 últimas de la ventana). El bucle de PaintGutter
+     comparaba y —en coordenadas del PADRE, donde las etiquetas empiezan en
+     y = iRulerH— contra rcEdit.bottom, que es el ALTO DEL CONTROL (iRulerH
+     píxeles menos que el hueco del padre): dejaba de etiquetar antes de
+     tiempo. Ahora el borde es iRulerH + rcEdit.bottom en coordenadas del
+     padre y la condición es "y < borde", no "y + alto <= borde": una fila
+     parcialmente visible recibe su número igual que recibe su texto, y el
+     recuento de etiquetas queda clavado al de filas del WM_PAINT.
+   - El DC del gutter se recorta a la columna (SelectClipRgn): la etiqueta
+     de la última fila parcial no puede invadir la barra de estado (la
+     ventana principal no tiene WS_CLIPCHILDREN).
+   - RENDIMIENTO: REPAINT MÍNIMO EN SELECCIÓN Y CARET. El estado guarda el
+     rango de selección que dejó el último pintado en pantalla
+     (iPaintedSelLo/Hi) y TV_InvalidateSelPainted (sustituye a
+     TV_InvalidateSelRange) invalida solo la diferencia: una flecha sin
+     Shift con selección vacía NO repinta nada (antes invalidaba el control
+     entero en cada tecla), un drag o Shift+flechas repinta solo las filas
+     que gana o pierde el extremo móvil, y un clic dentro de una selección
+     activa ya no deja resaltados obsoletos en pantalla (bug: el helper
+     viejo medía solo desde iSelEnd).
+   - BUG: el thumb horizontal no se movía al seguir al caret con teclas:
+     el SetScrollInfo inline de TV_ScrollCaret pasaba si.fMask = 0 (no
+     actualizaba nada). Ahora el tracking horizontal pasa por TV_ScrollX,
+     que además blitea el desplazamiento en vez de invalidar todo.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
+     El manifest sube a 5.5.0.0.
+
+   Novedades de la versión 5.4 (GUTTER ALINEADO + HEX SIN EDIT + PINTADO POR SUCIEDAD):
+   - CRÍTICO: EL GUTTER PINTABA UNA FILA POR ENCIMA DE SU TEXTO. PaintGutter
+     empezaba sus etiquetas en y=0 del padre, pero LayoutEdit baja el
+     control iHexLineH píxeles cuando la regla está activa: cada número
+     quedaba sobre la línea anterior (el "58" solapaba la regla) y las 1-2
+     últimas filas visibles se quedaban sin número. Ahora el gutter usa el
+     mismo offset de regla que LayoutEdit y cubre exactamente el alto del
+     control. El cuadrado sobre el gutter (x < gutter, y < regla) lo pinta
+     el WM_PAINT del padre junto a la regla.
+   - HEX SIN EDIT: la vista hex usa ya el control custom V5TextView, como
+     las vistas de texto. Muere el EM_SETHANDLE (la construcción síncrona
+     de la tabla de líneas del EDIT era el último cuello de botella del
+     hex) y con él: la rama EDIT de RecreateEditControl, EnsureEditControl-
+     Type (queda solo el caso "sin control"), la rama hex de
+     DeliverTextToEdit, AdoptEmptyText, EditSubclassProc, las ramas
+     WM_CTLCOLOREDIT/WM_CTLCOLORSTATIC del padre y la rama EDIT de
+     PaintRuler. Las teclas que solo existían en el EDIT (Ctrl+Home/End
+     salto de página, PgDn/PgUp con salto de página en el borde) viven
+     ahora en TextViewProc. CB_HEX_MAX vuelve a 8 MB.
+   - RENDIMIENTO: PINTADO POR SUCIEDAD. El WM_PAINT del control limita el
+     pintado a las filas que tocan el rectángulo de actualización, y el
+     scroll vertical/horizontal usa ScrollWindowEx (solo se repinta la
+     franja descubierta, el resto se desplaza en blit): una rueda del
+     ratón o un drag de selección ya no repintan las ~200 filas visibles
+     por cada tick.
+   - RENDIMIENTO: TV_SetText construye el índice de líneas con dos pasadas
+     wmemchr (contar + rellenar) en vez de un bucle carácter a carácter;
+     sobre 26 MB pasa de decenas de ms a unos pocos.
+   - RENDIMIENTO: AllocViewText/FreeViewText usan GMEM_FIXED (el bloque
+     deja de ser movible: sin EM_SETHANDLE ya no hay adopción de handle y
+     sobra el par GlobalLock/GlobalUnlock en cada acceso).
+   - SIMPLIFICACIÓN: ToggleWrap ignora la vista hex (líneas fijas) y ya NO
+     recrea el control: el wrap se calcula al pintar, así que basta un sync
+     de flags (TV_SyncState, que también retira/restaura WS_HSCROLL) más un
+     invalidate; SetWrapWidth igual. ToggleGreenbar la permite en hex (el
+     control custom pinta las franjas también); ApplyView/ResetViewer
+     unifican el caso de texto vacío en ReleaseViewContent; SearchNext lee
+     g_tv directamente (sin copia LocalLock del EDIT); ID_COPY/ID_SELECTALL
+     van directos a TV_Copy/TV_SetSel; los helpers Edit* quedan como alias
+     de TV_*; ApplyEditorFont refresca los rangos de las scrollbars con las
+     métricas nuevas (iban una fuente por detrás).
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
+     El manifest sube a 5.4.0.0.
+
+   Novedades de la versión 5.3 (GREENBAR EN LA PRIMERA CARGA + HEX MÁS RÁPIDO):
+   - CRÍTICO: LA GREENBAR FUNCIONABA EN LA PRIMERA CARGA. Con Greenbar=1
+     restaurado del INI, la primera carga pintaba SIN franjas y había que
+     alternar la opción dos veces. Causa: TV_SyncState copiaba el flag
+     g_bGreenbar a g_tv.bGreenbar pero NUNCA creaba g_tv.hbrGreen; el pincel
+     solo se creaba en ToggleGreenbar y RecreateEditControl, así que el
+     WM_PAINT del V5TextView encontraba hbrGreen==null y pintaba fondo blanco.
+     FIX: la creación/retirada del pincel vive ahora DENTRO de TV_SyncState
+     (idempotente), que cubre arranque, primera carga, cambios de vista y
+     toggles. ToggleGreenbar simplificado (solo flag + sync + menú +
+     invalidate) y bloque duplicado fuera de RecreateEditControl.
+   - RENDIMIENTO HEX: CB_HEX_MAX baja de 8 MB a 4 MB. La página hex es el
+     único camino que alimenta un EDIT estándar, cuya tabla de líneas se
+     construye de forma síncrona dentro de EM_SETHANDLE: el tamaño de página
+     se percibe directamente como segundos de helada. 4 MB parte a la mitad
+     la construcción del dump (~15M chars en vez de ~30M) y el indexado del
+     EDIT, y ahorra ~34 MB de buffer. La paginación (PgDn/PgUp, Go To,
+     Next/Previous Page, Ctrl+Home/End) sigue alcanzando el fichero entero.
+   - CRÍTICO: VER PORTAPAPELES COMO FICHERO TRAS UNA VISTA HEX dejaba el
+     dump anterior en pantalla bajo el título "CLIPBOARD". El portapapeles
+     pone iView=VIEW_UTF16 pero no sincronizaba el tipo de control: el
+     texto entraba por la rama del control custom con g_tv.hWnd==null y
+     nada se pintaba. Ahora EnsureEditControlType() se llama antes de
+     entregar (la misma sincronización que ApplyLoadResult).
+   - PINTADO: la vista VACÍA (sin texto entregado aún) no pintaba su
+     fondo: el early-out de WM_PAINT validaba sin rellenar y el
+     WM_ERASEBKGND del control responde 1 SIN borrar, así que quedaban
+     píxeles indefinidos. Ahora rellena con COLOR_WINDOW.
+   - SIMPLIFICACIÓN: declaración muerta GetEditBackground fuera (V4, sin
+     definición ni usos); FindPatternFrom sin la condición redundante
+     (*t == *s ya lo cubre ChrCmpIW).
+   - COMENTARIOS: chunks "1 MB" -> CB_READ_CHUNK (4 MB) en RunLoadJob y
+     SearchThreadProc; la técnica PatBlt obsoleta en ToggleGreenbar; el
+     "decode inserta CRLF virtuales" de SetWrapWidth (V5 envuelve al pintar).
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
+     El manifest sube a 5.3.0.0.
+
+   Novedades de la versión 5.2 (REVISIÓN: CONTROL-TYPE SYNC, SCROLL H Y RENDIMIENTO):
+   - CRÍTICO: EL TIPO DE CONTROL SE SINCRONIZA EN TODA CARGA. WM_CREATE
+     crea siempre el V5TextView; hasta ahora solo SetView/ToggleWrap
+     cambiaban el tipo de control, así que la PRIMERA carga de un
+     binario (detección -> VIEW_HEX) o un /hex enviaba EM_SETHANDLE al
+     control custom (que no lo maneja): pantalla en blanco y fuga del
+     bloque de texto. Y al revés, tras ver un binario, abrir un texto
+     no pintaba nada (g_tv.hWnd quedaba null). Nuevo EnsureEditControl-
+     Type() se llama en ApplyLoadResult y en WM_APP_LOADPREVIEW antes
+     de entregar; RecreateEditControl gana el parámetro bApplyContent
+     para no entregar dos veces.
+   - ResetViewer: la comprobación "if (iView == VIEW_HEX)" era muerta
+     (iView acaba de ponerse a ANSI): el bloque del EDIT hex nunca se
+     liberaba. Ahora se guarda el view ANTES de resetearlo.
+   - SCROLL HORIZONTAL del V5TextView arreglado: nadie fijaba el rango
+     de SB_HORZ, así que las líneas largas sin wrap no se podían
+     recorrer y el caret se salía por la derecha. TV_SetText calcula
+     la línea más larga, fija el rango (en píxeles) y TV_ScrollCaret
+     desplaza también en horizontal.
+   - Find Bytes: si el PostMessage final fallaba, g_bInByteSearch
+     quedaba true para siempre (todas las cargas bloqueadas). El post
+     final reintenta 20x100 ms y el ESC reapera el hilo terminado
+     (ReapSearchThread).
+   - RENDIMIENTO: TV_SetText construye el índice de líneas con wmemchr
+     (SIMD del CRT); LooksLikeUTF16Text cuenta los NUL con memchr;
+     IsBinaryData clasifica con LUT de 256; Find Bytes lee en chunks de
+     4 MB (CB_READ_CHUNK, igual que el loader).
+   - SIMPLIFICACIÓN: g_iForcedView se consume SOLO en RunLoadJob (el
+     doble manejo con ApplyLoadResult era una divergencia esperando
+     pasar); helper ReleaseViewContent para el par TV_ClearText +
+     FreeViewText repetido 4 veces; código muerto fuera (EN_UPDATE del
+     custom, LayoutEdit condicional imposible en la rama hex, rama
+     forzada de ApplyLoadResult); CS_HREDRAW/CS_VREDRAW de la clase V5
+     fuera (WM_SIZE ya invalida todo); SetWrapWidth limpia bookmarks;
+     ID_SELECTALL usa TV_GetTextLength.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos
+     cambian. El manifest sube a 5.2.0.0.
+
+   Novedades de la versión 5.1 (CORRECCIÓN DE BUGS DEL CUSTOM CONTROL):
+   - V5 REEMPLAZA EL CONTROL EDIT ESTÁNDAR por un control custom
+     (V5TextView) para todas las vistas de TEXTO (ANSI/UTF-8/UTF-16/
+     EBCDIC). Hex sigue usando el EDIT estándar (su tabla de líneas es
+     simple y el gutter está acoplado a su scroll).
+   - EL CONTROL EDIT ESTÁNDAR RECALCULABA TODOS LOS PUNTOS DE RUPTURA
+     (soft breaks) sincrónicamente al recibir texto con wrap, helando la
+     ventana ~10 segundos para 26 MB. El control custom:
+     * Construye un índice de líneas (offsets de inicio) UNA vez al
+       entregar el texto — O(n) scan de \n, rápido incluso para 32 MB
+     * Pinta SOLO las líneas visibles (~50) en WM_PAINT
+     * Calcula el wrap de cada línea visible durante el paint — no de
+       todo el archivo
+     * Soporta selection, caret, keyboard (arrows/PgUp/PgDn/Home/End),
+       copy, find, goTo, bookmarks, tail
+   - RESULTADO: wrap es INSTANTÁNEO para archivos de CUALQUIER tamaño.
+     Ya no hay cap de 2 MB para wrap (aunque el código de CB_WRAP_TEXT_MAX
+     se mantiene como salvaguarda pero ya no es necesario).
+   - ADAPTADORES TV_*: las funciones existentes (Find, GoTo, Bookmarks,
+     UpdateStatusBar, etc.) usan wrappers (EditGetSel, EditLineFromChar,
+     EditSetSel, etc.) que redirigen al control correcto (custom para
+     texto, EDIT para hex) sin cambios en la lógica.
+   - GESTIÓN DE MEMORIA: el control custom NO copia el texto — almacena
+     un puntero al buffer de AllocViewText. El global g_pViewText guarda
+     el puntero actual para liberarlo en la siguiente entrega o en
+     ResetViewer.
+   - LAS FEATURES V4 (Greenbar, Ruler) funcionan nativamente con el
+     custom control: greenbar se pinta como franjas FillRect en el
+     WM_PAINT del control (no necesita PatBlt), y el ruler funciona
+     igual que antes.
+   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
+     cambian. El manifest sube a 5.0.0.0.
+
+   Novedades de la versión 4.0 (GREENBAR, RULER, WRAP A LONGITUD FIJA):
+   - V4 añade tres features inspiradas en V File Viewer (fileviewer.com)
+     que mejoran la legibilidad de archivos grandes sin reescribir el
+     control EDIT (eso sería una futura V5 con custom draw completo).
+   - NOTA ARQUITECTÓNICA: 4More usa el control EDIT estándar de Windows
+     (CreateWindowEx L"EDIT"), NO un custom control. El control EDIT
+     estándar NO soporta colores de fondo por línea ni envía
+     WM_ERASEBKGND a su subclass (pinta su fondo internamente). Las
+     features V4 se implementan como overlays pintados DESPUÉS del texto
+     del EDIT, usando técnicas que no rompen el texto existente.
+   - GREENBAR (View > Greenbar): pinta franjas alternas (blanco / verde
+     claro RGB(232,240,232)) sobre las líneas impares. Se implementa en
+     EditSubclassProc::WM_PAINT DESPUÉS de DefSubclassProc (que pinta el
+     texto), usando PatBlt con PATPAINT (dest = dest | pattern). Esta
+     operación OR solo afecta los píxeles blancos del fondo (RGB alto),
+     dejando el texto oscuro (RGB bajo) intacto. Resultado: líneas
+     alternas con fondo verde claro, texto legible. No afecta a hex.
+   - RULER (View > Ruler): regla de columnas en una franja separada en
+     la parte superior. LayoutEdit reserva iHexLineH píxeles (el EDIT
+     empieza en y=iRulerH), y la regla se pinta en esa franja del
+     parent. Muestra números cada 10 columnas y marcas (ticks) en las
+     demás. Tiene en cuenta el scroll horizontal del EDIT (lee
+     GetScrollInfo SB_HORZ) para alinear las columnas con el texto
+     visible. Se pinta tanto en el WM_PAINT del parent como en el del
+     subclass del EDIT (para mantenerse sincronizada al hacer scroll).
+   - WRAP A LONGITUD FIJA (View > Wrap to Fixed Width...): pide un
+     número de columnas (default 80) y activa un modo de wrap distinto
+     al wrap-a-ventana. El esqueleto, el diálogo y la persistencia están
+     en sitio; el wrap real a N chars requeriría insertar CRLF
+     virtuales durante el decode (V5).
+   - PERSISTENCIA: Greenbar, Ruler y WrapWidth se guardan en 4More.ini
+     y se restauran al arrancar.
+   - RECURSOS: se añaden 3 IDs de menú nuevos en resource.h
+     (ID_VIEW_GREENBAR, ID_VIEW_RULER, ID_VIEW_WRAPWIDTH) y 3 items en
+     el menú View del .rc. El manifest sube a 4.0.0.0.
 
    Novedades de la revisión 3.20 (CORRECCIÓN DE BUGS Y SIMPLIFICACIÓN):
    - AUDITORÍA COMPLETA: se revisó todo el código buscando bugs, race
@@ -814,7 +1261,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"3.20"
+#define APP_VERSION L"5.9.4"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -845,8 +1292,8 @@
 #define IDT_LOADPROG 2
 
 // 3.16: umbral que decide cuándo la página es lo bastante grande para
-// que ApplyLoadResult pinte la barra a 100% ANTES del swap EM_SETHANDLE
-// (la entrega es monolítica otra vez: el troceo con EM_REPLACESEL de
+// que ApplyLoadResult pinte la barra a 100% ANTES de la entrega
+// (la entrega es monolítica: el troceo con EM_REPLACESEL de
 // 3.14-3.15 era cuadrático en el buffer acumulado del control y hacía
 // que un TXT de 30 MB tardara ~8 segundos sólo en la entrega). Por
 // debajo de este tamaño la entrega es instantánea y la barra no llega a
@@ -879,16 +1326,98 @@ int iView;                                      // active view: VIEW_ANSI / VIEW
 WCHAR g_szCurrentFile[MAX_PATH] = {};           // path of the file whose bytes are on screen ("" = none)
 ULONGLONG g_qwBase = 0;                         // file offset of the FIRST byte loaded (paged view)
 bool g_bLineNums = false;                       // View > Line Numbers: text gutter, painted like the hex one
-bool g_bWrap = false;                           // View > Word Wrap: edit styles are create-only, so this recreates the control
+bool g_bWrap = false;                           // View > Word Wrap: 5.4, a flag sync (TV_SyncState), no recreate
+bool g_bGreenbar = false;                       // V4: View > Greenbar — alternating line background for readability
+bool g_bRuler = false;                          // V4: View > Ruler — column ruler at the top of the text area
+bool g_bHiliteLine = false;                     // 5.8: View > Highlight Current Line — full-width band on the caret line
+bool g_bEscExit = true;                         // 5.8: View > ESC to Exit (default ON): ESC closes 4More when idle
+int g_iWrapWidth = 0;                            // V4: 0 = wrap to window; >0 = wrap to N chars (View > Wrap to Fixed Width)
 bool g_bTail = false;                           // View > Tail File: 2 s timer, reload on change, jump to the end
 bool g_bTailJumpFirst = false;                  // 3.02: /tail o INI: la PRIMERA carga de un fichero salta a su última página
 int g_iForcedView = -1;                         // /hex /utf8... initial view from the command line (first load only)
-DWORD* g_pBookmarks = nullptr;                  // bookmarked lines (page-relative), kept sorted
+DWORD* g_pBookmarks = nullptr;                  // bookmarked lines (current view), kept sorted
+ULONGLONG* g_pBookmarkOffs = nullptr;           // 5.9.2: absolute file offset of each bookmarked
+                                                // line's first byte: the anchor that survives
+                                                // a view switch (parallel to g_pBookmarks)
 int g_cBookmarks = 0, g_cBookmarksMax = 0;
 ULONGLONG g_qwPendingGoto = (ULONGLONG)-1;     // byte offset to position on when its page lands
 bool g_bInByteSearch = false;                   // raw-file byte scan in progress: blocks loads and the tail timer
 WCHAR g_szBytesPattern[128] = {};               // last pattern of Find Bytes (dialog default)
 bool g_bBytesHex = false;                       // last mode of Find Bytes: TRUE = hex pairs
+
+// --- V5: Custom text view control (5.4: serves EVERY view, hex included) ---
+// The EDIT control standard recalculates ALL soft breaks synchronously
+// when it receives new text, freezing the UI for seconds on large files
+// with wrap. V5 replaces it with a custom control that only paints the
+// visible lines, computing wraps on demand. This makes wrap instant on
+// files of ANY size.
+//
+// The custom control stores the decoded WCHAR text (CRLF-normalized) and
+// an index of line start offsets (built once, O(n), on delivery). Wrap
+// is computed per-line during paint — only for the ~50 visible lines.
+//
+// 5.4: the hex view uses this control too (the standard EDIT is gone).
+
+// The custom control's window class name
+#define V5_TEXTVIEW_CLASS L"V5TextView"
+
+// State of the custom text view control (one instance, stored in GWLP_USERDATA)
+struct TextViewState
+{
+    WCHAR* pText;           // decoded + normalized text (CRLF-terminated). Owned externally (the view text buffer).
+    int    cch;             // character count (not including final NUL)
+    int*   pLineStarts;     // array of character offsets where each logical line starts. Owned here.
+    int    cLines;          // number of logical lines (size of pLineStarts)
+    int    iSelStart;       // selection start (char offset)
+    int    iSelEnd;         // selection end (caret position)
+    int    iFirstVisible;   // first visible line (scroll position)
+    int    iScrollX;        // horizontal scroll (in pixels, for no-wrap mode)
+    bool   bWrap;           // wrap mode (true = wrap to window width)
+    int    iWrapWidth;      // 0 = wrap to window; >0 = wrap to N chars
+    bool   bGreenbar;       // alternating line background
+    int    iMaxLineChars;   // 5.2: longest logical line, in characters (SB_HORZ range)
+    HWND   hWnd;            // the control's own window handle
+    HBRUSH hbrGreen;        // V5: cached greenbar brush (created once, reused)
+    int    iPaintedSelLo;   // 5.5: selection range the last paint left on screen
+    int    iPaintedSelHi;   //      (drives the repaint delta of a selection change)
+    bool   bGutterDirty;    // 5.6: gutter labels stale (text/scroll changed): the next
+                            //      control paint must redraw them; selection-only and
+                            //      horizontal-only repaints skip the column entirely
+    int    iPaintedRulerX;  // 5.7: horizontal scroll the ruler strip was last painted
+                            //      with: the strip repaints only when it changed (the
+                            //      parent's WM_PAINT repaints it unconditionally)
+    bool   bHilite;         // 5.8: View > Highlight Current Line (synced from g_bHiliteLine)
+    HBRUSH hbrHilite;       // 5.8: the band brush (created/retired in TV_SyncState, like hbrGreen)
+    HBRUSH hbrBookmark;     // 5.9: the bookmarked-line brush (created once in TV_SyncState)
+    HBRUSH hbrBmDot;        // 5.9.1: the gutter dot's brush (created once, on first use)
+    HPEN   hpenBmDot;       // 5.9.1: the dot's null pen (fill only, no outline)
+    int    iPaintedCurLine; // 5.8: logical line the band was last painted on (-1 = none);
+                            //      TV_UpdateCurLine repaints only the rows that change
+};
+
+static TextViewState g_tv = {};   // the one and only text view instance
+static WCHAR* g_pViewText = nullptr;   // V5: current view text buffer (owned, freed on next delivery or exit)
+
+// 5.6/5.7: one-entry-per-slot memos of TV_LineFromChar. The caret does not
+// move while the user scrolls, drags a selection or merely repaints, yet
+// every paint asked TV_PositionCaret to re-run the binary search for the
+// SAME character — and with a live selection TV_InvalidateSelPainted asks
+// for BOTH ends alternately, so a single slot missed every time. Two LRU
+// slots cover the (lo, hi) pair with one comparison each. Reset in
+// TV_ClearText.
+static int g_iLineMemo0Char = -1;
+static int g_iLineMemo0Line = -1;
+static int g_iLineMemo1Char = -1;
+static int g_iLineMemo1Line = -1;
+
+// 5.7: desired caret COLUMN across vertical moves (VK_UP/VK_DOWN), editors'
+// standard behavior. -1 = none (the last move was horizontal or a click);
+// a vertical move seeds it from the caret and keeps it across short lines.
+// Any horizontal move or click resets it. Used by TextViewProc only.
+static int g_iCaretCol = -1;
+
+// hEdit is declared above (line 897). It always points to the custom
+// V5TextView control (5.4: every view, hex included).
 
 // --- Performance instrumentation (/timing switch) ---
 bool g_bTiming = false;                         // CLI /timing: show the per-phase load times
@@ -927,15 +1456,12 @@ volatile LONG g_bSearchCancel = 0;              // ESC or a dying window: stop t
 // worker and read by the UI thread is a torn read on Win32 builds.
 volatile ULONGLONG g_qwSearchResult = (ULONGLONG)-1;   // found offset, -1 = not found (3.20: volatile for cross-thread visibility)
 
-// --- Edit control text adoption (EM_SETHANDLE, 2.98) ---
-// The view text is built in a movable global block and handed to the control
-// with EM_SETHANDLE: the control ADOPTS the buffer instead of copying tens of
-// MB the way WM_SETTEXT does. The previous buffer is fetched with EM_GETHANDLE
-// and freed right there (the documented EM_SETHANDLE pattern), so no tracking
-// global is needed: whatever handle the control answers with is, by
-// definition, the one it is done with. At process exit the current block is
-// simply left to the OS: freeing it while the control still exists would race
-// its destruction for zero gain.
+// --- View text ownership (2.98; 5.4: fixed block, no EDIT adoption) ---
+// The view text is built in a global block and handed to the custom control
+// as a POINTER (the control copies nothing): the previous buffer is freed on
+// the next delivery or on ResetViewer, so no tracking global is needed. At
+// process exit the current block is simply left to the OS: freeing it while
+// the control still exists would race its destruction for zero gain.
 
 // View modes for the View menu. The order must match the ID_VIEW_* values in
 // resource.h (they are consecutive there): ID_VIEW_ANSI + iView is the
@@ -979,6 +1505,13 @@ struct LoadJob
     int    iDetected = VIEW_ANSI;               // detected default view (VIEW_*)
     WCHAR* pText = nullptr;                     // decoded + normalized text of iDetected (owned by UI)
     DWORD  cchText = 0;                         // characters in pText
+    // 5.6: line index of pText, PREBUILT ON THIS WORKER right after the
+    // decode/normalization (two wmemchr passes, tens of ms on a 32-128 MB
+    // page). The UI adopts it in TV_SetText with zero scanning: the whole
+    // delivery is O(1) pointer swaps. Freed here if the UI never adopts it.
+    int*   pLineStarts = nullptr;               // cLines+... entries (see TV_BuildLineIndex)
+    int    cLines = 0;                          // logical lines (0 = no index prebuilt)
+    int    iMaxLineChars = 0;                   // longest logical line (SB_HORZ range)
     bool   bOpenFailed = false;                 // CreateFile failed
     bool   bReadError = false;                  // ReadFile failed midway (partial content shown)
     bool   bStreamTruncated = false;            // stdin stream longer than the view cap
@@ -1011,6 +1544,7 @@ struct LoadJob
     {
         delete[] pBytes;
         FreeViewText(pText);             // the worker's text is HGLOBAL-backed since 2.98
+        delete[] pLineStarts;            // 5.6: worker-built line index, if never adopted
     }
 };
 
@@ -1021,7 +1555,7 @@ static unsigned int s_uLoadSeq = 0;             // 3.08: grows by one per job (U
 
 // 3.08: the load worker's first paint (WM_APP_LOADPREVIEW). One small
 // struct on the heap: the UI thread owns it on arrival — it delivers the
-// text through the usual EM_SETHANDLE path, or frees it (job gone, serial
+// text through the usual zero-copy path, or frees it (job gone, serial
 // stale, cancel). Posted strictly before WM_APP_LOADDONE of the same job.
 struct LoadPreview
 {
@@ -1030,7 +1564,7 @@ struct LoadPreview
     ULONGLONG qwBase = 0;                       // 3.09: file offset of the window (gutter offsets)
     DWORD  cbBytes = 0;                         // 3.09: bytes of the window (the gutter reads cbFile)
     DWORD  cch = 0;                             // characters in pText
-    WCHAR* pText = nullptr;                     // decoded AND normalized: ready for EM_SETHANDLE
+    WCHAR* pText = nullptr;                     // decoded AND normalized: ready to deliver
 };
 
 
@@ -1038,7 +1572,6 @@ struct LoadPreview
 ATOM MyRegisterClass(HINSTANCE hInstance);
 bool InitInstance(HINSTANCE, int);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-LRESULT CALLBACK EditSubclassProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void LoadFile(const WCHAR* pacFilename);
 LoadJob* BeginLoadJob(bool bStdin);            // shared setup of both load paths
@@ -1069,9 +1602,8 @@ void SetView(int iNewView);
 void ApplyView(void);
 bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, LoadJob* pProgJob = nullptr);   // 3.02: los dos últimos responden la ventana de BYTES que se decodificó; 3.10: pProgJob, solo el worker manda tics
 int DetectDefaultView(const BYTE* pBytes, DWORD cb);
-void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1); // deliver + own/free the buffer
-BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1); // DeliverTextToEdit wrapped in SEH
-void AdoptEmptyText(void);                      // swap in an empty block (EM_SETHANDLE, 2.98)
+void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // deliver + own/free the buffer
+BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // DeliverTextToEdit wrapped in SEH
 WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch, LoadJob* pProgJob = nullptr);    // 3.10: pProgJob activa los tics de construcción (solo el worker la pasa)
 bool IsBinaryData(const BYTE* pBytes, DWORD cb);
 bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb);
@@ -1089,7 +1621,51 @@ void RefreshPage(bool bTailJump);              // F5: reload the page on screen
 void ToggleTail(void);
 void ToggleLineNums(void);
 void ToggleWrap(void);                          // recreates the edit control (styles are create-only)
-void RecreateEditControl(void);
+void ToggleGreenbar(void);                      // V4: View > Greenbar
+void ToggleHiliteLine(void);                    // 5.8: View > Highlight Current Line
+void ToggleEscExit(void);                       // 5.8: View > ESC to Exit
+void ToggleRuler(void);                         // V4: View > Ruler
+void SetWrapWidth(int iCols);                   // V4: 0 = wrap to window, >0 = wrap to N chars
+void WrapWidthDialog(HWND hWnd);                // V4: View > Wrap to Fixed Width...
+INT_PTR CALLBACK WrapWidthProc(HWND, UINT, WPARAM, LPARAM);
+void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin);   // V4: column ruler (xOrigin = gutter offset)
+void RecreateEditControl(bool bApplyContent = true);   // 5.2: bApplyContent=false leaves the content to the caller
+void EnsureEditControlType(void);               // 5.2: the control type (custom/EDIT) always matches iView
+void ReapSearchThread(void);                    // 5.2: close a finished Find Bytes worker and re-open the gate
+void ReleaseViewContent(void);                  // 5.2: TV_ClearText + free g_pViewText (one helper, four call sites)
+
+// V5: custom text view control
+ATOM RegisterTextViewClass(HINSTANCE hInstance);
+LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+void TV_SetText(WCHAR* pText, int cch, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // adopt text + line index (optionally prebuilt on the worker)
+static bool TV_BuildLineIndex(WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine); // 5.6: two wmemchr passes (worker or UI)
+static void TV_UpdateScrollRanges(void);        // 5.7: the SB_VERT/SB_HORZ ranges of the control (one place)
+static int  TV_HitTest(TextViewState* pState, int x, int y);   // 5.7: char under a point (wrap-aware)
+void TV_ClearText(void);                        // free line index
+void TV_SyncState(void);                        // copy g_bWrap/g_bGreenbar etc into g_tv
+int  TV_LineCount(void);                        // number of logical lines
+int  TV_FirstVisibleLine(void);                 // scroll position
+int  TV_LineFromChar(int iChar);                // line index for a char offset
+int  TV_LineIndex(int iLine);                   // char offset for a line start
+void TV_SetSel(int iStart, int iEnd);           // set selection
+void TV_GetSel(int& riStart, int& riEnd);       // get selection
+void TV_ScrollCaret(void);                      // ensure caret visible
+int  TV_GetTextLength(void);                    // total text length
+void TV_Copy(void);                             // copy selection to clipboard
+HWND CreateTextView(HWND hWndParent);           // create the custom control
+
+// V5: Edit* helpers — declared here (forward) so all callers can use them.
+// 5.4: thin aliases of the TV_* API (every view uses the custom control).
+// Defined later (before UpdateStatusBar).
+static void EditGetSel(DWORD& rdwStart, DWORD& rdwEnd);
+static int  EditLineFromChar(int iChar);
+static int  EditLineIndex(int iLine);
+static int  EditGetLineCount(void);
+static int  EditGetFirstVisibleLine(void);
+static void EditSetSel(int iStart, int iEnd);
+static void EditScrollCaret(void);
+static int  EditGetTextLength(void);
+
 void GoToDialog(HWND hWnd);
 INT_PTR CALLBACK GoToProc(HWND, UINT, WPARAM, LPARAM);
 void GoToLine(ULONGLONG qwLine);                // line of the page on screen
@@ -1099,12 +1675,14 @@ bool LineAtOffset(ULONGLONG qwOff, int& riLine);
 void FindBytesDialog(HWND hWnd);
 INT_PTR CALLBACK FindBytesProc(HWND, UINT, WPARAM, LPARAM);
 void RunByteSearch(const BYTE* pPat, DWORD cbPat);
-unsigned __stdcall SearchThreadProc(void* pParameter);           // worker: scans 1 MB chunks
+unsigned __stdcall SearchThreadProc(void* pParameter);           // worker: scans CB_READ_CHUNK chunks
 void ViewClipboardAsFile(void);                 // File > View Clipboard as File
 void ListAlternateStreams(void);                // File > Alternate Data Streams...
 void ToggleBookmark(void);
 void NextBookmark(bool bForward);
 void ClearBookmarks(void);
+bool OffsetOfLine(DWORD iLine, ULONGLONG& rqw);  // 5.9.2: file offset of a line's first byte
+void RebindBookmarksToView(void);                // 5.9.2: recompute bookmark lines for the view on screen
 void StatusFlash(LPCWSTR pszText);              // one-shot status bar note (next update restores)
 int GutterWidth(void);                          // painted column width: hex offsets / line numbers
 DWORD PageCapBytes(void);                       // 3.04: bytes per page of the ACTIVE view (the loader/dump caps)
@@ -1119,37 +1697,47 @@ void OpenRecentEntry(int iRecent);              // a Recent item was picked
 void BuildIniPath(void);                         // 4More.ini beside the executable
 void LoadSettings(void);                        // INI first: the command line overrides it
 void SaveSettings(void);                         // on exit
-WCHAR* AllocViewText(DWORD cch);                // 2.98: movable HGLOBAL block for EM_SETHANDLE
-void FreeViewText(WCHAR* psz);                  // its pair: GlobalUnlock + GlobalFree
+WCHAR* AllocViewText(DWORD cch);                // 5.4: GMEM_FIXED block for the view text
+void FreeViewText(WCHAR* psz);                  // its pair: GlobalFree (the pointer is the handle)
 void TimingFlash(void);                          // /timing: per-phase ms on the status bar
 
 // Every text view is built from at most CB_TEXT_MAX source bytes and the
-// loader stops reading there too: a 300 MB text file would decode to a
-// ~600 MB string and then need the same again inside the edit control — past
-// 1 GB of buffers on the way to a 2 GB Win32 address space. The bytes shown
-// are a PAGE (window) of the file (see LoadPage): the paged view walks files
-// of ANY size at this bounded cost, and the user is told exactly what is
-// being shown (notice + real total). Overridable for the audit bench.
+// loader stops reading there too: the bytes shown are a PAGE (window) of the
+// file (see LoadPage), so the paged view walks files of ANY size at this
+// bounded cost, and the user is told exactly what is being shown (notice +
+// real total). 5.6: the cap is per architecture — Win32 keeps 32 MB (its 2 GB
+// address space hosts the WCHAR copy plus the line index plus the GDI working
+// set), Win64 raises to 128 MB because the line index now builds on the
+// WORKER thread (the UI delivery is O(1) either way) and the address space
+// is not a constraint. Both stay far below the 2^31 character ceiling of the
+// int-based text API. Overridable for the audit bench.
 #ifndef CB_TEXT_MAX
-#define CB_TEXT_MAX (32 * 1024 * 1024)          // 32 MB of source bytes per text view
+#ifdef _WIN64
+#define CB_TEXT_MAX (128 * 1024 * 1024)         // 128 MB of source bytes per text view (x64)
+#else
+#define CB_TEXT_MAX (32 * 1024 * 1024)          // 32 MB of source bytes per text view (x86)
+#endif
 #endif
 
-// 3.18: cap for text views WITH Word Wrap. The EDIT control with wrap
-// recalculates EVERY soft break in one synchronous call — for 26 MB of
-// chat log that is millions of wrap calculations, freezing the UI for
-// ~10 seconds. Without wrap the control only indexes CRLF (fast). So
-// when wrap is active we cap the text to a size the control can handle
-// in well under a second. The user gets a truncation notice and can
-// page through the rest. Without wrap the full CB_TEXT_MAX stands.
-#ifndef CB_WRAP_TEXT_MAX
-#define CB_WRAP_TEXT_MAX (2 * 1024 * 1024)     // 2 MB with wrap: loads in <0.5 s
-#endif
+// 5.6: CB_WRAP_TEXT_MAX (the 2 MB cap for wrapped views, 3.18) is GONE. It
+// existed because the standard EDIT recalculated EVERY soft break of the
+// whole text synchronously; the custom control has wrapped per visible row
+// at paint time since V5 (the paint walks only the rows the screen shows,
+// the line index only knows CRLF), so the cap only truncated content the
+// viewer can now handle at full CB_TEXT_MAX. Scrolling a wrapped view costs
+// the same per tick as before: one repaint of the visible rows.
 
 // 3.20: read chunk size for the phase-2 bulk read. Larger chunks amortize
 // ReadFile syscall overhead (4 MB → 8 syscalls for 32 MB vs 32 at 1 MB).
 // FILE_FLAG_SEQUENTIAL_SCAN keeps kernel read-ahead effective at any size.
+// 5.7: per architecture — an x64 page of 128 MB reads in 8 MB chunks
+// (16 syscalls instead of 32); x86 keeps 4 MB (its pages cap at 32 MB).
 #ifndef CB_READ_CHUNK
+#ifdef _WIN64
+#define CB_READ_CHUNK (8 << 20)               // 8 MB (x64)
+#else
 #define CB_READ_CHUNK (4 << 20)               // 4 MB
+#endif
 #endif
 
 // Editor type sizes, largest to smallest. Negative heights are character
@@ -1160,11 +1748,18 @@ int g_iFontIndex = 4;                           // -12, the shipped default
 
 // Hex dump cap: every byte expands to ~4.25 characters of buffer (the offset
 // of each line is painted separately and costs nothing to store), so without
-// the cap a 100 MB file would need a ~430 MB edit control buffer. The loader
-// also stops reading a binary at this cap. Overridable for the audit bench;
-// the shipped program uses 8 MB.
+// the cap a 100 MB file would need a ~430 MB buffer. The loader also stops
+// reading a binary at this cap. Overridable for the audit bench.
+// 5.4: back to 8 MB (the EM_SETHANDLE synchronous line table of the EDIT is
+// gone). 5.6: per architecture like CB_TEXT_MAX — the dump build and the
+// line index both run on the worker now, so x64 hosts a 32 MB dump page
+// (~136 MB of text buffer) without touching the UI budget.
 #ifndef CB_HEX_MAX
-#define CB_HEX_MAX (8 * 1024 * 1024)
+#ifdef _WIN64
+#define CB_HEX_MAX (32 * 1024 * 1024)           // 32 MB of dump bytes per page (x64)
+#else
+#define CB_HEX_MAX (8 * 1024 * 1024)            // 8 MB of dump bytes per page (x86)
+#endif
 #endif
 
 // Detection window: the loader reads only this much before deciding the
@@ -1221,6 +1816,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
     LoadStringW(hInstance, IDC_MY4MORE, szWindowClass, MAX_LOADSTRING);
     MyRegisterClass(hInstance);
+    RegisterTextViewClass(hInstance);   // V5: custom text view control
 
     // Build the INI path before any setting is read; LoadSettings then
     // restores whatever it finds, and the command-line parsing below
@@ -1327,6 +1923,61 @@ bool InitInstance(HINSTANCE hInstance, int nCmdShow)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// 5.2: the ONLY read form of g_bLoadCancel. Every access to a variable that
+// is written through the Interlocked* family must itself be interlocked
+// (/analyze rule: a plain read is never guaranteed coherent with the
+// interlocked stores). The writes stay InterlockedExchange.
+static bool LoadCancelled(void)
+{
+    return (InterlockedCompareExchange(&g_bLoadCancel, 0, 0) != 0);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 5.2: closes a Find Bytes worker that already finished and re-opens the
+// search gate. Called from the ESC handlers: the worker's final WM_APP_
+// SEARCHDONE can fail to post (queue full, dying window) and the gate
+// would otherwise stick true forever, blocking every load.
+void ReapSearchThread(void)
+{
+    if (g_hSearchThread != nullptr && WaitForSingleObject(g_hSearchThread, 0) == WAIT_OBJECT_0)
+    {
+        CloseHandle(g_hSearchThread);
+        g_hSearchThread = nullptr;
+        g_bInByteSearch = false;
+        UpdateStatusBar(true);
+    }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 5.4: with the custom control serving every view there is no type left to
+// sync — only the "no control yet" case remains (loads still call this
+// before every delivery, same as before).
+void EnsureEditControlType(void)
+{
+    if (hEdit == nullptr)
+    {
+        RecreateEditControl(false);
+    }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 5.2: one helper for the pair repeated at every teardown site: drop the
+// custom control's line index/state and free the view text buffer.
+void ReleaseViewContent(void)
+{
+    TV_ClearText();
+    if (g_pViewText != nullptr)
+    {
+        FreeViewText(g_pViewText);
+        g_pViewText = nullptr;
+    }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     // Find dialog notifications (Find... / Find Next)
@@ -1348,12 +1999,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_COMMAND:
     {
         int wmId = LOWORD(wParam);
-        int wmEvent = HIWORD(wParam);
-        if ((HWND)lParam == hEdit && wmEvent == EN_UPDATE)
-        {
-            UpdateStatusBar();
-            break;
-        }
+        // 5.2: the EN_UPDATE branch is gone. The custom V5TextView (all the
+        // text views since V5) never sends EN_UPDATE, and the hex EDIT is
+        // ES_READONLY, so the notification could only fire from a control
+        // that no longer exists; the status bar updates through its own
+        // call sites (caret, scroll, load).
         // Recent files: a contiguous ID block, resolved before the
         // switch (they are dynamic items, no static case labels).
         if (wmId >= ID_FILE_RECENT_FIRST && wmId <= ID_FILE_RECENT_LAST)
@@ -1374,11 +2024,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             // control is ES_READONLY, so those commands can never
             // apply (the menu carries them grayed out).
         case ID_COPY:
-            SendMessage(hEdit, WM_COPY, 0, 0);
+            // 5.4: the custom control serves every view
+            TV_Copy();
             break;
         case ID_SELECTALL:
-            SendMessage(hEdit, EM_SETSEL, 0, -1);
-            UpdateStatusBar();      // EM_SETSEL notifies nobody: say it here
+            // 5.4: the custom control serves every view
+            TV_SetSel(0, TV_GetTextLength());
+            UpdateStatusBar();
             break;
         case ID_FIND:
             OpenFindDialog(hWnd);
@@ -1427,6 +2079,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             break;
         case ID_VIEW_WRAP:
             ToggleWrap();
+            break;
+        case ID_VIEW_GREENBAR:                // V4
+            ToggleGreenbar();
+            break;
+        case ID_VIEW_RULER:                   // V4
+            ToggleRuler();
+            break;
+        case ID_VIEW_HILITE:                  // 5.8
+            ToggleHiliteLine();
+            break;
+        case ID_VIEW_ESCEXIT:                 // 5.8
+            ToggleEscExit();
+            break;
+        case ID_VIEW_WRAPWIDTH:               // V4
+            WrapWidthDialog(hWnd);
             break;
         case ID_VIEW_ANSI:
         case ID_VIEW_UTF8:
@@ -1498,19 +2165,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         // ES_READONLY turns the edit control into a viewer: the text can be
         // selected and copied, but never modified (no typing, Delete, Cut,
         // Paste, Clear or Undo). The Edit menu grays out those commands.
-        DWORD dwEditStyle = WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY;
-        if (!g_bWrap)
-        {
-            dwEditStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
-        }
-        hEdit = CreateWindowEx(0, L"EDIT", L"", dwEditStyle, 0, 0, 0, 0, hWnd, (HMENU)ID_EDITCHILD, hInst, nullptr);
+        // 5.4: the custom control serves every view; there is nothing to
+        // re-type later, so this is the only control creation of the app.
+        hEdit = CreateTextView(hWnd);
         if (hEdit == nullptr)
         {
             return -1;                  // 3.20: fail WM_CREATE cleanly instead of a broken window
         }
-        SendMessage(hEdit, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
         ApplyEditorFont();
-        SetWindowSubclass(hEdit, EditSubclassProc, 1, 0);
         hStatusBar = CreateWindowExW(0, STATUSCLASSNAMEW, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0, hWnd, (HMENU)IDC_STATUSBAR, hInst, nullptr);
         NONCLIENTMETRICSW ncm = {};     // zero-filled: a failed SPI_GETNONCLIENTMETRICS
         ncm.cbSize = sizeof(ncm);       // leaves a default font, never garbage
@@ -1572,16 +2234,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         SetFocus(hEdit);
         break;
     case WM_KEYDOWN:
-        // ESC cancels an in-flight Find Bytes scan first (2.96);
-        // with nothing to cancel it closes the program, as before.
+        // ESC cancels an in-flight Find Bytes scan first (2.96); then it
+        // closes the Find dialog if it is still open (5.8: the dialog owns
+        // the key, not the window); with the "ESC to Exit" option on (the
+        // default) it closes the program, as before.
         // The edit control covers its own ESC via the subclass.
         if (wParam == VK_ESCAPE)
         {
             if (g_bInByteSearch)
             {
                 InterlockedExchange(&g_bSearchCancel, 1);   // idempotent: worker checks per chunk
+                ReapSearchThread();     // 5.2: a finished worker whose final post failed cannot wedge the gate
             }
-            else
+            else if (hDlgFind != nullptr)
+            {
+                PostMessage(hDlgFind, WM_CLOSE, 0, 0);   // 5.8: the dialog first
+            }
+            else if (g_bEscExit)
             {
                 PostMessage(hWnd, WM_CLOSE, 0, 0);
             }
@@ -1689,7 +2358,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         // 3.08: the worker's first paint. Adopted only while ITS job is
         // still the one in flight (same serial, not cancelled): the text
-        // enters through the usual EM_SETHANDLE delivery and the full page
+        // enters through the usual zero-copy delivery and the full page
         // replaces it when it lands. Any stale preview is freed here
         // without touching the screen — the synchronous fallback queues
         // its preview AFTER ApplyLoadResult, and a cancelled job never
@@ -1697,7 +2366,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         LoadPreview* pPv = (LoadPreview*)lParam;
         if (pPv != nullptr)
         {
-            if (g_pJob != nullptr && !g_bLoadCancel && pPv->uSeq == g_pJob->uSeq && pPv->pText != nullptr)
+            if (g_pJob != nullptr && !LoadCancelled() && pPv->uSeq == g_pJob->uSeq && pPv->pText != nullptr)
             {
                 // 3.09: stage the window the preview shows (view, base,
                 // byte count) BEFORE delivering: GutterWidth answers 0
@@ -1711,6 +2380,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 iView = pPv->iView;
                 g_qwBase = pPv->qwBase;
                 cbFile = pPv->cbBytes;
+                EnsureEditControlType();    // 5.4: only creates the control if it does not exist yet
+                UpdateViewMenu();           // 5.2: the radio mark follows the staged view too
                 DeliverTextSafely(pPv->pText, (int)pPv->cch, TRUE);
             }
             else
@@ -1776,17 +2447,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_PAINT:
     {
-        // The edit control paints itself; BeginPaint/EndPaint just
+        // The custom control paints itself; BeginPaint/EndPaint just
         // validate the update region so Windows stops repainting.
         PAINTSTRUCT ps;
-        BeginPaint(hWnd, &ps);
-        EndPaint(hWnd, &ps);
-        // 3.00: the gutter column is the PARENT's territory. When the
-        // update region covers only that strip (a window was dragged
-        // away from it), validating without painting kept the stale
-        // pixels on screen: the edit control never repaints the
-        // parent's strip on its own.
+        HDC hdc = BeginPaint(hWnd, &ps);
+        // 3.00: the gutter column is the PARENT's territory. 5.6: this path
+        // (expose/resize) always repaints it and clears the control's dirty
+        // flag; scroll ticks inside the control use the flag instead.
         PaintGutter();
+        g_tv.bGutterDirty = false;
+        g_tv.iPaintedRulerX = g_tv.iScrollX;   // 5.7: the parent just painted the ruler
+        // 5.4: with the ruler on, the control (and the gutter) start one
+        // line down — paint the little square left of the ruler so no
+        // pixel of the strip is left undefined (the parent's
+        // WM_ERASEBKGND answers 1 without erasing).
+        if (g_bRuler && iView != VIEW_HEX && iHexLineH > 0 && hEdit != nullptr)
+        {
+            RECT rcClient;
+            if (GetClientRect(hWnd, &rcClient))
+            {
+                int iGutter = GutterWidth();
+                RECT rcRuler = { iGutter, 0, rcClient.right, iHexLineH };
+                PaintRuler(hdc, rcRuler, iGutter);
+                RECT rcCorner = { 0, 0, iGutter, iHexLineH };
+                FillRect(hdc, &rcCorner, GetSysColorBrush(COLOR_WINDOW));
+            }
+        }
+        EndPaint(hWnd, &ps);
         break;
     }
     case WM_SIZE:
@@ -1811,23 +2498,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         break;
     }
-    case WM_CTLCOLORSTATIC:
-        // A read-only edit control sends WM_CTLCOLORSTATIC instead of
-        // WM_CTLCOLOREDIT: keep the white background of an editable one.
-        if ((HWND)lParam == hEdit)
-        {
-            HDC hdcEdit = (HDC)wParam;
-            SetBkColor(hdcEdit, GetSysColor(COLOR_WINDOW));
-            SetTextColor(hdcEdit, GetSysColor(COLOR_WINDOWTEXT));
-            return((LRESULT)GetSysColorBrush(COLOR_WINDOW));
-        }
-        return(DefWindowProc(hWnd, message, wParam, lParam));
     case WM_ERASEBKGND:
-        // The edit control and the status bar cover the whole
+        // The text view and the status bar cover the whole
         // client area and paint their own background: erasing
         // the parent's would be work with no visible result.
         // Answering 1 ("erased", without erasing) also removes
         // the classic white flash while resizing.
+        // 5.4: the WM_CTLCOLOREDIT/WM_CTLCOLORSTATIC branches died with
+        // the standard EDIT — the custom control paints itself.
         if (hEdit != nullptr)
         {
             return(1);
@@ -1884,6 +2562,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         delete[] pFileBytes;        // raw bytes of the last loaded file
         pFileBytes = nullptr;
+        // V5: free the custom control's view text buffer (leak fix)
+        ReleaseViewContent();   // 5.2: one helper
         DeleteObject(hFont);
         hFont = nullptr;
         DeleteObject(hFontHexBold);
@@ -1900,120 +2580,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 
 /* -------------------------------------------------------------------------------------------- */
-LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
-{
-    UNREFERENCED_PARAMETER(uIdSubclass);
-    UNREFERENCED_PARAMETER(dwRefData);
-    switch (message)
-    {
-    case WM_PAINT:
-        // The edit control paints itself; afterwards the hex offset
-        // column (owned by the parent window) is refreshed. Every
-        // scroll path — scrollbar, wheel, caret moves, auto-scroll
-        // while selecting — invalidates part of the control, so they
-        // all land here: no message whitelist to maintain, and the
-        // column only ever paints the ~40 offsets actually visible.
-        DefSubclassProc(hWnd, message, wParam, lParam);
-        PaintGutter();        // hex offsets or line numbers, whichever is active
-        return(0);
-    case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE)
-        {
-            // ESC cancels an in-flight Find Bytes scan first (2.96);
-            // with nothing to cancel it closes the program, as always.
-            // The Find and About dialogs keep their usual ESC
-            // behavior: their messages never reach here.
-            if (g_bInByteSearch)
-            {
-                InterlockedExchange(&g_bSearchCancel, 1);
-            }
-            else
-            {
-                PostMessage(hWndMain, WM_CLOSE, 0, 0);
-            }
-            return(0);
-        }
-        // Ctrl+Home / Ctrl+End: first / last page of the FILE (2.96).
-        // The plain EDIT shortcuts only reach the ends of the page on
-        // screen; a 20 GB file needs the pager's notion of first/last.
-        // 3.01: with stdin/clipboard content (no pages behind the
-        // text) JumpFilePage walks the caret to the ends of what is
-        // on screen, so the keys never end up dead.
-        if ((GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000) && (wParam == VK_HOME || wParam == VK_END))   // 3.06: Ctrl+Shift extends the selection (EDIT)
-        {
-            JumpFilePage(wParam == VK_END);
-            return(0);
-        }
-        // 3.03: PgDn / PgUp, the pager keys. The menu shortcuts are
-        // PLAIN PgDn / PgUp (the accelerator entries are gone: they
-        // intercepted the keys before this proc could ever see them).
-        // Plain keys: the page on screen scrolls while it can; at its
-        // last/first screenful the NEXT/PREVIOUS page of the FILE
-        // loads, pager style. With Ctrl held: an immediate page
-        // change, no scroll first. The font +/- keys are NOT here
-        // anymore: the accelerator table answers them first (the
-        // branch was dead code since the accelerator exists).
-        if (wParam == VK_NEXT || wParam == VK_PRIOR)
-        {
-            int iDir = (wParam == VK_NEXT) ? 1 : -1;
-            bool bPageNow = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            if (!bPageNow && g_szCurrentFile[0] != L'\0')   // stdin/clipboard: no pages, EDIT scrolls
-            {
-                SCROLLINFO si;
-                si.cbSize = sizeof(si);
-                si.fMask = SIF_POS | SIF_RANGE | SIF_PAGE;
-                if (GetScrollInfo(hWnd, SB_VERT, &si))
-                {
-                    int iMaxTop = si.nMax - (int)si.nPage + 1;   // last scrollable top line
-                    if (iMaxTop < 0)
-                    {
-                        iMaxTop = 0;
-                    }
-                    // mid-page: the EDIT scrolls one screenful
-                    bPageNow = (iDir > 0) ? (si.nPos >= iMaxTop) : (si.nPos <= 0);
-                }
-            }
-            if (bPageNow)
-            {
-                if (g_szCurrentFile[0] == L'\0')
-                {
-                    // 3.04: stdin/clipboard have no pages to change; the
-                    // keys still must not die (the 3.01 rule). They walk
-                    // the caret to the ends of the text on screen, the
-                    // same meaning Ctrl+End/Home already have there.
-                    JumpFilePage(iDir > 0);
-                }
-                else
-                {
-                    ChangePage(iDir);
-                }
-                return(0);
-            }
-            break;          // stdin/clipboard, or mid-page: the EDIT scrolls
-        }
-        break;
-        // Keep the status bar updated when the caret can move.
-    case WM_KEYUP:
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONDBLCLK:
-    case WM_LBUTTONUP:
-        UpdateStatusBar();
-        break;
-    case WM_MOUSEMOVE:
-        // Only a drag (left button held) can move the caret with
-        // the mouse. Plain hovering used to run one EM_GETSEL per
-        // message for a status bar that never changes.
-        if (wParam & MK_LBUTTON)
-        {
-            UpdateStatusBar();
-        }
-        break;
-    case WM_DESTROY:
-        RemoveWindowSubclass(hWnd, EditSubclassProc, 1);
-        break;
-    }
-    return(DefSubclassProc(hWnd, message, wParam, lParam));
-}
+// 5.4: EditSubclassProc is GONE. It only subclassed the standard EDIT of the
+// hex view, and the hex view uses the custom control now: PaintGutter runs
+// from the control's WM_PAINT, ESC and PgDn/PgUp (page logic included) live
+// in TextViewProc, and UpdateStatusBar runs from the control's mouse/caret
+// handling.
 
 
 /* -------------------------------------------------------------------------------------------- */
@@ -2228,17 +2799,10 @@ void ResetViewer(void)
     ClearBookmarks();            // page-relative line bookmarks die with their page
     iView = VIEW_ANSI;
     UpdateViewMenu();
-    if (hEdit != nullptr)
-    {
-        // 2.98: EM_SETHANDLE swap instead of WM_SETTEXT "" — this also
-        // RELEASES the adopted block of the previous view, which would
-        // otherwise stay owned by the control until its next text.
-        AdoptEmptyText();
-    }
+    ReleaseViewContent();        // 5.4: custom control text + line index + buffer, one helper
     LayoutEdit();                   // a hex offset column may have been active: back to x = 0
     if (hWndMain != nullptr)
     {
-        // The title mirrors what the viewer holds: no content, no path.
         SetWindowTextW(hWndMain, szTitle);
     }
     UpdateStatusBar();
@@ -2355,7 +2919,7 @@ void StartAsyncLoad(const WCHAR* pacFilename)
     {
         return;                         // out of memory: BeginLoadJob already said so
     }
-    lstrcpynW(pJob->szPath, pacFilename, MAX_PATH);
+    (void)lstrcpynW(pJob->szPath, pacFilename, MAX_PATH);
     AddRecentEntry(pJob->szPath);           // MRU: remember what is being opened
     LaunchLoadJob(pJob);
 }
@@ -2381,7 +2945,7 @@ unsigned __stdcall LoadThreadProc(void* pParameter)
         // The job keeps whatever it managed to fill in; the UI thread
         // reports the state it actually reached.
     }
-    if (g_bLoadCancel != 0)
+    if (LoadCancelled())
     {
         return 1;                       // cancelled: the UI frees the job after joining
     }
@@ -2606,7 +3170,7 @@ static void LoadProgressPublish(LoadJob* pJob, ULONGLONG qwDone, ULONGLONG qwTot
 // (the detection window: 64 KB, several screens of text) and posts it.
 // Best-effort by design: any failure just means the file opens as it
 // always did. The preview text is normalized HERE (worker side), so the
-// UI delivery is the plain EM_SETHANDLE path. cbAll is clamped to the
+// UI delivery is the plain zero-copy path. cbAll is clamped to the
 // window itself so BuildViewText appends no truncation notice, and the
 // UTF-8 tail is cut back to a whole sequence so no Windows version falls
 // back to the ANSI decoder for the preview (the full page has its own
@@ -2713,7 +3277,7 @@ void RunLoadJob(LoadJob* pJob)
         // a viewer must not lock out the program that is still writing
         // the log being watched (the classic "in use" on live logs).
         // About speed: FILE_FLAG_SEQUENTIAL_SCAN (read-ahead) is already
-        // on and the reads below run in 1 MB chunks; FILE_FLAG_NO_BUFFERING
+        // on and the reads below run in CB_READ_CHUNK (4 MB) chunks; FILE_FLAG_NO_BUFFERING
         // would demand sector-aligned reads and evict the small tail
         // re-reads from the cache: it does not pay off for a viewer.
         hFile = CreateFileW(pJob->szPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
@@ -2774,7 +3338,7 @@ void RunLoadJob(LoadJob* pJob)
         cbAlloc = cbHead;
         while (cbTotal < cbHead)
         {
-            if (g_bLoadCancel != 0)
+            if (LoadCancelled())
             {
                 bCancelled = true;
                 break;
@@ -2829,10 +3393,12 @@ void RunLoadJob(LoadJob* pJob)
             {
                 iDetected = g_iForcedView;
                 pJob->iDetected = g_iForcedView;   // carry it through to ApplyLoadResult
+                g_iForcedView = -1;                // 5.2: consumed HERE, once (the double handling in ApplyLoadResult is gone)
             }
         }
-        DWORD cbCap = (iDetected == VIEW_HEX) ? CB_HEX_MAX
-            : (g_bWrap ? CB_WRAP_TEXT_MAX : CB_TEXT_MAX);   // 3.18: smaller cap with wrap
+        // 5.6: one cap per view — the wrap cap is gone (the custom control
+        // wraps per visible row at paint time, see the CB_TEXT_MAX note).
+        DWORD cbCap = (iDetected == VIEW_HEX) ? (DWORD)CB_HEX_MAX : (DWORD)CB_TEXT_MAX;
 
         // 3.10: ONE scale for the whole page load: the bytes the page reads
         // (min(rest on disk, cap)) plus the chars its build will emit. The
@@ -2919,7 +3485,7 @@ void RunLoadJob(LoadJob* pJob)
                         pJob->pBytes = pTmp;
                         cbAlloc = cbNew;
                     }
-                    if (g_bLoadCancel != 0)
+                    if (LoadCancelled())
                     {
                         bCancelled = true;
                         break;
@@ -2947,10 +3513,11 @@ void RunLoadJob(LoadJob* pJob)
             else if (cbOnDisk - pJob->qwBase > (ULONGLONG)cbTotal)
             {
                 // File: one exact allocation for min(size left from the page
-                // base, cap), the head copied in, the rest read in 1 MB chunks
-                // (3.12: was 4 MB — finer progress ticks and honest granularity
-                // on slow media; still far above the read sizes that make large
-                // files crawl, and the sequential read-ahead keeps the width).
+                // base, cap), the head copied in, the rest read in CB_READ_CHUNK
+                // chunks (4 MB; 3.12 went down to 1 MB for finer ticks and
+                // 3.19/3.20 went back up: 8 syscalls for 32 MB, and the 16 ms
+                // poll interpolates the progress anyway). The sequential
+                // read-ahead keeps the width.
                 // 3.10: cbPage IS min(rest, cap), derived above for the
                 // progress scale — the same number this branch re-derived.
                 DWORD cbFinal = (DWORD)cbPage;
@@ -2963,7 +3530,7 @@ void RunLoadJob(LoadJob* pJob)
                     cbAlloc = cbFinal;
                     while (cbTotal < cbFinal)
                     {
-                        if (g_bLoadCancel != 0)
+                        if (LoadCancelled())
                         {
                             bCancelled = true;
                             break;
@@ -3027,7 +3594,7 @@ void RunLoadJob(LoadJob* pJob)
     {
         CloseHandle(hFile);
     }
-    if (bCancelled || g_bLoadCancel != 0)
+    if (bCancelled || LoadCancelled())
     {
         return;                         // cancelled: the UI frees the job (and its buffer) after the join
     }
@@ -3119,6 +3686,12 @@ void RunLoadJob(LoadJob* pJob)
                 }
                 pJob->pText = pNorm;
                 pJob->cchText = (DWORD)cchNorm;
+                // 5.6: prebuild the line index HERE, on the worker, while
+                // the UI thread stays free. TV_SetText adopts it at
+                // delivery: no wmemchr passes on the UI thread at all.
+                // OOM here is not fatal: TV_SetText falls back to building
+                // the index inline as before.
+                TV_BuildLineIndex(pNorm, (int)cchNorm, &pJob->pLineStarts, &pJob->cLines, &pJob->iMaxLineChars);
             }
         }
         else
@@ -3135,8 +3708,8 @@ void RunLoadJob(LoadJob* pJob)
     }
     // 3.14: the worker's forced 1000 tick is GONE. It said "done" when only
     // the READ was done — and it was the tick that painted the bar FULL
-    // right before the delivery froze this thread inside the EM_SETHANDLE
-    // swap: a full bar frozen for the seconds the swap took is what the
+    // right before the delivery froze this thread inside the buffer swap:
+    // a full bar frozen for the seconds the swap took is what the
     // user read as "estancada". The worker's last word is the read-done
     // tick above; the 1000 now belongs to the delivery, published after
     // the last slice, when the text is really inside the control. For the
@@ -3162,17 +3735,13 @@ void ApplyLoadResult(LoadJob* pJob)
     // raw-file byte search all work on it. A failed open leaves no file.
     if (!pJob->bStdin && !pJob->bOpenFailed)
     {
-        lstrcpynW(g_szCurrentFile, pJob->szPath, MAX_PATH);
+        (void)lstrcpynW(g_szCurrentFile, pJob->szPath, MAX_PATH);
     }
-    // /hex /utf8... from the command line: apply to the first loaded file and
-    // retire the switch (the View menu stays the boss afterwards).
-    int iDeliveredView = pJob->iDetected;
-    if (!pJob->bOpenFailed && g_iForcedView >= VIEW_ANSI && g_iForcedView <= VIEW_EBCDIC)
-    {
-        iView = g_iForcedView;
-        g_iForcedView = -1;
-    }
+    // 5.2: the /hex /utf8... switch is consumed in RunLoadJob now, so iView
+    // always arrives in pJob->iDetected — the old re-decode branch here (and
+    // the second handling of g_iForcedView) are gone.
     ClearBookmarks();                        // page-relative line bookmarks die with the old page
+    EnsureEditControlType();                 // 5.4: only creates the control if it does not exist yet
     UpdateViewMenu();
 
     // Title bar: "4More - <full path>" (or "... - STDIN" for a pipe) while
@@ -3188,36 +3757,36 @@ void ApplyLoadResult(LoadJob* pJob)
 
     WCHAR* pText = pJob->pText;
     pJob->pText = nullptr;
+    // 5.6: the worker prebuilt the line index; hand it over together with
+    // the text and null the job's copy so ~LoadJob does not free what the
+    // view is about to adopt.
+    int* pLineIdx = pJob->pLineStarts;
+    int cLinesIdx = pJob->cLines;
+    int iMaxLineIdx = pJob->iMaxLineChars;
+    pJob->pLineStarts = nullptr; pJob->cLines = 0; pJob->iMaxLineChars = 0;
     // 3.09: write the DEFINITIVE status before the delivery. g_pJob is
     // already null here, so the bar stops saying "Loading..." and shows
-    // the real size while the EM_SETHANDLE swap runs — that swap is the
-    // one stretch where the UI thread cannot repaint anything, and it
-    // must never look like the load is stuck. DeliverTextToEdit refreshes
-    // the caret line at the end as always (cached: one rewrite total).
+    // the real size while the delivery runs — that is the one stretch
+    // where the UI thread cannot repaint anything, and it must never
+    // look like the load is stuck. DeliverTextToEdit refreshes the
+    // caret line at the end as always (cached: one rewrite total).
     UpdateStatusBar();
-    // 3.16: the bar goes to 100% BEFORE the monolithic EM_SETHANDLE
-    // delivery. 3.14-3.15 tried to slice the delivery with EM_REPLACESEL
-    // so the bar could walk permille-by-permille, but EM_REPLACESEL is
-    // QUADRATIC on a growing buffer: each slice forces the EDIT control
-    // to realloc-and-copy its entire accumulated buffer (not just the
-    // slice), so 30 slices of 1 MB cost O(n²) in the buffer size. A 30 MB
-    // text took ~8 seconds just in the delivery — the read itself was
-    // under a second. The monolithic EM_SETHANDLE (2.98) swaps the
-    // buffer pointer in O(1): no realloc, no copy, no per-slice rescans.
-    // The trade-off is that the UI thread cannot repaint during the
-    // swap (typically 0.5-2 s for 30 MB while the control builds its
-    // line table), but the bar is already at 100% and the status bar
-    // shows the real size, so the user sees a honest "almost done"
-    // state rather than a frozen mid-value. Word Wrap is no longer
-    // special-cased either: the rewrap happens inside EM_SETHANDLE in
-    // one pass, not per-slice.
+    // 3.16: the bar goes to 100% BEFORE the delivery. 3.14-3.15 tried to
+    // slice the delivery with EM_REPLACESEL, but EM_REPLACESEL is
+    // QUADRATIC on a growing buffer: each slice forces the control to
+    // realloc-and-copy its entire accumulated buffer (not just the slice),
+    // so 30 slices of 1 MB cost O(n²) in the buffer size. A 30 MB text
+    // took ~8 seconds just in the delivery — the read itself was under a
+    // second. The monolithic zero-copy delivery (2.98; 5.4: pointer hand-
+    // off to the custom control) swaps the buffer pointer in O(1): no
+    // realloc, no copy, no per-slice rescans. 5.6: the line index arrives
+    // prebuilt from the worker, so the delivery does not even scan — the
+    // UI thread is blocked only for the paint of the first frame.
     // 3.16: paint the bar to 100% BEFORE the delivery, for ANY job whose
-    // bar was shown (bBarPosted). The delivery (EM_SETHANDLE) is O(1) for
-    // the buffer swap, but the control's line-table build takes 0.5-2 s
-    // for 30 MB — during that time the UI thread is blocked and cannot
-    // repaint. The bar at 100% + the real size in the status bar is the
-    // honest "finishing" signal the user sees during that stretch. stdin
-    // keeps its marquee (no known total, so 100% would be a lie).
+    // bar was shown (bBarPosted). The delivery is O(1) since 5.6 (buffer
+    // swap + adopted line index, nothing scanned on the UI thread), so
+    // this stretch is a single paint. stdin keeps its marquee (no known
+    // total, so 100% would be a lie).
     if (g_hProgress != nullptr && pJob->bBarPosted && !pJob->bStdin)
     {
         SendMessage(g_hProgress, PBM_SETPOS, 1000, 0);
@@ -3230,7 +3799,7 @@ void ApplyLoadResult(LoadJob* pJob)
     // is remembered and reported together with the load errors below:
     // an empty window without an explanation is the one outcome worse
     // than the message.
-    BOOL bDelivered = DeliverTextSafely(pText, (int)pJob->cchText, TRUE, -1);
+    BOOL bDelivered = DeliverTextSafely(pText, (int)pJob->cchText, TRUE, -1, pLineIdx, cLinesIdx, iMaxLineIdx);
     // 3.09: the bar retires AFTER the delivery (was: before, in the
     // LOADDONE handler — the user watched "Loading..." with no bar during
     // the swap). During the delivery the marquee may freeze for a moment
@@ -3263,12 +3832,6 @@ void ApplyLoadResult(LoadJob* pJob)
     {
         MessageBox(hWndMain, L"An unexpected error occurred while showing the file.", szTitle, MB_OK | MB_ICONERROR);
     }
-    if (bDelivered && iView != iDeliveredView)
-    {
-        // A forced view (/hex...) landed on a file detected otherwise: rebuild
-        // the shown text from the raw bytes of the requested view.
-        ShowViewSafely();
-    }
     if (bDelivered)
     {
         if (g_bTailJumpFirst)
@@ -3282,9 +3845,9 @@ void ApplyLoadResult(LoadJob* pJob)
         if (pJob->bTailJump && hEdit != nullptr)
         {
             // Tail: keep the new end of the file on screen, caret after it.
-            LRESULT lrLen = SendMessage(hEdit, WM_GETTEXTLENGTH, 0, 0);
-            SendMessage(hEdit, EM_SETSEL, (WPARAM)lrLen, (LPARAM)lrLen);
-            SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+            int iLen = EditGetTextLength();   // V5: works for custom control and EDIT
+            EditSetSel(iLen, iLen);
+            EditScrollCaret();
         }
         if (g_qwPendingGoto != (ULONGLONG)-1)
         {
@@ -3362,11 +3925,25 @@ bool IsBinaryData(const BYTE* pBytes, DWORD cb)
     {
         return(true);                   // any NUL byte: binary for sure
     }
+    // 5.2: the control-byte classification goes through a 256-entry LUT
+    // (one load per byte instead of six comparisons). Function-local static:
+    // C++11 makes the one-time fill thread-safe (the worker arrives here).
+    struct CtrlMap
+    {
+        bool bCtrl[256];
+        CtrlMap()
+        {
+            for (int i = 0; i < 256; i++)
+            {
+                bCtrl[i] = ((i < 0x20 && i != 0x09 && i != 0x0A && i != 0x0C && i != 0x0D && i != 0x1B) || i == 0x7F);
+            }
+        }
+    };
+    static const CtrlMap cm;
     DWORD cCtrl = 0;
     for (DWORD i = 0; i < cb; i++)
     {
-        BYTE b = pBytes[i];
-        if ((b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0C && b != 0x0D && b != 0x1B) || b == 0x7F)
+        if (cm.bCtrl[pBytes[i]])
         {
             cCtrl++;
         }
@@ -3427,11 +4004,11 @@ static LocaleInfo BuildLocaleInfo(void)
     LocaleInfo li = {};
     if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SDECIMAL, li.szDecimal, 8) == 0)
     {
-        lstrcpynW(li.szDecimal, L".", 8);
+        (void)lstrcpynW(li.szDecimal, L".", 8);
     }
     if (GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_STHOUSAND, li.szThousand, 8) == 0)
     {
-        lstrcpynW(li.szThousand, L",", 8);
+        (void)lstrcpynW(li.szThousand, L",", 8);
     }
     // LOCALE_SGROUPING spells groups right to left, ";"-terminated
     // ("3;0" for es-ES/US, "12;0" for hi-IN): keep the digits up to the
@@ -3471,7 +4048,7 @@ void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull)
     fmt.Grouping = s_li.dwGrouping;
     if (GetNumberFormatW(LOCALE_USER_DEFAULT, 0, szRaw, &fmt, pszDst, cchDst) == 0)
     {
-        lstrcpynW(pszDst, szRaw, cchDst);
+        (void)lstrcpynW(pszDst, szRaw, cchDst);
     }
 }
 
@@ -3498,13 +4075,20 @@ bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
     {
         return(false);
     }
+    // 5.2: the NUL count goes through a memchr chain (the CRT's SIMD scan)
+    // instead of a per-byte walk: ~4x on the 64 KB detection window.
     DWORD cZero = 0;
-    for (DWORD i = 0; i < cb; i++)
+    const BYTE* pZ = pBytes;
+    const BYTE* pZEnd = pBytes + cb;
+    for (;;)
     {
-        if (pBytes[i] == 0x00)
+        const BYTE* pHit = (const BYTE*)memchr(pZ, 0x00, (size_t)(pZEnd - pZ));
+        if (pHit == nullptr)
         {
-            cZero++;
+            break;
         }
+        cZero++;
+        pZ = pHit + 1;
     }
     if ((unsigned long long) cZero * 100 < (unsigned long long) cb * 25)   // under ~25% NULs: not UTF-16 text
     {
@@ -3656,8 +4240,9 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
 // separately, in bold, by the offset column (PaintGutter). That keeps this
 // buffer at 68 instead of 78 characters per line (WM_SETTEXT copies it and
 // Find walks it), and leaves the offsets out of Copy and Find.
-// The caller must free the returned buffer with FreeViewText (2.98: it is
-// a movable global block, ready for EM_SETHANDLE). The dump shows the bytes of
+// The caller must free the returned buffer with FreeViewText (5.4: it is
+// a fixed global block, handed to the custom control as a pointer). The dump
+// shows the bytes of
 // the current page (qwBase..qwBase+CB_HEX_MAX at most); when the file holds
 // more bytes past that window, a notice replaces the final CRLF of the last
 // line. cbAll is the REAL total on disk, the notice cites the page range.
@@ -3696,7 +4281,7 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
 #if !defined(NO_HEX_PAIR_LUT)
     // One table lookup covers TWO bytes ("XX XX "), halving the loads and
     // stores of the hot loop (measured, see README: the 8 MB worst case
-    // dumps 25% faster). The table costs 65536 x 12 read-only bytes
+    // dumps 25% faster; measured at the old 8 MB cap). The table costs 65536 x 12 read-only bytes
     // (768 KB) and one-time init. 3.02: enabled on Win32 too — 786 KB of
     // constant data do not compromise the 2 GB address space, so the
     // define NO_HEX_PAIR_LUT remains as the only opt-out.
@@ -4186,42 +4771,9 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
 
 
 /* -------------------------------------------------------------------------------------------- */
-// Swaps in an EMPTY block (2.98). The naive WM_SETTEXT "" would leave the
-// control owning the previous tens-of-megabytes buffer: EM_SETHANDLE is the
-// only copy-free way to replace the control's buffer, so even "empty" goes
-// through it — a 2-byte global block adopted by the control, and the old
-// block fetched with EM_GETHANDLE and freed on the spot.
-void AdoptEmptyText(void)
-{
-    if (hEdit == nullptr)
-    {
-        return;
-    }
-    HGLOBAL hNew = GlobalAlloc(GMEM_MOVEABLE, sizeof(WCHAR));   // just the L'\0'
-    if (hNew != nullptr)
-    {
-        WCHAR* pwsz = (WCHAR*)GlobalLock(hNew);
-        if (pwsz != nullptr)
-        {
-            *pwsz = L'\0';
-            GlobalUnlock(hNew);     // EM_SETHANDLE wants it unlocked
-            HGLOBAL hOld = (HGLOBAL)SendMessage(hEdit, EM_GETHANDLE, 0, 0);
-            SendMessage(hEdit, EM_SETHANDLE, (WPARAM)hNew, 0);
-            if (hOld != nullptr && hOld != hNew)
-            {
-                GlobalFree(hOld);       // the control is done with it
-            }
-            return;
-        }
-        GlobalFree(hNew);              // lock failed: fall through to the copy
-    }
-    // No memory for even one WCHAR (or the lock failed): copying "" is the
-    // one case where WM_SETTEXT remains fine — it allocates nothing.
-    SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM)L"");
-}
-
-
-/* -------------------------------------------------------------------------------------------- */
+// 5.4: AdoptEmptyText is GONE. It existed to swap an empty block into the
+// standard EDIT copy-free (EM_SETHANDLE); the custom control clears through
+// ReleaseViewContent, which frees the buffer instead of parking it.
 // 3.16: PumpDuringDelivery and DeliverTextSliced (3.14-3.15) are GONE.
 // EM_REPLACESEL on a growing EDIT buffer is quadratic (each slice forces
 // a realloc+copy of the whole accumulated buffer), which made a 30 MB
@@ -4233,30 +4785,1194 @@ void AdoptEmptyText(void)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// Delivers a decoded text to the edit control, repainting disabled, and OWNS
-// the buffer either way: freed here, or handed to the control to own.
+// V5: Custom text view control
 //
-// 2.98 — zero-copy delivery via EM_SETHANDLE. WM_SETTEXT makes the control
-// COPY the whole text into a buffer it allocates itself: a 60 MB view costs
-// 120 MB of peak memory and one full memcpy on the UI thread, right after
-// the worker built the very same text. EM_SETHANDLE instead swaps the
-// control's buffer pointer for ours (built by AllocViewText as a movable
-// global block): no copy, no second allocation, and the control keeps the
-// block until the next swap frees it. The old block comes back through
-// EM_GETHANDLE and is freed right here — the documented pattern; whatever
-// handle the control answers with is, by definition, the one it is done
-// with, so no tracking global is needed.
+// Replaced the standard EDIT control for text views (ANSI/UTF-8/UTF-16/EBCDIC).
+// The EDIT control recalculates ALL soft breaks synchronously on text change,
+// freezing the UI for seconds on large files with wrap. This custom control:
+//   - builds a line index ONCE on delivery (O(n) scan for \n)
+//   - paints ONLY the visible lines (~50, computed on demand)
+//   - computes wrap per visible line during paint (not for the whole file)
+//   - supports selection, caret, keyboard navigation, copy, find
+//
+// 5.4: the custom control serves EVERY view now, the hex dump included
+// (the standard EDIT and its synchronous EM_SETHANDLE line table are gone).
+//
+// The control does NOT copy the text — it stores a pointer to the view text
+// buffer (owned by AllocViewText/FreeViewText). The line index is owned here.
+
+ATOM RegisterTextViewClass(HINSTANCE hInstance)
+{
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.style = 0;   // 5.2: no CS_HREDRAW/CS_VREDRAW — WM_SIZE already invalidates and WM_PAINT repaints everything
+    wc.lpfnWndProc = TextViewProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(nullptr, IDC_IBEAM);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = V5_TEXTVIEW_CLASS;
+    return RegisterClassExW(&wc);
+}
+
+HWND CreateTextView(HWND hWndParent)
+{
+    DWORD dwStyle = WS_CHILD | WS_VISIBLE | WS_VSCROLL;
+    if (!g_bWrap && g_iWrapWidth == 0) dwStyle |= WS_HSCROLL;
+    HWND hWnd = CreateWindowExW(0, V5_TEXTVIEW_CLASS, L"", dwStyle,
+        0, 0, 0, 0, hWndParent, (HMENU)ID_EDITCHILD, hInst, nullptr);
+    if (hWnd != nullptr)
+    {
+        g_tv.hWnd = hWnd;
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)&g_tv);
+    }
+    return hWnd;
+}
+
+void TV_ClearText(void)
+{
+    if (g_tv.pLineStarts != nullptr) { delete[] g_tv.pLineStarts; g_tv.pLineStarts = nullptr; }
+    g_tv.pText = nullptr;   // V5: null to avoid dangling pointer (buffer owned by g_pViewText)
+    g_tv.cLines = 0; g_tv.cch = 0;
+    g_tv.iSelStart = 0; g_tv.iSelEnd = 0;
+    g_tv.iPaintedSelLo = 0; g_tv.iPaintedSelHi = 0;   // 5.5: nothing highlighted on screen
+    g_tv.iFirstVisible = 0; g_tv.iScrollX = 0;
+    g_tv.bGutterDirty = true;   // 5.6: the column must clear/repaint with the new state
+    g_tv.iPaintedRulerX = -1;   // 5.7: force one ruler repaint on the next control paint
+    g_tv.iPaintedCurLine = -1;  // 5.8: the band died with the old text
+    g_iLineMemo0Char = -1; g_iLineMemo0Line = -1;   // 5.6: the memos died with the old index
+    g_iLineMemo1Char = -1; g_iLineMemo1Line = -1;
+    g_tv.iMaxLineChars = 0;   // 5.2: horizontal range dies with the text
+}
+
+// 5.6: index builder split out of TV_SetText so the load WORKER can run it
+// off the UI thread (the two wmemchr passes over a 32-128 MB page cost tens
+// of ms; on the worker they overlap the user's next input). Returns false
+// only on OOM (then *ppStarts is nullptr).
+static bool TV_BuildLineIndex(WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine)
+{
+    *ppStarts = nullptr; *pcLines = 0; *piMaxLine = 0;
+    if (pText == nullptr || cch <= 0) return true;
+    // 5.2: the line count goes through a wmemchr chain (the CRT's SIMD scan)
+    // instead of a per-character walk: for a 32 MB page this is the difference
+    // between a few ms and tens of ms, x86 and x64 alike.
+    int cLines = 1;
+    const WCHAR* pScan = pText;
+    const WCHAR* pEnd = pText + cch;
+    while ((pScan = (const WCHAR*)wmemchr(pScan, L'\n', (size_t)(pEnd - pScan))) != nullptr)
+    {
+        cLines++;
+        pScan++;
+    }
+    int* pStarts = new (std::nothrow) int[cLines];
+    if (pStarts == nullptr) return false;
+    pStarts[0] = 0;
+    int iLine = 1;
+    int iMaxLine = 0;               // 5.2: longest logical line, for the SB_HORZ range
+    // 5.4: the fill pass is also a wmemchr chain (count pass above, fill
+    // pass here): the old per-character walk cost tens of ms on a 32 MB page.
+    const WCHAR* pFrom = pText;
+    pScan = pText;
+    while ((pScan = (const WCHAR*)wmemchr(pScan, L'\n', (size_t)(pEnd - pScan))) != nullptr)
+    {
+        int cchLine = (int)(pScan - pFrom);
+        if (cchLine > iMaxLine) iMaxLine = cchLine;
+        pScan++;
+        if (iLine < cLines) pStarts[iLine++] = (int)(pScan - pText);
+        pFrom = pScan;
+    }
+    if ((int)(pEnd - pFrom) > iMaxLine) iMaxLine = (int)(pEnd - pFrom);
+    *ppStarts = pStarts;
+    *pcLines = iLine;
+    *piMaxLine = iMaxLine;
+    return true;
+}
+
+// 5.7: the SB_VERT/SB_HORZ ranges of the control, ONE place. TV_SetText
+// (after every delivery) and ApplyEditorFont (after a metric change) kept
+// two near-twin blocks of this; the only difference was which fields each
+// guarded, and both guards are covered by the early-out here.
+static void TV_UpdateScrollRanges(void)
+{
+    if (g_tv.hWnd == nullptr || iHexLineH <= 0 || iHexCharW <= 0) return;
+    RECT rc;
+    if (!GetClientRect(g_tv.hWnd, &rc)) return;
+    SCROLLINFO si = {};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE;
+    si.nMin = 0;
+    si.nMax = g_tv.cLines > 0 ? g_tv.cLines - 1 : 0;
+    si.nPage = (UINT)(rc.bottom / iHexLineH);
+    SetScrollInfo(g_tv.hWnd, SB_VERT, &si, TRUE);
+    // 5.2: horizontal range (pixels) — without it WS_HSCROLL was a dead
+    // bar: SB_PAGEUP/PAGEDOWN subtracted a zero page and long lines could
+    // not be reached.
+    si.nMax = (g_tv.iMaxLineChars + 1) * iHexCharW;
+    si.nPage = (UINT)rc.right;
+    SetScrollInfo(g_tv.hWnd, SB_HORZ, &si, TRUE);
+}
+
+// 5.6: pLineStarts/cLines/iMaxLineChars optionally carry an index PREBUILT on
+// the load worker (LoadJob::pLineStarts): TV_SetText adopts it and the UI
+// thread does NO scan at delivery time. Without it (ApplyView, preview, all
+// non-load paths) it builds the index inline as before.
+void TV_SetText(WCHAR* pText, int cch, int* pLineStarts, int cLines, int iMaxLineChars)
+{
+    TV_ClearText();
+    g_tv.pText = pText;
+    g_tv.cch = cch;
+    if (pText == nullptr || cch <= 0) { delete[] pLineStarts; return; }   // adopt-or-free
+    if (pLineStarts != nullptr && cLines > 0)
+    {
+        g_tv.pLineStarts = pLineStarts;                 // worker prebuilt: O(1) adoption
+        g_tv.cLines = cLines;
+        g_tv.iMaxLineChars = (iMaxLineChars >= 0) ? iMaxLineChars : 0;
+    }
+    else
+    {
+        int iMaxLine = 0;
+        if (!TV_BuildLineIndex(pText, cch, &pLineStarts, &cLines, &iMaxLine))
+        {
+            g_tv.cLines = 0;                            // OOM: view shows nothing, text freed by caller
+            return;
+        }
+        g_tv.pLineStarts = pLineStarts;
+        g_tv.cLines = cLines;
+        g_tv.iMaxLineChars = iMaxLine;
+    }
+    TV_SyncState();            // wrap/style/brush in step with the new view
+    TV_UpdateScrollRanges();   // 5.7: the one ranges helper
+}
+
+void TV_SyncState(void)
+{
+    // 5.4: the hex dump has fixed lines — wrap never applies to it.
+    g_tv.bWrap = (iView != VIEW_HEX) && (g_bWrap || (g_iWrapWidth > 0));
+    g_tv.iWrapWidth = g_iWrapWidth;
+    if (g_tv.bWrap) g_tv.iScrollX = 0;   // wrap never scrolls horizontally
+    // 5.4: keep the WS_HSCROLL style in step with the wrap state. The style
+    // is chosen at creation (ToggleWrap used to RECREATE the control for
+    // this); a view switch into hex now changes the effective wrap without
+    // recreating, so the style follows here instead.
+    if (g_tv.hWnd != nullptr)
+    {
+        DWORD dwStyle = (DWORD)GetWindowLongPtrW(g_tv.hWnd, GWL_STYLE);
+        DWORD dwWant = g_tv.bWrap ? (dwStyle & ~(DWORD)WS_HSCROLL) : (dwStyle | WS_HSCROLL);
+        if (dwWant != dwStyle)
+        {
+            SetWindowLongPtrW(g_tv.hWnd, GWL_STYLE, (LONG_PTR)dwWant);
+            // SWP_FRAMECHANGED: the scrollbars are non-client area, the
+            // style change alone does not re-measure the client rect.
+            SetWindowPos(g_tv.hWnd, nullptr, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+    }
+    // 5.3: el pincel greenbar vive y muere AQUI, junto al flag que lo usa
+    // (idempotente). Antes solo lo creaban ToggleGreenbar y
+    // RecreateEditControl, asi que un Greenbar=1 restaurado del INI pintaba
+    // la PRIMERA carga sin franjas (hbrGreen quedaba null) hasta que el
+    // usuario alternaba la opcion dos veces.
+    g_tv.bGreenbar = g_bGreenbar;
+    if (g_tv.bGreenbar && g_tv.hbrGreen == nullptr)
+    {
+        g_tv.hbrGreen = CreateSolidBrush(RGB(0xE8, 0xF0, 0xE8));
+    }
+    else if (!g_tv.bGreenbar && g_tv.hbrGreen != nullptr)
+    {
+        DeleteObject(g_tv.hbrGreen);
+        g_tv.hbrGreen = nullptr;
+    }
+    // 5.8: the current-line band brush lives and dies here too, with the
+    // flag that uses it (same lifecycle as the greenbar brush).
+    g_tv.bHilite = g_bHiliteLine;
+    if (g_tv.bHilite && g_tv.hbrHilite == nullptr)
+    {
+        g_tv.hbrHilite = CreateSolidBrush(RGB(0xFF, 0xF0, 0xB0));   // soft yellow: readable under both text colors
+    }
+    else if (!g_tv.bHilite && g_tv.hbrHilite != nullptr)
+    {
+        DeleteObject(g_tv.hbrHilite);
+        g_tv.hbrHilite = nullptr;
+    }
+    // 5.9: the bookmarked-line brush is created once and lives for the
+    // session: bookmarks come and go OUTSIDE TV_SyncState (F2, page loads,
+    // view switches), so unlike the greenbar brush it cannot be tied to a
+    // flag here. One small GDI object, released by the OS at exit.
+    if (g_tv.hbrBookmark == nullptr)
+    {
+        g_tv.hbrBookmark = CreateSolidBrush(RGB(0xB8, 0xD4, 0xF0));   // soft blue, readable under black text
+    }
+    g_tv.iPaintedCurLine = -1;   // 5.8: no band on screen yet after any state sync
+}
+
+int TV_LineCount(void) { return g_tv.cLines; }
+int TV_FirstVisibleLine(void) { return g_tv.iFirstVisible; }
+int TV_GetTextLength(void) { return g_tv.cch; }
+void TV_GetSel(int& riStart, int& riEnd) { riStart = g_tv.iSelStart; riEnd = g_tv.iSelEnd; }
+
+// 5.5: forward declaration (defined after TV_Copy, next to the scroll
+// helpers it shares the invalidation logic with).
+static void TV_InvalidateSelPainted(HWND hWnd, TextViewState* pState);
+
+void TV_SetSel(int iStart, int iEnd)
+{
+    if (iStart < 0) iStart = 0;
+    if (iEnd < 0) iEnd = 0;
+    if (iStart > g_tv.cch) iStart = g_tv.cch;
+    if (iEnd > g_tv.cch) iEnd = g_tv.cch;
+    g_tv.iSelStart = iStart;
+    g_tv.iSelEnd = iEnd;
+    if (g_tv.hWnd != nullptr) TV_InvalidateSelPainted(g_tv.hWnd, &g_tv);   // 5.5: only what changed
+}
+
+int TV_LineFromChar(int iChar)
+{
+    if (g_tv.cLines <= 0 || g_tv.pLineStarts == nullptr) return 0;
+    if (iChar == g_iLineMemo0Char) return g_iLineMemo0Line;   // 5.7: memo hit (slot 0)
+    if (iChar == g_iLineMemo1Char)                            // memo hit (slot 1): swap to front
+    {
+        int iT = g_iLineMemo0Char; g_iLineMemo0Char = g_iLineMemo1Char; g_iLineMemo1Char = iT;
+        iT = g_iLineMemo0Line; g_iLineMemo0Line = g_iLineMemo1Line; g_iLineMemo1Line = iT;
+        return g_iLineMemo0Line;
+    }
+    int lo = 0, hi = g_tv.cLines - 1;
+    while (lo < hi) { int mid = (lo + hi + 1) / 2; if (g_tv.pLineStarts[mid] <= iChar) lo = mid; else hi = mid - 1; }
+    g_iLineMemo1Char = g_iLineMemo0Char; g_iLineMemo1Line = g_iLineMemo0Line;   // LRU shift
+    g_iLineMemo0Char = iChar;
+    g_iLineMemo0Line = lo;
+    return lo;
+}
+
+int TV_LineIndex(int iLine)
+{
+    if (iLine < 0 || iLine >= g_tv.cLines || g_tv.pLineStarts == nullptr) return -1;
+    return g_tv.pLineStarts[iLine];
+}
+
+// V5: compute the wrap break point for a run of text. Returns the offset
+// of the first char that doesn't fit in iMaxChars (trying to break at a space).
+// 5.4: scroll/paint helpers, defined after TV_Copy; TV_ScrollCaret and the
+// mouse handlers run before those definitions, so forward declarations.
+static void TV_ScrollRows(HWND hWnd, TextViewState* pState, int iNewFirst);
+static void TV_ScrollX(HWND hWnd, TextViewState* pState, int iNewX);
+
+static int TV_WrapBreak(int iPos, int iLineEnd, int iMaxChars)
+{
+    int cch = iLineEnd - iPos;
+    if (iMaxChars <= 0 || cch <= iMaxChars) return iLineEnd;
+    for (int i = iPos + iMaxChars; i > iPos; i--)
+    {
+        if (g_tv.pText[i] == L' ' || g_tv.pText[i] == L'\t') return i + 1;
+    }
+    return iPos + iMaxChars;
+}
+
+// V5: position the caret based on iSelEnd. Computes (x, y) by walking
+// the visible lines (handling wrap) and calls SetCaretPos.
+static void TV_PositionCaret(void)
+{
+    if (g_tv.hWnd == nullptr || iHexLineH <= 0 || iHexCharW <= 0 || g_tv.pText == nullptr || g_tv.cLines <= 0)
+    {
+        return;
+    }
+    int iCaret = g_tv.iSelEnd;
+    int iCaretLine = TV_LineFromChar(iCaret);
+    int iLineStart = TV_LineIndex(iCaretLine);
+
+    RECT rc;
+    if (!GetClientRect(g_tv.hWnd, &rc)) return;
+    int iMaxChars = 0;
+    if (g_tv.bWrap)
+    {
+        iMaxChars = (g_tv.iWrapWidth > 0) ? g_tv.iWrapWidth : (rc.right / iHexCharW);
+    }
+
+    // Walk visible lines to find the visual row containing the caret.
+    // 5.9.3: in no-wrap mode every logical line is exactly one visual row,
+    // so the walk collapses to direct arithmetic. This function runs at the
+    // end of EVERY WM_PAINT, so removing the per-paint loop over all visible
+    // lines removes the last per-paint hotspot in the common (no-wrap) case.
+    int y = 0;
+    if (!g_tv.bWrap)
+    {
+        if (iCaretLine >= g_tv.iFirstVisible)
+        {
+            y = (iCaretLine - g_tv.iFirstVisible) * iHexLineH;
+            if (y < rc.bottom)
+            {
+                // 5.9.4: EXACT parity with the old walk. A caret sitting ON
+                // the line's CR/LF (reachable with the arrow keys) used to
+                // fall through the sub-row loop to SetCaretPos(0, y): the
+                // 5.9.3 shortcut drew it past the last visible char instead.
+                // Same arithmetic as every other iDE in this file.
+                int iLE = (iCaretLine + 1 < g_tv.cLines) ? g_tv.pLineStarts[iCaretLine + 1] : g_tv.cch;
+                int iDE = iLE;
+                if (iDE > iLineStart && g_tv.pText[iDE - 1] == L'\n') iDE--;
+                if (iDE > iLineStart && g_tv.pText[iDE - 1] == L'\r') iDE--;
+                if (iCaret <= iDE)
+                {
+                    SetCaretPos((iCaret - iLineStart) * iHexCharW - g_tv.iScrollX, y);
+                }
+                else
+                {
+                    SetCaretPos(0, y);
+                }
+            }
+        }
+        return;
+    }
+    // 5.9.4: the caret line scrolled ABOVE the view can never match inside
+    // the walk: skip it instead of counting the rows of every visible line
+    // for nothing (the old loop only noticed at the end).
+    if (iCaretLine < g_tv.iFirstVisible)
+    {
+        return;
+    }
+    for (int iLine = g_tv.iFirstVisible; iLine < g_tv.cLines && y < rc.bottom; iLine++)
+    {
+        int iLS = TV_LineIndex(iLine);
+        int iLE = (iLine + 1 < g_tv.cLines) ? g_tv.pLineStarts[iLine + 1] : g_tv.cch;
+        int iDE = iLE;
+        if (iDE > iLS && g_tv.pText[iDE - 1] == L'\n') iDE--;
+        if (iDE > iLS && g_tv.pText[iDE - 1] == L'\r') iDE--;
+
+        if (iLine == iCaretLine)
+        {
+            // Found the logical line — find the visual sub-row with the caret
+            int iPos = iLS;
+            while (iPos <= iDE && y < rc.bottom)
+            {
+                int iCE = (g_tv.bWrap && iMaxChars > 0) ? TV_WrapBreak(iPos, iDE, iMaxChars) : iDE;
+                if (iCE > iDE) iCE = iDE;
+                if (iCaret >= iPos && iCaret <= iCE)
+                {
+                    int x = (iCaret - iPos) * iHexCharW - g_tv.iScrollX;
+                    SetCaretPos(x, y);
+                    return;
+                }
+                iPos = iCE;
+                if (iPos >= iDE) break;
+                y += iHexLineH;
+            }
+            SetCaretPos(0, y);
+            return;
+        }
+        // Count visual rows for this logical line
+        int cRows = 1;
+        if (g_tv.bWrap && iMaxChars > 0)
+        {
+            cRows = 0;
+            int iPos = iLS;
+            while (iPos < iDE) { iPos = TV_WrapBreak(iPos, iDE, iMaxChars); cRows++; }
+            if (cRows < 1) cRows = 1;
+        }
+        y += cRows * iHexLineH;
+    }
+    // V5: caret line is not visible (scrolled out of view) — don't position it.
+    // TV_ScrollCaret should have been called to scroll it into view first.
+    // Returning without SetCaretPos leaves the caret hidden, which is better
+    // than jumping to (0,0) and misleading the user.
+    return;
+}
+
+void TV_ScrollCaret(void)
+{
+    if (g_tv.cLines <= 0 || g_tv.hWnd == nullptr || iHexLineH <= 0) return;
+    int iCaretLine = TV_LineFromChar(g_tv.iSelEnd);
+    RECT rc;
+    if (!GetClientRect(g_tv.hWnd, &rc)) return;
+    int cVis = rc.bottom / iHexLineH;
+    if (cVis < 1) cVis = 1;
+    int iFirst = g_tv.iFirstVisible;
+    if (iCaretLine < iFirst) iFirst = iCaretLine;
+    else if (iCaretLine >= iFirst + cVis) { iFirst = iCaretLine - cVis + 1; if (iFirst < 0) iFirst = 0; }
+    // 5.4: TV_ScrollRows clamps, syncs the scrollbar and blits the rows that
+    // can move; the selection delta below still repaints the rows the
+    // highlight changes on (5.5: with both selections empty NOTHING is
+    // invalidated — the old code repainted the whole control per key).
+    TV_ScrollRows(g_tv.hWnd, &g_tv, iFirst);
+    // 5.2: horizontal tracking — without it the caret walked off the right
+    // edge on long lines and nothing brought it back. 5.5: through
+    // TV_ScrollX, which blits the shift and syncs the thumb; the old inline
+    // SetScrollInfo passed si.fMask = 0, so the thumb NEVER moved here.
+    if (!g_tv.bWrap && iHexCharW > 0)
+    {
+        int iLS = TV_LineIndex(TV_LineFromChar(g_tv.iSelEnd));
+        if (iLS < 0) iLS = 0;
+        int x = (g_tv.iSelEnd - iLS) * iHexCharW;
+        if (x < g_tv.iScrollX)
+        {
+            TV_ScrollX(g_tv.hWnd, &g_tv, x);
+        }
+        else if (x >= g_tv.iScrollX + rc.right && rc.right > iHexCharW)
+        {
+            TV_ScrollX(g_tv.hWnd, &g_tv, x - rc.right + iHexCharW);
+        }
+    }
+    TV_InvalidateSelPainted(g_tv.hWnd, &g_tv);   // 5.5: only the rows the highlight moved
+    TV_PositionCaret();   // V5: position the caret after scrolling
+    UpdateStatusBar();
+}
+
+void TV_Copy(void)
+{
+    if (g_tv.iSelStart == g_tv.iSelEnd || g_tv.pText == nullptr) return;
+    int iStart = (g_tv.iSelStart < g_tv.iSelEnd) ? g_tv.iSelStart : g_tv.iSelEnd;
+    int iEnd = (g_tv.iSelStart < g_tv.iSelEnd) ? g_tv.iSelEnd : g_tv.iSelStart;
+    int cch = iEnd - iStart;
+    if (cch <= 0) return;
+    if (OpenClipboard(g_tv.hWnd))
+    {
+        EmptyClipboard();
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)(cch + 1) * sizeof(WCHAR));
+        if (hMem != nullptr)
+        {
+            WCHAR* pDst = (WCHAR*)GlobalLock(hMem);
+            if (pDst != nullptr)
+            {
+                memcpy(pDst, g_tv.pText + iStart, (size_t)cch * sizeof(WCHAR));
+                pDst[cch] = L'\0';
+                GlobalUnlock(hMem);
+                SetClipboardData(CF_UNICODETEXT, hMem);
+            }
+            else GlobalFree(hMem);
+        }
+        CloseClipboard();
+    }
+}
+
+// 5.4: scroll-and-blit helpers. A scrollbar step or a wheel notch used to
+// InvalidateRect(nullptr) the whole control, repainting every visible row;
+// ScrollWindowEx moves the settled rows in one blit and WM_PAINT repaints
+// only the exposed strip (see the dirty-rect limiting in WM_PAINT).
+
+// Vertical: move iFirstVisible to iNewFirst, blit what can move and expose
+// the rest. Wrap mode falls back to a full invalidate: a logical line can
+// span several visual rows, so the pixel delta is not rows * iHexLineH.
+static void TV_ScrollRows(HWND hWnd, TextViewState* pState, int iNewFirst)
+{
+    if (iNewFirst < 0) iNewFirst = 0;
+    if (pState->cLines <= 0) iNewFirst = 0;
+    else if (iNewFirst > pState->cLines - 1) iNewFirst = pState->cLines - 1;
+    if (iNewFirst == pState->iFirstVisible) return;
+    int dy = (iNewFirst - pState->iFirstVisible) * iHexLineH;
+    pState->iFirstVisible = iNewFirst;
+    pState->bGutterDirty = true;   // 5.6: the labels shifted with the content
+    SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_POS; si.nPos = iNewFirst;
+    SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+    RECT rc;
+    if (GetClientRect(hWnd, &rc) && !pState->bWrap && dy >= -rc.bottom && dy <= rc.bottom &&
+        ScrollWindowEx(hWnd, 0, -dy, &rc, nullptr, nullptr, nullptr, SW_INVALIDATE) != 0)
+    {
+        return;   // blit done: only the exposed strip is invalid now
+    }
+    InvalidateRect(hWnd, nullptr, FALSE);
+}
+
+// Horizontal (no-wrap mode): iScrollX is in pixels. The scrollbar clamps
+// the position to its range (re-read after SetScrollInfo, like the old
+// WM_HSCROLL did).
+static void TV_ScrollX(HWND hWnd, TextViewState* pState, int iNewX)
+{
+    if (iNewX < 0) iNewX = 0;
+    SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_POS; si.nPos = iNewX;
+    SetScrollInfo(hWnd, SB_HORZ, &si, TRUE);
+    si.fMask = SIF_POS;
+    if (!GetScrollInfo(hWnd, SB_HORZ, &si)) return;
+    if (si.nPos == pState->iScrollX) return;
+    int dx = pState->iScrollX - si.nPos;   // scrolling right moves content left
+    pState->iScrollX = si.nPos;
+    RECT rc;
+    if (GetClientRect(hWnd, &rc) && dx >= -rc.right && dx <= rc.right &&
+        ScrollWindowEx(hWnd, dx, 0, &rc, nullptr, nullptr, nullptr, SW_INVALIDATE) != 0)
+    {
+        return;
+    }
+    InvalidateRect(hWnd, nullptr, FALSE);
+}
+
+// 5.8: current-line band bookkeeping. Every selection/caret change goes
+// through TV_InvalidateSelPainted (TV_SetSel and TV_ScrollCaret both call
+// it), so hooking here covers arrows, clicks, drag, Ctrl+End, bookmarks,
+// Go To and search jumps. When the caret changed line, the rows of the OLD
+// and the NEW line repaint so the band follows the cursor; with the option
+// off (or no text) a stale band is cleared once. No-wrap mode invalidates
+// the two rows precisely (rows and logical lines map 1:1); wrap falls back
+// to a full invalidate (a line can span several visual rows).
+static void TV_UpdateCurLine(HWND hWnd, TextViewState* pState)
+{
+    int iCur = -1;
+    if (pState->bHilite && pState->pText != nullptr && pState->cLines > 0)
+    {
+        iCur = TV_LineFromChar(pState->iSelEnd);
+    }
+    if (iCur == pState->iPaintedCurLine)
+    {
+        return;   // the screen already shows this band (or its absence)
+    }
+    int iOld = pState->iPaintedCurLine;
+    pState->iPaintedCurLine = iCur;
+    if (hWnd == nullptr)
+    {
+        return;
+    }
+    if (pState->bWrap || iHexLineH <= 0)
+    {
+        InvalidateRect(hWnd, nullptr, FALSE);
+        return;
+    }
+    RECT rc;
+    if (!GetClientRect(hWnd, &rc)) return;
+    for (int i = 0; i < 2; i++)
+    {
+        int iLine = (i == 0) ? iOld : iCur;
+        // 5.9.4: partial rows count as visible (ceil, like
+        // TV_InvalidateSelPainted): the paint loop draws a partially visible
+        // last row, so a band change on it must invalidate it too (the floor
+        // division skipped it and left the old band until the next paint).
+        if (iLine < pState->iFirstVisible ||
+            iLine >= pState->iFirstVisible + (rc.bottom + iHexLineH - 1) / iHexLineH)
+        {
+            continue;   // off-screen: the paint loop will draw it when it returns
+        }
+        int y = (iLine - pState->iFirstVisible) * iHexLineH;
+        RECT rcRow = { 0, y, rc.right, y + iHexLineH };
+        InvalidateRect(hWnd, &rcRow, FALSE);
+    }
+}
+
+// 5.5: repaint only what a selection change visibly alters. The state keeps
+// the selection range the LAST paint left on screen (iPaintedSel*), so:
+//   - a caret move with both selections empty (plain arrow keys, a click on
+//     empty text) changes nothing visible: it repaints NOTHING (the old code
+//     invalidated the whole control on every TV_ScrollCaret) and just puts
+//     the caret where it belongs;
+//   - a selection that keeps its anchor (drag, shift+arrows) repaints only
+//     the rows its moving end gained or lost;
+//   - any other change repaints the rows of the union of both ranges.
+// It also fixes a stale-highlight bug: the old helper measured from iSelEnd
+// only, so clicking inside an active selection left rows highlighted that
+// were no longer selected. Wrap mode falls back to the whole control: the
+// visual row of a char depends on the wrapping. ScrollWindowEx blits move
+// highlighted pixels without changing the highlighted RANGE, so the cache
+// survives scrolls untouched.
+static void TV_InvalidateSelPainted(HWND hWnd, TextViewState* pState)
+{
+    TV_UpdateCurLine(hWnd, pState);   // 5.8: the band follows the caret
+    int iLo = (pState->iSelStart < pState->iSelEnd) ? pState->iSelStart : pState->iSelEnd;
+    int iHi = (pState->iSelStart < pState->iSelEnd) ? pState->iSelEnd : pState->iSelStart;
+    int pLo = pState->iPaintedSelLo;
+    int pHi = pState->iPaintedSelHi;
+    if (iLo == pLo && iHi == pHi)
+    {
+        return;   // the screen already shows this selection
+    }
+    pState->iPaintedSelLo = iLo;
+    pState->iPaintedSelHi = iHi;
+    if (iLo == iHi && pLo == pHi)
+    {
+        TV_PositionCaret();   // no paint will run: move the caret ourselves
+        return;
+    }
+    if (pState->bWrap || iHexLineH <= 0)
+    {
+        InvalidateRect(hWnd, nullptr, FALSE);
+        return;
+    }
+    int uLo, uHi;
+    if (iLo == pLo)
+    {
+        uLo = (iHi < pHi) ? iHi : pHi;   // same anchor: only the moving end
+        uHi = (iHi > pHi) ? iHi : pHi;
+    }
+    else
+    {
+        uLo = (iLo < pLo) ? iLo : pLo;   // the anchor moved: everything between
+        uHi = (iHi > pHi) ? iHi : pHi;
+    }
+    RECT rc;
+    if (!GetClientRect(hWnd, &rc)) return;
+    int cVis = (rc.bottom + iHexLineH - 1) / iHexLineH;   // partial row included
+    int iRowLo = TV_LineFromChar(uLo) - pState->iFirstVisible;
+    int iRowHi = TV_LineFromChar(uHi) - pState->iFirstVisible;
+    if (iRowLo < 0) iRowLo = 0;
+    if (iRowHi > cVis) iRowHi = cVis;
+    if (iRowHi < iRowLo) return;   // off-screen: the next scroll's paint catches it
+    RECT rcRows = { 0, iRowLo * iHexLineH, rc.right, (iRowHi + 1) * iHexLineH };
+    InvalidateRect(hWnd, &rcRows, FALSE);
+}
+
+// 5.7: character offset under a point (client coordinates). Replaces the
+// two 15-line copies in WM_LBUTTONDOWN / WM_MOUSEMOVE and FIXES the
+// wrap-mode click: they mapped visual row -> logical line 1:1, so clicking
+// the 3rd visual row of a wrapped paragraph put the caret in a DIFFERENT
+// logical line (and dragging jumped between lines). Here the visible lines
+// are walked counting visual rows, the same arithmetic the WM_PAINT uses.
+// Row and column are clamped: a negative column no longer slips in, and
+// dragging below the last visible row now extends to the end of the last
+// line instead of being ignored.
+static int TV_HitTest(TextViewState* pState, int x, int y)
+{
+    if (pState->cLines <= 0 || pState->pLineStarts == nullptr || pState->pText == nullptr ||
+        iHexLineH <= 0 || iHexCharW <= 0)
+    {
+        return 0;
+    }
+    int iRow = y / iHexLineH;               // visual row clicked, from the first visible
+    if (iRow < 0) iRow = 0;
+    int iCol = (x + pState->iScrollX) / iHexCharW;
+    if (iCol < 0) iCol = 0;
+    if (!pState->bWrap)
+    {
+        int iLine = pState->iFirstVisible + iRow;
+        if (iLine >= pState->cLines) iLine = pState->cLines - 1;   // past the end: last line
+        int iLS = pState->pLineStarts[iLine];
+        int iLE = (iLine + 1 < pState->cLines) ? pState->pLineStarts[iLine + 1] : pState->cch;
+        int iDE = iLE;
+        if (iDE > iLS && pState->pText[iDE - 1] == L'\n') iDE--;
+        if (iDE > iLS && pState->pText[iDE - 1] == L'\r') iDE--;
+        int iPos = iLS + iCol;
+        return (iPos > iDE) ? iDE : iPos;
+    }
+    // wrap: walk the visible lines counting their visual rows
+    RECT rc;
+    if (!GetClientRect(pState->hWnd, &rc)) return 0;
+    int iMaxChars = (pState->iWrapWidth > 0) ? pState->iWrapWidth : (rc.right / iHexCharW);
+    if (iMaxChars < 1) iMaxChars = 1;
+    for (int iLine = pState->iFirstVisible; iLine < pState->cLines; iLine++)
+    {
+        int iLS = pState->pLineStarts[iLine];
+        int iLE = (iLine + 1 < pState->cLines) ? pState->pLineStarts[iLine + 1] : pState->cch;
+        int iDE = iLE;
+        if (iDE > iLS && pState->pText[iDE - 1] == L'\n') iDE--;
+        if (iDE > iLS && pState->pText[iDE - 1] == L'\r') iDE--;
+        if (iDE <= iLS)
+        {
+            // empty line: one visual row
+            if (iRow == 0) return iLS;
+            iRow--;
+            continue;
+        }
+        int iPos = iLS;
+        while (iPos < iDE)
+        {
+            int iCE = TV_WrapBreak(iPos, iDE, iMaxChars);
+            if (iCE > iDE) iCE = iDE;
+            if (iCE <= iPos) iCE = iPos + 1;
+            if (iRow == 0)
+            {
+                int iPos2 = iPos + iCol;
+                return (iPos2 > iCE) ? iCE : iPos2;   // past the row's end: its last char
+            }
+            iRow--;
+            iPos = iCE;
+        }
+    }
+    // clicked below every visible row: the end of the last line
+    int iLast = pState->cLines - 1;
+    int iLS = pState->pLineStarts[iLast];
+    int iLE = pState->cch;
+    int iDE = iLE;
+    if (iDE > iLS && pState->pText[iDE - 1] == L'\n') iDE--;
+    if (iDE > iLS && pState->pText[iDE - 1] == L'\r') iDE--;
+    return iDE;
+}
+
+LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    TextViewState* pState = (TextViewState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+    switch (message)
+    {
+    case WM_ERASEBKGND:
+        // V5: return 1 (erased) WITHOUT erasing. WM_PAINT paints the full
+        // background with FillRect, so WM_ERASEBKGND's default erase would
+        // be a redundant fill that causes flicker. By returning 1 we tell
+        // Windows "I handled it" and it skips the default erase.
+        return 1;
+    case WM_PAINT:
+    {
+        if (pState == nullptr || pState->pText == nullptr || iHexLineH <= 0 || iHexCharW <= 0)
+        {
+            // 5.3: an empty view (no text delivered yet) must still paint
+            // its background: WM_ERASEBKGND answers 1 WITHOUT erasing, so
+            // validating without filling left undefined pixels on screen.
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+            RECT rc;
+            if (hdc != nullptr && GetClientRect(hWnd, &rc))
+            {
+                FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
+            }
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+
+        // V5: use cached brushes (no CreateSolidBrush per paint)
+        HBRUSH hbrGreen = pState->hbrGreen;   // cached in TV_SyncState
+        HBRUSH hbrWhite = GetSysColorBrush(COLOR_WINDOW);
+        COLORREF clrWindow = GetSysColor(COLOR_WINDOW);   // 5.9.4: the row-color twin of hbrWhite
+        COLORREF clrText = GetSysColor(COLOR_WINDOWTEXT);
+        COLORREF clrSelBg = GetSysColor(COLOR_HIGHLIGHT);
+        COLORREF clrSelTx = GetSysColor(COLOR_HIGHLIGHTTEXT);
+
+        // V5: compute wrap width once
+        int iMaxChars = 0;
+        if (pState->bWrap) iMaxChars = (pState->iWrapWidth > 0) ? pState->iWrapWidth : (rc.right / iHexCharW);
+        int iSelLo = (pState->iSelStart < pState->iSelEnd) ? pState->iSelStart : pState->iSelEnd;
+        int iSelHi = (pState->iSelStart < pState->iSelEnd) ? pState->iSelEnd : pState->iSelStart;
+        int iScrollX = pState->iScrollX;
+
+        // V5: single pass — paint background + text together per visual row.
+        // This avoids walking the lines twice (once for background, once for text)
+        // and avoids calling TV_WrapBreak twice per line.
+        HFONT hOld = (HFONT)SelectObject(hdc, hFont);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, clrText);
+
+        // 5.4: paint only the rows that intersect the dirty rectangle. After
+        // a ScrollWindowEx or a partial InvalidateRect most repaints touch a
+        // handful of rows; a full repaint (rcPaint == client rect) walks and
+        // paints everything as before. Rows above the dirty rect are still
+        // walked (wrap mode needs the walk to count sub-rows) but skipped.
+        int yTop = 0;
+        int yBottom = rc.bottom;
+        if (ps.rcPaint.top > 0 || ps.rcPaint.bottom < rc.bottom)
+        {
+            yTop = (ps.rcPaint.top / iHexLineH) * iHexLineH;   // whole rows only
+            yBottom = ps.rcPaint.bottom;
+        }
+
+        int y = 0;
+        int iLine0 = pState->iFirstVisible;
+        // 5.8: the line the band paints on (only with the option on; the
+        // caret line keeps its band even with a live selection, like the
+        // standard editors).
+        int iCurLine = pState->bHilite ? TV_LineFromChar(pState->iSelEnd) : -1;
+        // 5.9: bookmarked lines paint a soft blue background, ALWAYS (every
+        // view, with or without line numbers). g_pBookmarks is sorted and
+        // the loop walks lines in ascending order: one cursor advances in
+        // lockstep, so the membership test costs O(1) amortized per row.
+        int iBm = 0;
+        if (yTop > 0 && !pState->bWrap)
+        {
+            // No-wrap only: rows and logical lines map 1:1, so the walk can
+            // jump straight to the first dirty row. Wrap mode walks from the
+            // first visible line (its rows per line vary) and just skips the
+            // drawing above yTop.
+            int iSkip = yTop / iHexLineH;
+            iLine0 += iSkip;
+            y = iSkip * iHexLineH;
+        }
+        for (int iLine = iLine0; iLine < pState->cLines && y < yBottom; iLine++)
+        {
+            int iLineStart = pState->pLineStarts[iLine];
+            int iLineEnd = (iLine + 1 < pState->cLines) ? pState->pLineStarts[iLine + 1] : pState->cch;
+            int iDispEnd = iLineEnd;
+            if (iDispEnd > iLineStart && pState->pText[iDispEnd - 1] == L'\n') iDispEnd--;
+            if (iDispEnd > iLineStart && pState->pText[iDispEnd - 1] == L'\r') iDispEnd--;
+
+            // V5: greenbar background for this logical line; 5.8: the
+            // caret line wins the band when the option is on; 5.9: a
+            // bookmarked line wins over both (it is the persistent mark).
+            // 5.9.4: the row color is chosen ONCE as brush + COLORREF: the
+            // one-call row paints with the COLORREF, the FillRect paths
+            // keep the brush. One source of truth instead of two parallel
+            // ternary chains that could drift apart.
+            bool bBmLine = false;
+            if (g_cBookmarks > 0)
+            {
+                while (iBm < g_cBookmarks && g_pBookmarks[iBm] < iLine)
+                {
+                    iBm++;
+                }
+                bBmLine = (iBm < g_cBookmarks && g_pBookmarks[iBm] == iLine);
+            }
+            HBRUSH hbrBg;
+            COLORREF clrBg;
+            if (bBmLine && pState->hbrBookmark != nullptr)
+            {
+                hbrBg = pState->hbrBookmark;  clrBg = RGB(0xB8, 0xD4, 0xF0);
+            }
+            else if (iLine == iCurLine && pState->hbrHilite != nullptr)
+            {
+                hbrBg = pState->hbrHilite;    clrBg = RGB(0xFF, 0xF0, 0xB0);
+            }
+            else if (pState->bGreenbar && (iLine & 1))
+            {
+                hbrBg = hbrGreen;             clrBg = RGB(0xE8, 0xF0, 0xE8);
+            }
+            else
+            {
+                hbrBg = hbrWhite;             clrBg = clrWindow;
+            }
+
+            int iPos = iLineStart;
+            // V5: walk the visual rows of this logical line. Each visual row
+            // gets its background painted + text drawn. y ALWAYS advances by
+            // iHexLineH per visual row — even for empty lines (just \r\n).
+            if (iDispEnd <= iLineStart)
+            {
+                // Empty line (just \r\n or truly empty) — paint one row
+                if (y + iHexLineH > yTop)
+                {
+                    RECT rcRow = { 0, y, rc.right, y + iHexLineH };
+                    FillRect(hdc, &rcRow, hbrBg);
+                }
+                y += iHexLineH;
+            }
+            else
+            {
+                while (iPos < iDispEnd && y < yBottom)
+                {
+                    int iChunkEnd = (pState->bWrap && iMaxChars > 0) ? TV_WrapBreak(iPos, iDispEnd, iMaxChars) : iDispEnd;
+                    if (iChunkEnd > iDispEnd) iChunkEnd = iDispEnd;
+                    if (iChunkEnd <= iPos) iChunkEnd = iPos + 1;   // safety: always advance
+                    int cchChunk = iChunkEnd - iPos;
+
+                    // 5.4: rows fully above the dirty rect are only walked
+                    if (y + iHexLineH <= yTop) { iPos = iChunkEnd; y += iHexLineH; continue; }
+
+                    // 5.9.3: rows WITHOUT selection overlap paint with ONE
+                    // ExtTextOutW(ETO_OPAQUE) call: the full row rectangle is
+                    // filled with the row background color and the text is
+                    // drawn on top in the same system call. This replaces the
+                    // previous FillRect + ExtTextOutW pair (one GDI call and
+                    // one brush round-trip saved per plain row; a full
+                    // repaint of a 60-row window saves about 60 calls).
+                    // 5.9.4: a COLLAPSED caret (iSelLo == iSelHi) is not a
+                    // selection: its row goes through the one-call path too
+                    // (the old condition routed it to the three-part path,
+                    // which drew the same pixels in two ExtTextOutW calls).
+                    // Rows that overlap a real selection keep the three-part
+                    // path below, because their background is not uniform.
+                    if (cchChunk > 0 && iSelLo < iSelHi && iChunkEnd > iSelLo && iPos < iSelHi)
+                    {
+                        RECT rcRow = { 0, y, rc.right, y + iHexLineH };
+                        FillRect(hdc, &rcRow, hbrBg);
+
+                        // V5: paint text with selection highlight
+                        int x = -iScrollX;
+                        {
+                            // Selection overlaps this chunk — draw in parts
+                            if (iPos < iSelLo)
+                            {
+                                ExtTextOutW(hdc, x, y, 0, nullptr, pState->pText + iPos, iSelLo - iPos, nullptr);
+                                x += (iSelLo - iPos) * iHexCharW;
+                            }
+                            int iSelCS = (iPos > iSelLo) ? iPos : iSelLo;
+                            int iSelCE = (iChunkEnd < iSelHi) ? iChunkEnd : iSelHi;
+                            int cchSel = iSelCE - iSelCS;
+                            if (cchSel > 0)
+                            {
+                                SetBkColor(hdc, clrSelBg);
+                                SetTextColor(hdc, clrSelTx);
+                                // V5: tight rect for selection — only fill behind selected text
+                                RECT rcSel = { x, y, x + cchSel * iHexCharW, y + iHexLineH };
+                                ExtTextOutW(hdc, x, y, ETO_OPAQUE, &rcSel, pState->pText + iSelCS, cchSel, nullptr);
+                                SetBkMode(hdc, TRANSPARENT);
+                                SetTextColor(hdc, clrText);
+                                x += cchSel * iHexCharW;
+                            }
+                            if (iChunkEnd > iSelHi)
+                            {
+                                ExtTextOutW(hdc, x, y, 0, nullptr, pState->pText + iSelHi, iChunkEnd - iSelHi, nullptr);
+                            }
+                        }
+                    }
+                    else if (cchChunk > 0)
+                    {
+                        // 5.9.3: one-call plain row: background fill + text in
+                        // the same ExtTextOutW. 5.9.4: the color is clrBg, the
+                        // COLORREF twin chosen with hbrBg above, so the filled
+                        // rectangle is visually identical to the old FillRect.
+                        int x = -iScrollX;
+                        RECT rcRow = { x < 0 ? 0 : x, y, rc.right, y + iHexLineH };
+                        SetBkColor(hdc, clrBg);
+                        ExtTextOutW(hdc, x, y, ETO_OPAQUE, &rcRow, pState->pText + iPos, cchChunk, nullptr);
+                    }
+
+                    iPos = iChunkEnd;
+                    y += iHexLineH;   // V5: ALWAYS advance y after each visual row
+                }
+            }
+        }
+
+        // V5: fill remaining area below last line (clipped to the dirty rect)
+        if (y < yBottom)
+        {
+            int yRest = (y > yTop) ? y : yTop;
+            RECT rcRest = { 0, yRest, rc.right, yBottom };
+            FillRect(hdc, &rcRest, hbrWhite);
+        }
+
+        SelectObject(hdc, hOld);
+        // V5: hbrGreen is cached in pState->hbrGreen, don't delete here
+        EndPaint(hWnd, &ps);
+        // 5.5: the screen now shows this selection: it is the reference the
+        // next TV_InvalidateSelPainted measures its delta against.
+        pState->iPaintedSelLo = (pState->iSelStart < pState->iSelEnd) ? pState->iSelStart : pState->iSelEnd;
+        pState->iPaintedSelHi = (pState->iSelStart < pState->iSelEnd) ? pState->iSelEnd : pState->iSelStart;
+        TV_PositionCaret();   // V5: update caret position after paint
+        // 5.6: the gutter column only follows content and vertical scroll.
+        // Selection drags (TV_InvalidateSelPainted) and horizontal scrolls
+        // (TV_ScrollX) repaint rows without touching the labels: skipping
+        // PaintGutter here removes its fill + PolyTextOut round trip from
+        // every one of those paints (the old code repainted the column on
+        // EVERY paint of the control).
+        bool bGutWasDirty = pState->bGutterDirty;   // 5.7: captured before clearing
+        if (bGutWasDirty)
+        {
+            pState->bGutterDirty = false;
+            PaintGutter();
+        }
+        // 5.7: the ruler strip only follows the HORIZONTAL scroll (its
+        // column ticks and labels move with iScrollX). A selection drag or
+        // a pure vertical scroll leaves it identical: skip its fill plus
+        // one DrawTextW/FillRect per visible column. The parent's WM_PAINT
+        // (expose/resize/toggle) repaints it unconditionally and records
+        // the scroll it painted, and TV_ClearText forces one repaint per
+        // delivery.
+        if (g_bRuler && iHexCharW > 0 && iHexLineH > 0 && iView != VIEW_HEX && hWndMain != nullptr &&
+            (bGutWasDirty || pState->iPaintedRulerX != pState->iScrollX))
+        {
+            RECT rcParent;
+            if (GetClientRect(hWndMain, &rcParent))
+            {
+                int iGutter = GutterWidth();
+                RECT rcRuler = { iGutter, 0, rcParent.right, iHexLineH };
+                HDC hdcParent = GetDC(hWndMain);
+                if (hdcParent != nullptr)
+                {
+                    PaintRuler(hdcParent, rcRuler, iGutter);
+                    ReleaseDC(hWndMain, hdcParent);
+                }
+            }
+        }
+        pState->iPaintedRulerX = pState->iScrollX;
+        return 0;
+    }
+    case WM_KEYDOWN:
+    {
+        if (pState == nullptr) return 0;
+        bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        bool bCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        // V5: Ctrl+C = copy, Ctrl+A = select all
+        if (bCtrl && wParam == L'C') { TV_Copy(); return 0; }
+        if (bCtrl && wParam == L'A') { TV_SetSel(0, pState->cch); TV_ScrollCaret(); return 0; }
+        switch (wParam)
+        {
+        case VK_ESCAPE:
+            // 5.8: the same ladder as the main window: byte search cancel,
+            // then the Find dialog, then (only with the option on) the app.
+            if (g_bInByteSearch) { InterlockedExchange(&g_bSearchCancel, 1); ReapSearchThread(); }   // 5.2
+            else if (hDlgFind != nullptr) { PostMessage(hDlgFind, WM_CLOSE, 0, 0); }
+            else if (g_bEscExit) { PostMessage(hWndMain, WM_CLOSE, 0, 0); }
+            return 0;
+        case VK_LEFT:
+            if (pState->iSelEnd > 0) { pState->iSelEnd--; if (!bShift) pState->iSelStart = pState->iSelEnd; g_iCaretCol = -1; TV_ScrollCaret(); }
+            return 0;
+        case VK_RIGHT:
+            if (pState->iSelEnd < pState->cch) { pState->iSelEnd++; if (!bShift) pState->iSelStart = pState->iSelEnd; g_iCaretCol = -1; TV_ScrollCaret(); }
+            return 0;
+        case VK_UP:
+        case VK_DOWN:
+        {
+            // 5.7: the column survives vertical moves (the caret used to
+            // jump to column 0 of the adjacent line). g_iCaretCol seeds
+            // from the caret on the first vertical step and survives short
+            // lines, editors' standard behavior; a horizontal move or a
+            // click resets it to -1.
+            int iL = TV_LineFromChar(pState->iSelEnd);
+            int iT = (wParam == VK_UP) ? iL - 1 : iL + 1;
+            if (iT < 0 || iT >= pState->cLines) return 0;
+            if (g_iCaretCol < 0)
+            {
+                g_iCaretCol = pState->iSelEnd - TV_LineIndex(iL);
+                if (g_iCaretCol < 0) g_iCaretCol = 0;
+            }
+            int iLS2 = TV_LineIndex(iT);
+            int iN2 = TV_LineIndex(iT + 1);
+            int iLE2 = (iN2 < 0) ? pState->cch : iN2;
+            int iDE2 = iLE2;
+            if (iDE2 > iLS2 && pState->pText[iDE2 - 1] == L'\n') iDE2--;
+            if (iDE2 > iLS2 && pState->pText[iDE2 - 1] == L'\r') iDE2--;
+            int iPos = iLS2 + g_iCaretCol;
+            if (iPos > iDE2) iPos = iDE2;
+            pState->iSelEnd = iPos;
+            if (!bShift) pState->iSelStart = pState->iSelEnd;
+            TV_ScrollCaret();
+            return 0;
+        }
+        case VK_HOME:
+            if (bCtrl) { JumpFilePage(false); return 0; }   // 5.4: first page (lived in EditSubclassProc)
+            pState->iSelEnd = TV_LineIndex(TV_LineFromChar(pState->iSelEnd));
+            if (!bShift) pState->iSelStart = pState->iSelEnd;
+            g_iCaretCol = -1;
+            TV_ScrollCaret();
+            return 0;
+        case VK_END:
+            if (bCtrl) { JumpFilePage(true); return 0; }   // 5.4: last page (lived in EditSubclassProc)
+            { int iL = TV_LineFromChar(pState->iSelEnd); int iN = TV_LineIndex(iL + 1); pState->iSelEnd = (iN < 0) ? pState->cch : iN; if (pState->iSelEnd > 0 && pState->pText[pState->iSelEnd - 1] == L'\n') pState->iSelEnd--; if (pState->iSelEnd > 0 && pState->pText[pState->iSelEnd - 1] == L'\r') pState->iSelEnd--; }
+            if (!bShift) pState->iSelStart = pState->iSelEnd;
+            g_iCaretCol = -1;
+            TV_ScrollCaret();
+            return 0;
+        case VK_PRIOR:
+        case VK_NEXT:
+        {
+            // 5.4: the page logic of the old EditSubclassProc, ported: Ctrl
+            // turns the page right away, and with a file loaded so does
+            // reaching an edge of the page (stdin has no pages to turn).
+            RECT rc;
+            if (GetClientRect(hWnd, &rc) && iHexLineH > 0)
+            {
+                int cVis = rc.bottom / iHexLineH;
+                if (cVis < 1) cVis = 1;
+                bool bPage = bCtrl;
+                if (!bPage && g_szCurrentFile[0] != L'\0')
+                {
+                    if (wParam == VK_NEXT && pState->iFirstVisible + cVis >= pState->cLines) bPage = true;
+                    if (wParam == VK_PRIOR && pState->iFirstVisible == 0) bPage = true;
+                }
+                if (bPage)
+                {
+                    if (g_szCurrentFile[0] == L'\0') JumpFilePage(wParam == VK_NEXT);
+                    else ChangePage((wParam == VK_NEXT) ? 1 : -1);
+                    return 0;
+                }
+                TV_ScrollRows(hWnd, pState, pState->iFirstVisible + ((wParam == VK_NEXT) ? cVis : -cVis));
+            }
+            return 0;
+        }
+        }
+        break;
+    }
+    case WM_VSCROLL:
+    {
+        if (pState == nullptr) return 0;
+        SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_ALL;
+        GetScrollInfo(hWnd, SB_VERT, &si);
+        switch (LOWORD(wParam)) {
+        case SB_LINEUP: si.nPos -= 1; break;
+        case SB_LINEDOWN: si.nPos += 1; break;
+        case SB_PAGEUP: si.nPos -= (int)si.nPage; break;
+        case SB_PAGEDOWN: si.nPos += (int)si.nPage; break;
+        case SB_THUMBTRACK: si.nPos = si.nTrackPos; break;
+        case SB_TOP: si.nPos = 0; break;
+        case SB_BOTTOM: si.nPos = si.nMax; break;
+        }
+        // 5.4: TV_ScrollRows clamps, syncs the scrollbar and blits the rows
+        // that can move (only the exposed strip gets repainted).
+        TV_ScrollRows(hWnd, pState, si.nPos);
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+    {
+        if (pState == nullptr) return 0;
+        short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+        int cScroll = zDelta / WHEEL_DELTA;
+        SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_ALL;
+        GetScrollInfo(hWnd, SB_VERT, &si);
+        TV_ScrollRows(hWnd, pState, si.nPos - cScroll * 3);
+        return 0;
+    }
+    case WM_HSCROLL:
+    {
+        // V5: horizontal scroll (no-wrap mode only). iScrollX is in pixels.
+        if (pState == nullptr || pState->bWrap) return 0;
+        SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_ALL;
+        GetScrollInfo(hWnd, SB_HORZ, &si);
+        switch (LOWORD(wParam)) {
+        case SB_LINEUP: si.nPos -= iHexCharW; break;
+        case SB_LINEDOWN: si.nPos += iHexCharW; break;
+        case SB_PAGEUP: si.nPos -= (int)si.nPage; break;
+        case SB_PAGEDOWN: si.nPos += (int)si.nPage; break;
+        case SB_THUMBTRACK: si.nPos = si.nTrackPos; break;
+        case SB_LEFT: si.nPos = 0; break;
+        case SB_RIGHT: si.nPos = si.nMax; break;
+        }
+        TV_ScrollX(hWnd, pState, si.nPos);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+    {
+        if (pState == nullptr) return 0;
+        // 5.7: one wrap-aware hit test (was a 15-line inline block that
+        // mis-mapped visual rows to logical lines in wrap mode).
+        int iPos = TV_HitTest(pState, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        pState->iSelStart = iPos; pState->iSelEnd = iPos;
+        g_iCaretCol = -1;               // 5.7: a click is a horizontal move
+        // 5.5: repaint only the rows the highlight or the caret left
+        TV_InvalidateSelPainted(hWnd, pState);
+        SetCapture(hWnd);   // V5: enable drag-select
+        SetFocus(hWnd);
+        UpdateStatusBar();
+        return 0;
+    }
+    case WM_LBUTTONUP:
+        ReleaseCapture();   // V5: end drag-select
+        UpdateStatusBar();
+        return 0;
+    case WM_MOUSEMOVE:
+        if (pState == nullptr) return 0;    // 5.2: same guard as WM_LBUTTONDOWN
+        if (wParam & MK_LBUTTON)
+        {
+            // V5: extend selection during drag. 5.7: the same wrap-aware
+            // hit test; dragging below the last row extends to the end.
+            pState->iSelEnd = TV_HitTest(pState, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            g_iCaretCol = -1;
+            // 5.5: the drag repaints only the rows the selection end
+            // gained or shrank from (same anchor), instead of every
+            // visible row per WM_MOUSEMOVE
+            TV_InvalidateSelPainted(hWnd, pState);
+            UpdateStatusBar();
+        }
+        return 0;
+    case WM_SETFOCUS: CreateCaret(hWnd, nullptr, 2, iHexLineH); ShowCaret(hWnd); TV_PositionCaret(); return 0;
+    case WM_KILLFOCUS: HideCaret(hWnd); DestroyCaret(); return 0;
+    case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
+    case WM_SIZE:
+        if (iHexLineH > 0)
+        {
+            SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_PAGE;
+            si.nPage = HIWORD(lParam) / iHexLineH;
+            SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+            si.nPage = LOWORD(lParam);      // 5.2: horz page follows the width too (range is in pixels)
+            SetScrollInfo(hWnd, SB_HORZ, &si, TRUE);
+        }
+        InvalidateRect(hWnd, nullptr, FALSE);
+        return 0;
+    case WM_DESTROY:
+        TV_ClearText();
+        // V5: free the cached greenbar brush
+        if (g_tv.hbrGreen != nullptr) { DeleteObject(g_tv.hbrGreen); g_tv.hbrGreen = nullptr; }
+        g_tv.hWnd = nullptr;   // V5: clear the dangling window handle
+        return 0;
+    }
+    return DefWindowProcW(hWnd, message, wParam, lParam);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// Delivers a decoded text to the view control, repainting disabled, and OWNS
+// the buffer either way: freed here, or kept as the control's text.
+//
+// 2.98 — zero-copy delivery (WM_SETTEXT would make the control COPY the whole
+// text: a 60 MB view cost 120 MB of peak memory and one full memcpy on the
+// UI thread). The control has stored a POINTER to the buffer since V5; 5.4
+// retired the standard EDIT whose EM_SETHANDLE performed the adoption, so
+// the pointer hand-off is now direct. The old buffer is freed on the next
+// delivery (or on ResetViewer) — no tracking global is needed.
 //
 // bPreNormalized skips the CRLF normalization and its full scan: hex and
 // EBCDIC text carries no \r or \n by construction, and since 3.00 the load
 // worker normalizes before anything reaches the UI thread. 3.05: when a pass
 // IS due, cExpandKnown hands in the expansion count PlanCRLFPass already
-// computed on the raw bytes (-1 = NormalizeNewlines counts it itself). The copy
-// path remains as the fallback (a block that is not HGLOBAL-backed, or an
-// empty delivery), keeping its refusal check: if the control cannot take
-// the text (out of memory, usually on Win32), it is cleared and the user
-// is told instead of leaving stale content on screen.
-void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown)
+// computed on the raw bytes (-1 = NormalizeNewlines counts it itself).
+void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown, int* pLineStarts, int cLines, int iMaxLineChars)
 {
     if (hEdit == nullptr)
     {
@@ -4265,129 +5981,56 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
     }
     ULONGLONG dwT0 = GetTickCount64();      // /timing: normalize + deliver start here
     WCHAR* pNorm = pText;
+    int cchNorm = cch;   // V5: track the normalized length (may differ from cch)
     if (pText != nullptr && cch > 0 && !bPreNormalized)
     {
-        // 3.00: NormalizeNewlines answers nullptr on out-of-memory
-        // (AllocViewText never throws, so the old try/catch guarded a
-        // throw that never came while the null return slipped into the
-        // delivery): this function owns the buffer, so release it and
-        // say so. Returning BEFORE the redraw lock leaves the control
-        // and the previous content exactly as they were.
-        int cchNorm = 0;
-        pNorm = NormalizeNewlines(pText, cch, &cchNorm, cExpandKnown);  // 3.05: the count may already be made
+        pNorm = NormalizeNewlines(pText, cch, &cchNorm, cExpandKnown);
         if (pNorm == nullptr)
         {
             FreeViewText(pText);
             MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
             return;
         }
-        g_msNormalize = (DWORD)(GetTickCount64() - dwT0);       // /timing: the CRLF pass ran here
+        cch = cchNorm;   // V5: use the normalized length from here on
+        g_msNormalize = (DWORD)(GetTickCount64() - dwT0);
     }
 
+    // 5.4: ONE path for every view, hex included — the custom control takes
+    // the pointer (zero-copy) and builds its line index with two wmemchr
+    // passes. The EM_SETHANDLE branch of the hex view is gone.
     SendMessage(hEdit, WM_SETREDRAW, FALSE, 0);
-    // 3.03: the hex offset column appears/disappears with the view and
-    // content: the control is placed INSIDE the redraw lock, so the new
-    // geometry and the new content repaint together — one paint per
-    // delivery instead of two (the old order painted the OLD text at the
-    // new geometry first, then the new text again).
+    // Free the PREVIOUS view text (the custom control pointed to it)
+    if (g_pViewText != nullptr && g_pViewText != pNorm)
+    {
+        FreeViewText(g_pViewText);
+    }
+    g_pViewText = pNorm;   // the custom control now points to this
+    // 5.6: pLineStarts carries the index the load worker prebuilt (nullptr
+    // on every other path): the adoption is O(1), no wmemchr passes here.
+    TV_SetText(pNorm, cch, pLineStarts, cLines, iMaxLineChars);
+    // pNorm is NOT freed here — the custom control points to it.
+    // It will be freed on the next delivery (above) or on ResetViewer.
+    if (pNorm != pText) FreeViewText(pText);  // normalization's original buffer
+    // 5.2: ONE layout, AFTER the text — GutterWidth reads the fresh line
+    // count, so the second conditional LayoutEdit of V5 is gone.
     LayoutEdit();
-    // 3.16: the sliced delivery (3.14-3.15) is GONE. EM_REPLACESEL on a
-    // growing EDIT buffer is quadratic: each slice forces the control to
-    // realloc-and-copy its entire accumulated buffer. A 30 MB text took
-    // ~8 seconds across 30 slices. The monolithic EM_SETHANDLE below
-    // (2.98's zero-copy swap) is O(1) for the buffer pointer and lets
-    // the control build its line table in one pass — the only cost the
-    // UI thread pays, and it is far smaller than the quadratic delivery
-    // ever was. The bar is painted to 100% BEFORE this swap (in
-    // ApplyLoadResult), so the user sees a honest "almost done" state
-    // during the ~0.5-2 s the control takes to index the lines.
-    //
-    // 3.17: with Word Wrap ON, EM_SETHANDLE is dramatically slower
-    // because the control recalculates EVERY soft break in the whole
-    // text in one synchronous call — for 26 MB of chat log that is
-    // millions of wrap calculations, freezing the UI for several
-    // seconds. WM_SETTEXT is faster here: the control EDIT handles wrap
-    // more efficiently through its own buffer management and can defer
-    // some of the layout work. The trade-off is a copy (WM_SETTEXT
-    // duplicates the buffer internally), but for wrap that copy is far
-    // cheaper than the per-line rewrap EM_SETHANDLE forces. Without wrap,
-    // EM_SETHANDLE stays: zero-copy is the clear win when there is no
-    // wrap table to rebuild.
-    bool bUseSetText = g_bWrap && pNorm != nullptr && cch > 0;
-    HGLOBAL hNew = nullptr;
-    if (!bUseSetText && pNorm != nullptr && cch > 0)
-    {
-        hNew = GlobalHandle(pNorm);    // nonzero only for AllocViewText blocks
-        if (hNew != nullptr)
-        {
-            GlobalUnlock(hNew);     // EM_SETHANDLE wants an unlocked block
-        }
-    }
-    if (bUseSetText)
-    {
-        // Word Wrap path: WM_SETTEXT lets the control manage wrap layout
-        // more efficiently than EM_SETHANDLE's full rewrap. The control
-        // copies the text into its own buffer; our block is freed below.
-        LRESULT lrSetText = SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM)(LPCWSTR)pNorm);
-        if (lrSetText == 0 && IsWindow(hEdit))
-        {
-            SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM)L"");
-            MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
-        }
-        if (pNorm != pText)
-        {
-            FreeViewText(pNorm);
-        }
-        FreeViewText(pText);
-    }
-    else if (hNew != nullptr)
-    {
-        HGLOBAL hOld = (HGLOBAL)SendMessage(hEdit, EM_GETHANDLE, 0, 0);
-        SendMessage(hEdit, EM_SETHANDLE, (WPARAM)hNew, 0);
-        if (hOld != nullptr && hOld != hNew)
-        {
-            GlobalFree(hOld);       // the control is done with it: our free
-        }
-        if (pNorm != pText)
-        {
-            FreeViewText(pText);    // normalization built a second buffer
-        }
-    }
-    else
-    {
-        // Not adoptable (not HGLOBAL-backed, or nothing to show): the
-        // classic copy path, with its refusal check.
-        LRESULT lrSetText = SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM)(pNorm != nullptr ? (LPCWSTR)pNorm : L""));
-        if (lrSetText == 0 && IsWindow(hEdit))
-        {
-            // The control refused the text. Empty it and say so: the status
-            // bar must never describe content that is not on screen.
-            SendMessage(hEdit, WM_SETTEXT, 0, (LPARAM)L"");
-            MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
-        }
-        if (pNorm != pText)
-        {
-            FreeViewText(pNorm);
-        }
-        FreeViewText(pText);
-    }
-    if (g_bLineNums && iView != VIEW_HEX)
-    {
-        // 3.06: the width of the line-number column depends on the line count
-        // of the text JUST delivered; the LayoutEdit above still saw the old
-        // (empty) one. Same redraw lock: still one paint per delivery.
-        LayoutEdit();
-    }
-    SendMessage(hEdit, EM_SETMODIFY, FALSE, 0);
-    SendMessage(hEdit, EM_SETSEL, 0, 0);
-    SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
     SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(hEdit, nullptr, TRUE);
-    g_msDeliver = (DWORD)(GetTickCount64() - dwT0);         // /timing: delivery done
-    // The content (and therefore the line/column meaning) changed: repaint
-    // the whole status bar. UpdateStatusBar has no caches: it always writes
-    // both parts, so the size shown can never be a stale "0 bytes".
+    InvalidateRect(hEdit, nullptr, FALSE);   // V5: FALSE = no erase background (WM_PAINT handles it)
+    g_msDeliver = (DWORD)(GetTickCount64() - dwT0);
     UpdateStatusBar();
+    // 5.9.2: paint NOW. The delivery only invalidates: the first frame
+    // waited for the message pump, behind whatever input was already
+    // queued (the mouse activity of the click that triggered this among
+    // it). One synchronous paint shows the new content immediately; the
+    // frame's own paint brings the gutter and the ruler with it.
+    if (g_tv.hWnd != nullptr)
+    {
+        UpdateWindow(g_tv.hWnd);
+    }
+    if (hWndMain != nullptr)
+    {
+        UpdateWindow(hWndMain);
+    }
 }
 
 
@@ -4396,12 +6039,12 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
 // exception during delivery degrades to a recovered, empty control instead of
 // killing 4More. On compilers without SEH (the Linux audit bench) the mapping
 // turns this into the plain call.
-BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown)
+BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown, int* pLineStarts, int cLines, int iMaxLineChars)
 {
     BOOL bOk = FALSE;
     __try
     {
-        DeliverTextToEdit(pText, cch, bPreNormalized, cExpandKnown);
+        DeliverTextToEdit(pText, cch, bPreNormalized, cExpandKnown, pLineStarts, cLines, iMaxLineChars);
         bOk = TRUE;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
@@ -4464,6 +6107,10 @@ void UpdateViewMenu(void)
         CheckMenuItem(hViewMenu, ID_VIEW_TAIL, MF_BYCOMMAND | (g_bTail ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hViewMenu, ID_VIEW_LINENUMS, MF_BYCOMMAND | (g_bLineNums ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hViewMenu, ID_VIEW_WRAP, MF_BYCOMMAND | (g_bWrap ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(hViewMenu, ID_VIEW_GREENBAR, MF_BYCOMMAND | (g_bGreenbar ? MF_CHECKED : MF_UNCHECKED));   // V4
+        CheckMenuItem(hViewMenu, ID_VIEW_RULER, MF_BYCOMMAND | (g_bRuler ? MF_CHECKED : MF_UNCHECKED));          // V4
+        CheckMenuItem(hViewMenu, ID_VIEW_HILITE, MF_BYCOMMAND | (g_bHiliteLine ? MF_CHECKED : MF_UNCHECKED));    // 5.8
+        CheckMenuItem(hViewMenu, ID_VIEW_ESCEXIT, MF_BYCOMMAND | (g_bEscExit ? MF_CHECKED : MF_UNCHECKED));      // 5.8
     }
 }
 
@@ -4480,11 +6127,33 @@ void SetView(int iNewView)
     {
         return;
     }
+    // 5.4: ONE control for every view — a view switch never recreates it
+    // (the old custom<->EDIT recreate branch died with the EDIT).
+    // 5.9.2: keep the user's place across the switch. The caret line is
+    // anchored to its file offset BEFORE the rebuild and comes back
+    // through PositionAtOffset after it; the bookmarks are file offsets
+    // too, so a switch only rebinds their line numbers.
+    ULONGLONG qwCaretOff = (ULONGLONG)-1;
+    if (hEdit != nullptr && pFileBytes != nullptr && cbFile > 0)
+    {
+        DWORD dwStart = 0, dwEnd = 0;
+        EditGetSel(dwStart, dwEnd);
+        int iLine = EditLineFromChar((int)dwEnd);
+        ULONGLONG qwLine = 0;
+        if (iLine >= 0 && OffsetOfLine((DWORD)iLine, qwLine))
+        {
+            qwCaretOff = qwLine;
+        }
+    }
     iView = iNewView;
     UpdateViewMenu();
-    ClearBookmarks();               // line numbers do not survive a view switch
     if (ShowViewSafely())
     {
+        RebindBookmarksToView();
+        if (qwCaretOff != (ULONGLONG)-1)
+        {
+            PositionAtOffset(qwCaretOff);
+        }
         return;
     }
     // The switch failed at Win32 level (SEH catch). Recover the control
@@ -4497,6 +6166,11 @@ void SetView(int iNewView)
         UpdateViewMenu();
         if (ShowViewSafely())
         {
+            RebindBookmarksToView();
+            if (qwCaretOff != (ULONGLONG)-1)
+            {
+                PositionAtOffset(qwCaretOff);
+            }
             MessageBox(hWndMain, L"The requested view is not available; showing hexadecimal instead.", szTitle, MB_OK | MB_ICONWARNING);
             return;
         }
@@ -4522,10 +6196,11 @@ void ApplyView(void)
     }
     if (pFileBytes == nullptr || cbFile == 0)
     {
-        // Nothing loaded: an empty buffer for every view (and no offset
-        // column — LayoutEdit puts the control back at x = 0). The
-        // EM_SETHANDLE swap releases the old adopted block too.
-        AdoptEmptyText();
+        // Nothing loaded: an empty view for every one of them (and no
+        // offset column — LayoutEdit puts the control back at x = 0).
+        // 5.4: one path — the custom control clears through
+        // ReleaseViewContent, which frees the buffer instead of parking it.
+        ReleaseViewContent();
         LayoutEdit();
         UpdateStatusBar();
         return;
@@ -4533,19 +6208,10 @@ void ApplyView(void)
     HCURSOR hcurOld = SetCursor(LoadCursor(nullptr, IDC_WAIT));
     try
     {
-        // 3.18: with Word Wrap, cap the source bytes the decode sees.
-        // BuildViewText respects CB_TEXT_MAX internally, but when the user
-        // toggles wrap ON after a full 32 MB load, cbFile is already 32 MB
-        // and the decode would build all of it — then the EDIT control
-        // would spend ~10 s recalculating soft breaks. Capping here makes
-        // the wrap toggle instant: the user sees the first CB_WRAP_TEXT_MAX
-        // bytes, and the truncation notice explains the rest is one page
-        // down.
+        // 5.6: no wrap-specific decode cap — the custom control wraps per
+        // visible row at paint time, so the toggle is instant at any size
+        // and the view keeps the full page content.
         DWORD cbDecode = cbFile;
-        if (g_bWrap && iView != VIEW_HEX && cbDecode > (DWORD)CB_WRAP_TEXT_MAX)
-        {
-            cbDecode = (DWORD)CB_WRAP_TEXT_MAX;
-        }
         WCHAR* pText = nullptr;
         DWORD cch = 0;
         DWORD dwSrcOff = 0, dwSrcLen = 0;
@@ -4781,6 +6447,7 @@ void ApplyEditorFont(void)
     hFont = hNew;
     hFontHexBold = hNewBold;
     UpdateHexMetrics();
+    g_tv.bGutterDirty = true;   // 5.6: label metrics changed, the column repaints too
     // The column width may have changed with the font: place the control
     // BEFORE handing over the new font, so it repaints once, at its final
     // geometry.
@@ -4788,6 +6455,12 @@ void ApplyEditorFont(void)
     if (hEdit != nullptr)
     {
         SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, MAKELPARAM(TRUE, 0));
+        // 5.4: the scrollbar ranges were measured with the OLD metrics
+        // (lines for SB_VERT, pixels for SB_HORZ): refresh both, or the
+        // bars lag one font change behind until the next delivery.
+        // 5.7: the shared helper (was a near-twin block of TV_SetText).
+        TV_UpdateScrollRanges();
+        InvalidateRect(hEdit, nullptr, FALSE);
     }
     if (hOld != nullptr)
     {
@@ -4885,15 +6558,19 @@ void LayoutEdit(void)
         iHeight -= rc.bottom;                   // leave the status bar visible
     }
     int x = GutterWidth();                  // hex offsets, line numbers, or nothing
+    // V4: reserve space at the top for the ruler. The ruler is painted by
+    // the parent's WM_PAINT, so the EDIT must start below it.
+    int iRulerH = (g_bRuler && iHexLineH > 0 && iView != VIEW_HEX) ? iHexLineH : 0;
+    int yEdit = iRulerH;
     if (iWidth < x)
     {
         iWidth = x;                             // never a negative width
     }
-    if (iHeight < 0)
+    if (iHeight < yEdit)
     {
-        iHeight = 0;
+        iHeight = yEdit;                        // never a negative height
     }
-    MoveWindow(hEdit, x, 0, iWidth - x, iHeight, TRUE);
+    MoveWindow(hEdit, x, yEdit, iWidth - x, iHeight - yEdit, TRUE);
 }
 
 
@@ -4901,7 +6578,7 @@ void LayoutEdit(void)
 // Repaints the whole status bar. Both parts always show the same values for
 // the same inputs (caret position, file size, loading flag), so they are
 // rewritten only when one of those inputs changed — the constant stream of
-// WM_MOUSEMOVE while dragging a selection costs one cheap EM_GETSEL instead
+// WM_MOUSEMOVE while dragging a selection costs one cheap TV_GetSel instead
 // of three position queries plus two SB_SETTEXT. The shown position is the
 // CARET, i.e. the END of the selection: Select All leaves the selection start
 // at 0 but moves the caret to the last line, and only the caret changes there.
@@ -4918,6 +6595,18 @@ static ULONGLONG s_cbTotal = (ULONGLONG)-1;            // cached size input (rea
 static bool s_bLoading = false;                        // cached loading input
 static bool s_bFlash = false;                           // StatusFlash owns part 0: rewrite on the next update
 
+// 5.4: the Edit* helpers are THIN ALIASES of the TV_* API now (the standard
+// EDIT and its EM_* branches are gone). Kept under the old names so the
+// ~40 call sites (status bar, Go To, bookmarks, search) stay untouched.
+static void EditGetSel(DWORD& rdwStart, DWORD& rdwEnd) { int iS, iE; TV_GetSel(iS, iE); rdwStart = (DWORD)iS; rdwEnd = (DWORD)iE; }
+static int  EditLineFromChar(int iChar) { return TV_LineFromChar(iChar); }
+static int  EditLineIndex(int iLine) { return TV_LineIndex(iLine); }
+static int  EditGetLineCount(void) { return TV_LineCount(); }
+static int  EditGetFirstVisibleLine(void) { return TV_FirstVisibleLine(); }
+static void EditSetSel(int iStart, int iEnd) { TV_SetSel(iStart, iEnd); }
+static void EditScrollCaret(void) { TV_ScrollCaret(); }
+static int  EditGetTextLength(void) { return TV_GetTextLength(); }
+
 void UpdateStatusBar(bool bForce)
 {
     if (hStatusBar == nullptr || hEdit == nullptr)
@@ -4926,7 +6615,7 @@ void UpdateStatusBar(bool bForce)
     }
     bool bLoading = (g_pJob != nullptr);
     DWORD dwSelStart = 0, dwSelEnd = 0;
-    SendMessage(hEdit, EM_GETSEL, (WPARAM)&dwSelStart, (LPARAM)&dwSelEnd);
+    EditGetSel(dwSelStart, dwSelEnd);   // V5: works for custom control and EDIT
     if (!bForce && !s_bFlash && dwSelEnd == s_dwCaret && g_cbFileTotal == s_cbTotal && bLoading == s_bLoading)
     {
         return;                                 // nothing that feeds the bar has changed
@@ -4943,11 +6632,11 @@ void UpdateStatusBar(bool bForce)
         SendMessage(hStatusBar, SB_SETTEXT, 1, (LPARAM)L"");
         return;
     }
-    int iLine = (int)SendMessage(hEdit, EM_LINEFROMCHAR, dwSelEnd, 0);
-    DWORD dwLineStart = (DWORD)SendMessage(hEdit, EM_LINEINDEX, iLine, 0);
-    if (dwLineStart == (DWORD)-1)                  // defensive: EM_LINEINDEX answers -1 when
+    int iLine = EditLineFromChar((int)dwSelEnd);   // V5: works for custom control and EDIT
+    DWORD dwLineStart = (DWORD)EditLineIndex(iLine);
+    if (dwLineStart == (DWORD)-1)                  // defensive: -1 when the line does not exist
     {
-        dwLineStart = 0;                        // the line does not exist (never expected here)
+        dwLineStart = 0;
     }
     WCHAR szLine[32], szCol[32];
     FormatU64Locale(szLine, _countof(szLine), (ULONGLONG)iLine + 1);
@@ -5011,7 +6700,7 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
         }
         const WCHAR* t = p + 1;
         const WCHAR* s = szFind + 1;
-        while (*s != L'\0' && *t != L'\0' && (*t == *s || ChrCmpIW(*t, *s) == 0))
+        while (*s != L'\0' && *t != L'\0' && ChrCmpIW(*t, *s) == 0)   // 5.3: one call, it already covers exact equality
         {
             t++;
             s++;
@@ -5038,62 +6727,35 @@ void SearchNext(HWND hWnd, bool bShowError)
         return;
     }
 
-    // Length straight from the control, ONCE and BEFORE its buffer gets
-    // locked: the previous revision asked WM_GETTEXTLENGTH while holding
-    // the LocalLock of the very buffer being asked about — a message into
-    // a control with a pinned buffer, the kind of re-entrancy a viewer
-    // must not do (harmless today, a trap tomorrow).
-    int cch = GetWindowTextLengthW(hEdit);
-
-    // Direct access to the control's internal buffer via EM_GETHANDLE: searching
-    // no longer requires copying all the text (tens of MB) on every "Find
-    // Next", as GetWindowTextW did. If the handle is not available,
-    // the classic copy fallback is used.
-    HLOCAL hMem = (HLOCAL)SendMessage(hEdit, EM_GETHANDLE, 0, 0);
-    WCHAR* pText = nullptr;
-    bool bLocked = false;
-    if (hMem != nullptr)
-    {
-        pText = (WCHAR*)LocalLock(hMem);
-        bLocked = (pText != nullptr);
-    }
-    if (pText == nullptr)
-    {
-        pText = new (std::nothrow) WCHAR[cch + 1];
-        if (pText == nullptr)
-        {
-            return;                 // out of memory: stay quiet, keep the app alive
-        }
-        GetWindowTextW(hEdit, pText, cch + 1);
-    }
+    // 5.4: one path — search the custom control's text pointer directly (the
+    // EDIT's EM_GETHANDLE/LocalLock dance is gone with the EDIT itself).
+    const WCHAR* pText = g_tv.pText;
+    int cch = g_tv.cch;
+    if (pText == nullptr || cch <= 0) return;   // no text loaded — safe exit
 
     DWORD dwSelStart, dwSelEnd;
-    SendMessage(hEdit, EM_GETSEL, (WPARAM)&dwSelStart, (LPARAM)&dwSelEnd);
+    EditGetSel(dwSelStart, dwSelEnd);
     DWORD dwFrom = (dwSelEnd <= (DWORD)cch) ? dwSelEnd : (DWORD)cch;
     const WCHAR* pFound = FindPatternFrom(pText, dwFrom);
     if (pFound == nullptr && dwFrom > 0)
     {
-        // No more matches downward: wrap around the document.
         pFound = FindPatternFrom(pText, 0);
     }
     int iPos = (pFound != nullptr) ? (int)(pFound - pText) : -1;
 
-    // Free the buffer before touching the control.
-    if (bLocked)
-    {
-        LocalUnlock(hMem);
-    }
-    else
-    {
-        delete[] pText;
-    }
-
     if (iPos >= 0)
     {
-        SendMessage(hEdit, EM_SETSEL, iPos, iPos + lstrlenW(szFind));
-        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
-        SetFocus(hEdit);
-        UpdateStatusBar();                      // the caret moved: say so right away
+        EditSetSel(iPos, iPos + lstrlenW(szFind));
+        EditScrollCaret();
+        // 5.8: the focus belongs to the DIALOG while it is open. The old
+        // unconditional SetFocus(hEdit) stole it after every Find Next, so
+        // the user was left "in the results" with the dialog still up and
+        // ESC (and every other key) went to the viewer, not the dialog.
+        if (hDlgFind == nullptr)
+        {
+            SetFocus(hEdit);
+        }
+        UpdateStatusBar();
     }
     else if (bShowError)
     {
@@ -5136,13 +6798,13 @@ void OpenFileDlg(void)
 // resets iView — LoadPage clamps before that call instead.
 DWORD PageCapBytes(void)
 {
+    // 5.6: no wrap-specific cap — the custom control wraps per visible row
+    // at paint time, so one cap covers every text mode.
     if (iView == VIEW_HEX)
     {
         return (DWORD)CB_HEX_MAX;
     }
-    // 3.18: with Word Wrap the EDIT control rebuilds every soft break
-    // synchronously, so the page cap is smaller to keep the UI responsive.
-    return g_bWrap ? (DWORD)CB_WRAP_TEXT_MAX : (DWORD)CB_TEXT_MAX;
+    return (DWORD)CB_TEXT_MAX;
 }
 
 
@@ -5183,7 +6845,7 @@ ULONGLONG LastPageBase(ULONGLONG cbSize)
 // Loading another page is the same async job as a fresh file, with two
 // differences: the worker seeks to qwBase first, and the view on screen is
 // kept (no re-detection: the file did not change, the user is walking it).
-// This is the V-style answer to 100 GB files on top of the EDIT control: any
+// This is the V-style answer to 100 GB files: any
 // file of ANY size opens in a bounded window, and the pages walk the whole
 // file at constant memory.
 bool LoadPage(ULONGLONG qwBase, bool bTailJump)
@@ -5214,14 +6876,14 @@ bool LoadPage(ULONGLONG qwBase, bool bTailJump)
         qwBase = (qwBase / 16) * 16;     // hex pages start 16-byte aligned
     }
     WCHAR szPath[MAX_PATH];
-    lstrcpynW(szPath, g_szCurrentFile, MAX_PATH);
+    (void)lstrcpynW(szPath, g_szCurrentFile, MAX_PATH);
     int iKeepView = iView;
     LoadJob* pJob = BeginLoadJob(false);     // clears the viewer (also g_szCurrentFile)
     if (pJob == nullptr)
     {
         return(false);                  // out of memory: BeginLoadJob already said so
     }
-    lstrcpynW(pJob->szPath, szPath, MAX_PATH);
+    (void)lstrcpynW(pJob->szPath, szPath, MAX_PATH);
     pJob->qwBase = qwBase;
     pJob->iDetected = iKeepView;            // keep the view the user is reading
     pJob->bKeepView = true;
@@ -5246,7 +6908,7 @@ void ChangePage(int iDir)
     if (iDir > 0)
     {
         // 3.06: advance by what the ACTIVE view shows. After a text load
-        // (32 MB) switched to Hex (8 MB on screen) cbFile alone skipped 24 MB.
+        // (32 MB) switched to Hex (4 MB on screen, 5.3 cap) cbFile alone skipped 28 MB.
         qwBase = g_qwBase + ((cbFile < PageCapBytes()) ? cbFile : PageCapBytes());
         if (qwBase >= g_cbFileTotal)
         {
@@ -5284,9 +6946,9 @@ void JumpFilePage(bool bLast)
         // the keys must not die either (the subclass already consumed
         // them): give them the classic EDIT meaning — the caret walks to
         // the top or the bottom of the text that IS on screen.
-        int cchText = (int)SendMessage(hEdit, WM_GETTEXTLENGTH, 0, 0);
-        SendMessage(hEdit, EM_SETSEL, bLast ? (WPARAM)cchText : 0, bLast ? (LPARAM)cchText : 0);
-        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+        int cchText = EditGetTextLength();   // V5
+        EditSetSel(bLast ? cchText : 0, bLast ? cchText : 0);
+        EditScrollCaret();
         return;
     }
     if (!bLast)
@@ -5296,8 +6958,8 @@ void JumpFilePage(bool bLast)
             // 3.01: already on the first page: walk the caret up, no
             // reload of the same bytes (the twin of the last-page case
             // below — a reload would redraw identical content).
-            SendMessage(hEdit, EM_SETSEL, 0, 0);
-            SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+            EditSetSel(0, 0);   // V5
+            EditScrollCaret();   // V5
             return;
         }
         LoadPage(0, false);             // first page, top of file
@@ -5310,9 +6972,9 @@ void JumpFilePage(bool bLast)
     {
         // Already on the last page: just walk the caret to the very
         // end — a reload would redraw the same bytes for nothing.
-        int cchText = (int)SendMessage(hEdit, WM_GETTEXTLENGTH, 0, 0);
-        SendMessage(hEdit, EM_SETSEL, (WPARAM)cchText, (LPARAM)cchText);
-        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+        int cchText = EditGetTextLength();   // V5
+        EditSetSel(cchText, cchText);
+        EditScrollCaret();
         return;
     }
     LoadPage(qwBase, true);
@@ -5376,15 +7038,185 @@ void StatusFlash(LPCWSTR pszText)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// Bookmarks (V-style navigation): page-relative line numbers, kept sorted.
-// They survive scrolling and resizing; they die with the page (a new page or
-// a view switch renumbers every line, so stale lines would point elsewhere).
+// Bookmarks (V-style navigation): since 5.9.2 each bookmark is the PAIR
+// (line of the view on screen, absolute file offset of the line's first
+// byte), kept sorted. The line drives the dot and the jumps; the offset
+// is the anchor that survives a VIEW SWITCH (RebindBookmarksToView
+// recomputes the lines for the view that lands). They still die with the
+// page: a new file or a new page re-bases the bytes, and a bookmark
+// outside the page on screen has nothing to point at.
 void ClearBookmarks(void)
 {
     delete[] g_pBookmarks;
     g_pBookmarks = nullptr;
+    delete[] g_pBookmarkOffs;           // 5.9.2: the offsets die with the page too
+    g_pBookmarkOffs = nullptr;
     g_cBookmarks = 0;
     g_cBookmarksMax = 0;
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 5.9.2: the inverse of LineAtOffset for WHOLE lines: the absolute file
+// offset of the FIRST BYTE of line iLine (0-based) of the view on screen.
+// Line 0 is the page base everywhere. Hex: fixed 16-byte rows. EBCDIC: the
+// decoded page has no CR/LF, it is ONE line. ANSI/UTF-8: an ordered memchr
+// walk over \n and lone \r (the same break rules LineAtOffset counts).
+// UTF-16: the same walk per 2-byte unit, both endiannesses, CRLF paid at
+// its LF. The walk stops at the requested line, so a bookmark near the top
+// of the page costs nothing; only a bookmark on the last line of a full
+// 32 MB page walks it all (once, on the F2 press or the view switch that
+// asks for it).
+bool OffsetOfLine(DWORD iLine, ULONGLONG& rqw)
+{
+    if (pFileBytes == nullptr || cbFile == 0)
+    {
+        return(false);
+    }
+    if (iLine == 0)
+    {
+        rqw = g_qwBase;                 // the first line starts with the page
+        return(true);
+    }
+    if (iView == VIEW_HEX)
+    {
+        ULONGLONG qwOff = g_qwBase + (ULONGLONG)iLine * 16;
+        if (qwOff >= g_qwBase + (ULONGLONG)cbFile)
+        {
+            qwOff = g_qwBase + (ULONGLONG)cbFile - 1;   // past the dump: the last byte
+        }
+        rqw = qwOff;
+        return(true);
+    }
+    if (iView == VIEW_EBCDIC)
+    {
+        rqw = g_qwBase;                 // LineAtOffset: ONE line for the whole page
+        return(true);
+    }
+    if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+    {
+        const DWORD iEol = (iView == VIEW_UTF16) ? 0u : 1u;   // byte of the unit carrying 0x0A/0x0D
+        DWORD cFound = 0;
+        for (DWORD k = 0; k + 1 < cbFile; k += 2)
+        {
+            bool bLF = (pFileBytes[k + iEol] == 0x0A && pFileBytes[k + (1 - iEol)] == 0x00);
+            bool bCR = (pFileBytes[k + iEol] == 0x0D && pFileBytes[k + (1 - iEol)] == 0x00);
+            if (!bLF && !bCR)
+            {
+                continue;
+            }
+            if (bCR && k + 3 < cbFile &&
+                pFileBytes[k + 2 + iEol] == 0x0A && pFileBytes[k + 2 + (1 - iEol)] == 0x00)
+            {
+                continue;               // CRLF: the CR is paid by its LF
+            }
+            if (iLine == cFound + 1)    // this is the iLine-th break
+            {
+                rqw = g_qwBase + (ULONGLONG)k + 2;    // the line after this break unit
+                return(true);
+            }
+            cFound++;
+        }
+        rqw = g_qwBase + (ULONGLONG)cbFile;   // past the last break: the page end
+        return(true);
+    }
+    // ANSI, UTF-8: byte-oriented, in stream order (every \n counts, a \r
+    // only when the byte after it is not the \n of a CRLF pair).
+    DWORD cFound = 0;
+    DWORD k = 0;
+    for (;;)
+    {
+        const BYTE* pN = (const BYTE*)memchr(pFileBytes + k, 0x0A, (size_t)(cbFile - k));
+        const BYTE* pR = (const BYTE*)memchr(pFileBytes + k, 0x0D, (size_t)(cbFile - k));
+        const BYTE* pB;
+        if (pN != nullptr && (pR == nullptr || pN < pR))
+        {
+            pB = pN;
+        }
+        else if (pR != nullptr)
+        {
+            pB = pR;
+        }
+        else
+        {
+            break;
+        }
+        DWORD kB = (DWORD)(pB - pFileBytes);
+        if (*pB == 0x0D && kB + 1 < cbFile && pFileBytes[kB + 1] == 0x0A)
+        {
+            k = kB + 1;                 // CRLF: the \r is paid by its \n
+            continue;
+        }
+        if (iLine == cFound + 1)        // this is the iLine-th break
+        {
+            rqw = g_qwBase + (ULONGLONG)kB + 1;   // the line after this break byte
+            return(true);
+        }
+        cFound++;
+        k = kB + 1;
+    }
+    rqw = g_qwBase + (ULONGLONG)cbFile;       // past the last break: the page end
+    return(true);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 5.9.2: after a view switch the page bytes are the same, so every bookmark
+// offset is still on screen; only its LINE changed. Recompute the line of
+// each offset for the view now on screen (hex: /16; EBCDIC: 0; text:
+// LineAtOffset, which counts the breaks before the offset, exactly the
+// line whose first byte the offset is). Offsets are sorted and lines are
+// monotonic in offsets, but different offsets can collapse into one line
+// (two text lines inside one hex row, EBCDIC's single line): duplicates
+// collapse to the first, keeping both arrays parallel and sorted.
+void RebindBookmarksToView(void)
+{
+    int cOut = 0;
+    for (int i = 0; i < g_cBookmarks; i++)
+    {
+        int iLine = 0;
+        if (iView == VIEW_HEX)
+        {
+            ULONGLONG qwRel = g_pBookmarkOffs[i] - g_qwBase;
+            if (qwRel < (ULONGLONG)cbFile)
+            {
+                iLine = (int)(qwRel / 16);
+            }
+            else
+            {
+                iLine = (cbFile > 0) ? (int)((ULONGLONG)(cbFile - 1) / 16) : 0;
+            }
+        }
+        else if (iView == VIEW_EBCDIC)
+        {
+            iLine = 0;
+        }
+        else if (!LineAtOffset(g_pBookmarkOffs[i], iLine))
+        {
+            continue;               // defensive: the offset left the page, drop it
+        }
+        if (cOut > 0 && g_pBookmarks[cOut - 1] == (DWORD)iLine)
+        {
+            continue;               // collapse: this line already has a bookmark
+        }
+        g_pBookmarks[cOut] = (DWORD)iLine;
+        g_pBookmarkOffs[cOut] = g_pBookmarkOffs[i];
+        cOut++;
+    }
+    g_cBookmarks = cOut;
+}
+
+// 5.8: one repaint door for a bookmark change. The dots live in the gutter
+// column (PaintGutter), which the control's WM_PAINT only redraws when the
+// column is marked dirty (the 5.6 rule): a bookmark toggle marks it and
+// invalidates the control so the dots appear or vanish at once.
+static void TV_GutterRepaint(void)
+{
+    g_tv.bGutterDirty = true;
+    if (g_tv.hWnd != nullptr)
+    {
+        InvalidateRect(g_tv.hWnd, nullptr, FALSE);
+    }
 }
 
 void ToggleBookmark(void)
@@ -5393,45 +7225,80 @@ void ToggleBookmark(void)
     {
         return;
     }
+    if (pFileBytes == nullptr || cbFile == 0)
+    {
+        return;                 // nothing on screen to anchor a bookmark to
+    }
     DWORD dwEnd = 0;
-    SendMessage(hEdit, EM_GETSEL, 0, (LPARAM)&dwEnd);
-    DWORD iLine = (DWORD)SendMessage(hEdit, EM_LINEFROMCHAR, dwEnd, 0);
+    DWORD dwDummy; EditGetSel(dwDummy, dwEnd);   // V5
+    int iLine = EditLineFromChar((int)dwEnd);   // V5
+    if (iLine < 0)
+    {
+        return;
+    }
+    // 5.9.2: the bookmark is the (line, file offset) pair: the line drives
+    // the dot and the jumps of this view, the offset survives view switches.
+    ULONGLONG qwOff = 0;
+    if (!OffsetOfLine((DWORD)iLine, qwOff))
+    {
+        return;
+    }
     // Present at the caret line? Remove it.
     for (int i = 0; i < g_cBookmarks; i++)
     {
-        if (g_pBookmarks[i] == iLine)
+        if (g_pBookmarks[i] == (DWORD)iLine)
         {
-            MoveMemory(g_pBookmarks + i, g_pBookmarks + i + 1, (size_t)(g_cBookmarks - i - 1) * sizeof(DWORD));
+            for (int k = i; k < g_cBookmarks - 1; k++)
+            {
+                g_pBookmarks[k] = g_pBookmarks[k + 1];
+                g_pBookmarkOffs[k] = g_pBookmarkOffs[k + 1];
+            }
             g_cBookmarks--;
+            TV_GutterRepaint();     // 5.8: the dot of this line goes away now
             StatusFlash(L"Bookmark cleared.");
             return;
         }
     }
-    // Absent: add it, keeping the array sorted.
+    // Absent: add it, keeping both arrays sorted (line order is offset
+    // order in every view).
     if (g_cBookmarks == g_cBookmarksMax)
     {
         int cNew = g_cBookmarksMax + 16;
         DWORD* pNew = new (std::nothrow) DWORD[cNew];
-        if (pNew == nullptr)
+        ULONGLONG* pNewOffs = new (std::nothrow) ULONGLONG[cNew];
+        if (pNew == nullptr || pNewOffs == nullptr)
         {
+            delete[] pNew;
+            delete[] pNewOffs;
             return;                 // out of memory: stay quiet, keep the app alive
         }
         if (g_cBookmarks > 0)
         {
             CopyMemory(pNew, g_pBookmarks, (size_t)g_cBookmarks * sizeof(DWORD));
+            CopyMemory(pNewOffs, g_pBookmarkOffs, (size_t)g_cBookmarks * sizeof(ULONGLONG));
         }
         delete[] g_pBookmarks;
+        delete[] g_pBookmarkOffs;
         g_pBookmarks = pNew;
+        g_pBookmarkOffs = pNewOffs;
         g_cBookmarksMax = cNew;
     }
     int iIns = 0;
-    while (iIns < g_cBookmarks && g_pBookmarks[iIns] < iLine)
+    while (iIns < g_cBookmarks && g_pBookmarks[iIns] < (DWORD)iLine)
     {
         iIns++;
     }
-    MoveMemory(g_pBookmarks + iIns + 1, g_pBookmarks + iIns, (size_t)(g_cBookmarks - iIns) * sizeof(DWORD));
-    g_pBookmarks[iIns] = iLine;
+    // 5.2: the shift is an explicit loop (the /analyze rule could not prove
+    // MoveMemory's source elements initialized; this form is self-evident).
+    for (int i = g_cBookmarks; i > iIns; i--)
+    {
+        g_pBookmarks[i] = g_pBookmarks[i - 1];
+        g_pBookmarkOffs[i] = g_pBookmarkOffs[i - 1];
+    }
+    g_pBookmarks[iIns] = (DWORD)iLine;
+    g_pBookmarkOffs[iIns] = qwOff;
     g_cBookmarks++;
+    TV_GutterRepaint();     // 5.8: the dot of this line shows up now
     StatusFlash(L"Bookmark set.");
 }
 
@@ -5447,8 +7314,8 @@ void NextBookmark(bool bForward)
         return;
     }
     DWORD dwEnd = 0;
-    SendMessage(hEdit, EM_GETSEL, 0, (LPARAM)&dwEnd);
-    DWORD iLine = (DWORD)SendMessage(hEdit, EM_LINEFROMCHAR, dwEnd, 0);
+    DWORD dwDummy; EditGetSel(dwDummy, dwEnd);   // V5
+    DWORD iLine = (DWORD)EditLineFromChar((int)dwEnd);   // V5
     int iPick = -1;
     if (bForward)
     {
@@ -5480,11 +7347,11 @@ void NextBookmark(bool bForward)
             iPick = g_cBookmarks - 1; // wrap around to the last
         }
     }
-    LRESULT lrIdx = SendMessage(hEdit, EM_LINEINDEX, (WPARAM)g_pBookmarks[iPick], 0);
+    int lrIdx = EditLineIndex((int)g_pBookmarks[iPick]);   // V5
     if (lrIdx != -1)
     {
-        SendMessage(hEdit, EM_SETSEL, (WPARAM)lrIdx, (LPARAM)lrIdx);
-        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+        EditSetSel((int)lrIdx, (int)lrIdx);   // V5
+        EditScrollCaret();   // V5
         SetFocus(hEdit);
         UpdateStatusBar();
     }
@@ -5508,7 +7375,17 @@ INT_PTR CALLBACK GoToProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     {
     case WM_INITDIALOG:
         CheckRadioButton(hDlg, IDC_GOTO_LINE, IDC_GOTO_OFFS, IDC_GOTO_LINE);
-        SetDlgItemTextW(hDlg, IDC_GOTO_EDIT, L"1");
+        // 5.9.2: prefill the CURRENT line (was always "1"): the dialog
+        // usually opens to move from where you are, and the caret line is
+        // the natural starting point. Preselected, so typing replaces it.
+        {
+            WCHAR szCur[24];
+            DWORD dwStart = 0, dwEnd = 0;
+            EditGetSel(dwStart, dwEnd);
+            int iLine = EditLineFromChar((int)dwEnd);
+            U64ToWide(szCur, (ULONGLONG)((iLine > 0) ? iLine + 1 : 1));
+            SetDlgItemTextW(hDlg, IDC_GOTO_EDIT, szCur);
+        }
         SendDlgItemMessageW(hDlg, IDC_GOTO_EDIT, EM_SETSEL, 0, -1);
         return (INT_PTR)TRUE;
     case WM_COMMAND:
@@ -5554,7 +7431,7 @@ void GoToLine(ULONGLONG qwLine)
     {
         return;
     }
-    int cLines = (int)SendMessage(hEdit, EM_GETLINECOUNT, 0, 0);
+    int cLines = EditGetLineCount();   // V5: works for custom control and EDIT
     if (cLines <= 0)
     {
         return;                         // nothing on screen
@@ -5567,13 +7444,13 @@ void GoToLine(ULONGLONG qwLine)
     {
         qwLine = (ULONGLONG)cLines;
     }
-    LRESULT lrIdx = SendMessage(hEdit, EM_LINEINDEX, (WPARAM)(qwLine - 1), 0);
+    int lrIdx = EditLineIndex((int)(qwLine - 1));   // V5
     if (lrIdx == -1)
     {
         return;
     }
-    SendMessage(hEdit, EM_SETSEL, (WPARAM)lrIdx, (LPARAM)lrIdx);
-    SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+    EditSetSel((int)lrIdx, (int)lrIdx);   // V5
+    EditScrollCaret();   // V5
     SetFocus(hEdit);
     UpdateStatusBar();
 }
@@ -5771,21 +7648,21 @@ void PositionAtOffset(ULONGLONG qwOff)
         DWORD cchLine = 49 + 1 + 16 + 2;                // same arithmetic as BuildHexText
         DWORD iCol = iByte * 3 + ((iByte >= 8) ? 1 : 0);
         DWORD iPos = iLine * cchLine + iCol;
-        SendMessage(hEdit, EM_SETSEL, (WPARAM)iPos, (LPARAM)iPos);
-        SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+        EditSetSel((int)iPos, (int)iPos);   // V5
+        EditScrollCaret();
     }
     else
     {
         int iLine = 0;
         if (LineAtOffset(qwOff, iLine))
         {
-            LRESULT lrIdx = SendMessage(hEdit, EM_LINEINDEX, (WPARAM)iLine, 0);
+            int lrIdx = EditLineIndex(iLine);   // V5
             if (lrIdx == -1)
             {
                 lrIdx = 0;      // defensive: the line does not exist
             }
-            SendMessage(hEdit, EM_SETSEL, (WPARAM)lrIdx, (LPARAM)lrIdx);
-            SendMessage(hEdit, EM_SCROLLCARET, 0, 0);
+            EditSetSel((int)lrIdx, (int)lrIdx);   // V5
+            EditScrollCaret();   // V5
         }
     }
     SetFocus(hEdit);
@@ -5797,7 +7674,7 @@ void PositionAtOffset(ULONGLONG qwOff)
 // Search > Find Bytes in File... (Ctrl+Shift+F): search the RAW FILE on disk
 // (not the page on screen) for a text pattern (as its UTF-8 bytes) or a hex
 // pattern. The found offset jumps to its page, like Go To. The scan reads the
-// file in 1 MB chunks with a pattern-wide overlap so a match straddling the
+// file in CB_READ_CHUNK (4 MB) chunks with a pattern-wide overlap so a match straddling the
 // chunk border is not missed.
 void FindBytesDialog(HWND hWnd)
 {
@@ -5913,7 +7790,7 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                 MessageBoxW(hDlg, L"Enter a pattern.", L"Find Bytes", MB_OK | MB_ICONWARNING);
                 return (INT_PTR)TRUE;
             }
-            lstrcpynW(g_szBytesPattern, szPat, _countof(g_szBytesPattern));  // dialog default next time
+            (void)lstrcpynW(g_szBytesPattern, szPat, _countof(g_szBytesPattern));  // dialog default next time
             g_bBytesHex = bHex;
             EndDialog(hDlg, 1);
             RunByteSearch(bPat, cbPat);
@@ -5957,7 +7834,7 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
     // 3.05: the worker reads its OWN snapshot of the path. Nothing else
     // writes g_szCurrentFile while a scan runs, but the failure road of
     // SetView could, and the copy makes the race impossible to spell.
-    lstrcpynW(g_szSearchFile, g_szCurrentFile, MAX_PATH);
+    (void)lstrcpynW(g_szSearchFile, g_szCurrentFile, MAX_PATH);
     InterlockedExchange(&g_bSearchCancel, 0);
     g_qwSearchResult = (ULONGLONG)-1;
     g_bInByteSearch = true;                // blocks loads and the tail timer
@@ -5975,36 +7852,48 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// Worker thread of Find Bytes (2.96): scans the WHOLE file on disk in 1 MB
-// chunks with a (cbPat-1)-byte overlap so a match can straddle a border. The
-// UI thread is never touched from here: progress goes out as
+// Worker thread of Find Bytes (2.96): scans the WHOLE file on disk in
+// CB_READ_CHUNK (4 MB) chunks with a (cbPat-1)-byte overlap so a match can
+// straddle a border. The UI thread is never touched from here: progress goes out as
 // WM_APP_SEARCHPROGRESS (~10 per second) and the outcome as
 // WM_APP_SEARCHDONE — wParam 1 = found (offset in g_qwSearchResult),
 // 0xFFFFFFFF = not found, 0 = cancelled. ESC or a closing window sets
 // g_bSearchCancel, checked once per chunk: the stop is prompt, not instant,
 // and for a viewer that is the right trade. No queue pumping here — the UI
 // thread owns its queue again, so windows stay alive while this runs.
+// 5.2: the final message of the Find Bytes worker, with a bounded retry. If
+// the post failed for good, the UI gate g_bInByteSearch would stick true
+// forever (every load blocked); the ESC handlers reap a finished worker as a
+// second net (ReapSearchThread).
+static void PostSearchDone(UINT uCode)
+{
+    for (int i = 0; i < 20; i++)
+    {
+        if (PostMessageW(hWndMain, WM_APP_SEARCHDONE, uCode, 0))
+        {
+            return;
+        }
+        Sleep(100);
+    }
+}
+
 unsigned __stdcall SearchThreadProc(void* pParameter)
 {
     UNREFERENCED_PARAMETER(pParameter);
     HANDLE hFile = CreateFileW(g_szSearchFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (hFile == INVALID_HANDLE_VALUE)
     {
-        // 3.20: if PostMessage fails, g_bInByteSearch would stay true forever.
-        // The worker can't clear it (it's UI-thread state), but we can at least
-        // ensure the message is delivered by retrying once; if that also fails,
-        // the user can press ESC (which clears g_bInByteSearch directly).
-        PostMessage(hWndMain, WM_APP_SEARCHDONE, 2, 0);   // 3.07: could not open: NOT "not found"
+        PostSearchDone(2);   // 3.07: could not open: NOT "not found"
         return(0);
     }
-    const DWORD CB_CHUNK = (1 << 20);              // 1 MB
+    const DWORD CB_CHUNK = CB_READ_CHUNK;          // 5.2: 4 MB, the loader's chunk (was 1 MB): 4x fewer syscalls
     const DWORD cbPat = g_cbSearchPat;
     DWORD cbOverlap = (cbPat > 1) ? cbPat - 1 : 0;
     BYTE* pBuf = new (std::nothrow) BYTE[CB_CHUNK + cbOverlap];
     if (pBuf == nullptr)
     {
         CloseHandle(hFile);
-        PostMessage(hWndMain, WM_APP_SEARCHDONE, 2, 0);   // 3.07: OOM: NOT "not found"
+        PostSearchDone(2);   // 3.07: OOM: NOT "not found"
         return(0);
     }
     ULONGLONG qwBase = 0;                         // file offset of pBuf[0]
@@ -6065,13 +7954,9 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
     }
     delete[] pBuf;
     CloseHandle(hFile);
-    // 3.20: if PostMessage fails (queue full / window gone), the UI never
-    // clears g_bInByteSearch. Retry is not an option here (the worker is
-    // exiting). The UI's WM_APP_SEARCHDONE handler clears it; if it never
-    // fires, ESC is the user's escape hatch (the ESC handler sets
-    // g_bSearchCancel which the worker already checked, and also clears
-    // g_bInByteSearch in the handler at line ~1720).
-    PostMessage(hWndMain, WM_APP_SEARCHDONE, bFound ? 1 : (bCancel ? 0 : 0xFFFFFFFF), 0);
+    // 5.2: PostSearchDone retries the post; if it still fails, the ESC
+    // handlers reap the finished worker and re-open the gate.
+    PostSearchDone(bFound ? 1 : (bCancel ? 0 : 0xFFFFFFFF));
     return(0);
 }
 
@@ -6211,6 +8096,9 @@ void ViewClipboardAsFile(void)
     g_cbFileTotal = cbClip;
     iView = VIEW_UTF16;
     UpdateViewMenu();
+    EnsureEditControlType();   // 5.4: only creates the control if it does not exist yet
+                               // (5.3 fixed the stale hex dump under "CLIPBOARD":
+                               // the type sync had been missing here)
     WCHAR szFull[MAX_LOADSTRING + 32];
     wsprintfW(szFull, L"%s - CLIPBOARD", szTitle);
     SetWindowTextW(hWndMain, szFull);
@@ -6282,7 +8170,7 @@ void ListAlternateStreams(void)
     }
     WCHAR szList[4096];
     WCHAR szLine[420];
-    lstrcpynW(szList, L"Alternate data streams of this file:\r\n", _countof(szList));
+    (void)lstrcpynW(szList, L"Alternate data streams of this file:\r\n", _countof(szList));
     int cStreams = 0;
     for (;;)
     {
@@ -6290,7 +8178,7 @@ void ListAlternateStreams(void)
         {
             // A named stream: ":name:$DATA". Drop the $DATA tail for the list.
             WCHAR szName[MAX_PATH + 40];
-            lstrcpynW(szName, sd.cStreamName, _countof(szName));
+            (void)lstrcpynW(szName, sd.cStreamName, _countof(szName));
             LPWSTR pszTag = StrStrIW(szName, L":$DATA");
             if (pszTag != nullptr)
             {
@@ -6339,6 +8227,7 @@ void ToggleLineNums(void)
     g_bLineNums = !g_bLineNums;
     UpdateViewMenu();                       // paints the check mark
     LayoutEdit();                           // the control shifts right of the column
+    g_tv.bGutterDirty = true;               // 5.6: the column appears or disappears
     if (hEdit != nullptr)
     {
         InvalidateRect(hEdit, nullptr, TRUE);   // its WM_PAINT repaints the column
@@ -6378,7 +8267,7 @@ int GutterWidth(void)
     }
     if (g_bLineNums)
     {
-        int cLines = (int)SendMessage(hEdit, EM_GETLINECOUNT, 0, 0);
+        int cLines = EditGetLineCount();   // V5: works for custom control and EDIT
         int cDigits = 4;                        // minimum column: 4 digits
         while (cLines >= 10000)
         {
@@ -6397,11 +8286,16 @@ int GutterWidth(void)
 // painter where 2.99 kept three near-twins — HexPaintGutter, NumPaintGutter
 // and a selector whose only job was choosing between them; the shared fill,
 // font and clip plumbing lives here once.
-// Called after every paint of the edit control (see EditSubclassProc) and
+// Called after every paint of the view control (its own WM_PAINT) and
 // from the parent's WM_PAINT (the strip is the parent's territory): every
 // scroll path lands here. Cost per call: one fill plus one short TextOut per
 // visible line. Only iView/cbFile decide whether the column exists, so stale
-// columns are impossible.
+// columns are impossible. 5.4: the labels start where the control starts
+// (one line down while the ruler is on), so none overlaps the ruler.
+// 5.5: the loop's bottom edge is the column's bottom in PARENT coordinates
+// (the 5.4 loop still compared the parent-space y against the control's own
+// height and stopped 1-2 rows early), and an partially visible row keeps
+// its label, clipped to the column, exactly like its text.
 void PaintGutter(void)
 {
     bool bHex = (iView == VIEW_HEX);
@@ -6425,6 +8319,11 @@ void PaintGutter(void)
     {
         return;
     }
+    // 5.4: with the ruler on, LayoutEdit places the control one line down.
+    // The labels used to start at y = 0 of the PARENT, one row above their
+    // text (the "58" overlapped the ruler) and the last visible rows went
+    // unlabeled. Use the same offset LayoutEdit does.
+    int iRulerH = (g_bRuler && iView != VIEW_HEX) ? iHexLineH : 0;
     HDC hdc = GetDC(hWndMain);
     if (hdc == nullptr)
     {
@@ -6432,10 +8331,20 @@ void PaintGutter(void)
     }
     RECT rcGutter;
     rcGutter.left = 0;
-    rcGutter.top = 0;
+    rcGutter.top = iRulerH;
     rcGutter.right = iW;
-    rcGutter.bottom = rcEdit.bottom;
+    rcGutter.bottom = iRulerH + rcEdit.bottom;
     FillRect(hdc, &rcGutter, GetSysColorBrush(COLOR_WINDOW));
+    // 5.5: clip to the column. The last visible row can be partial (the text
+    // view paints it: its loop runs while y < bottom), and it gets its label
+    // too; without the clip the label's glyph bottom would cross into the
+    // status bar (the parent window has no WS_CLIPCHILDREN).
+    HRGN hRgnClip = CreateRectRgnIndirect(&rcGutter);
+    if (hRgnClip != nullptr)
+    {
+        SelectClipRgn(hdc, hRgnClip);   // GDI copies the region: safe to delete
+        DeleteObject(hRgnClip);
+    }
     HGDIOBJ hOldFont = SelectObject(hdc, (hFontHexBold != nullptr) ? hFontHexBold : hFont);
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
@@ -6450,9 +8359,38 @@ void PaintGutter(void)
     }
     else
     {
-        cLines = (int)SendMessage(hEdit, EM_GETLINECOUNT, 0, 0);
+        cLines = (int)EditGetLineCount();   // V5
     }
-    int iFirst = (int)SendMessage(hEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+    int iFirst = (int)EditGetFirstVisibleLine();   // V5
+    // 5.8: bookmark dots. g_pBookmarks is page-relative and SORTED and the
+    // loop walks lines in ascending order, so one cursor advances in
+    // lockstep and the membership test costs O(1) amortized per row.
+    // 5.9: the dot is NOT limited to the text views anymore: it paints in
+    // the hex view too, next to the offset of the bookmarked dump line.
+    // In the text views it stays tied to line numbers (no column, no dot);
+    // in hex the column always exists.
+    int iBm = 0;
+    HBRUSH hbrBm = nullptr;
+    HPEN hpenBm = nullptr;
+    if (g_cBookmarks > 0)
+    {
+        // 5.9.1: the dot tools are created ONCE and cached in the view
+        // state (they used to be created and deleted on EVERY repaint:
+        // two GDI object round trips per paint). Like hbrBookmark, they
+        // live for the session; the OS reclaims them at exit.
+        if (g_tv.hbrBmDot == nullptr)
+        {
+            g_tv.hbrBmDot = CreateSolidBrush(RGB(0x1E, 0x66, 0xD6));   // the blue dot
+            g_tv.hpenBmDot = CreatePen(PS_NULL, 0, 0);                 // fill only, no outline
+        }
+        hbrBm = g_tv.hbrBmDot;
+        hpenBm = g_tv.hpenBmDot;
+        if (hbrBm != nullptr && hpenBm != nullptr)
+        {
+            SelectObject(hdc, hbrBm);      // selected once for the whole column
+            SelectObject(hdc, hpenBm);     // (5.9.1: not once per bookmarked row)
+        }
+    }
     // 3.02 (O5): the whole column goes out in ONE PolyTextOutW call.
     // Every visible line used to cost its own TextOutW round trip to GDI
     // (40-160 of them on a normal repaint, every mouse-wheel scroll
@@ -6463,11 +8401,25 @@ void PaintGutter(void)
     // character spacing. 3.20: cap raised to 256 — a 4K monitor at the
     // smallest font (-8, ~12 px/line) can show ~180 lines, the old 160 cap
     // dropped the bottom rows' labels.
-    POLYTEXTW atxt[256];
-    WCHAR szLabels[256][24];               // a hex offset (at most 16 digits) or a line number
+    // 5.2: both buffers are static (28 KB of stack the /analyze check
+    // flagged). PaintGutter runs on the UI thread only, so the single
+    // instance is safe.
+    static POLYTEXTW atxt[256];
+    static WCHAR szLabels[256][24];        // a hex offset (at most 16 digits) or a line number
     int ctxt = 0;
-    int y = 0;
-    for (int iLine = iFirst; iLine < cLines && y + iHexLineH <= rcEdit.bottom && ctxt < 256; iLine++)
+    // 5.5: CRÍTICO, el bug de las últimas filas sin número. La condición
+    // comparaba y (coordenadas del PADRE, las etiquetas empiezan en
+    // y = iRulerH) contra rcEdit.bottom (coordenadas del CONTROL, que mide
+    // iRulerH menos que el hueco del padre): con la regla activa el bucle
+    // dejaba de etiquetar 1-2 filas antes de tiempo (exactamente las dos
+    // últimas de la captura). El borde correcto es el del hueco completo
+    // en coordenadas del padre, y la condición "y < borde" (no
+    // "y + alto <= borde") para que una fila parcialmente visible reciba
+    // su número igual que recibe su texto: el recuento de etiquetas queda
+    // clavado al recuento de filas del WM_PAINT del control.
+    int yGutBottom = iRulerH + rcEdit.bottom;
+    int y = iRulerH;   // 5.4: labels start where the control starts
+    for (int iLine = iFirst; iLine < cLines && y < yGutBottom && ctxt < 256; iLine++)
     {
         WCHAR* szLabel = szLabels[ctxt];
         int cch;
@@ -6496,6 +8448,25 @@ void PaintGutter(void)
             WCHAR* pEnd = U64ToWide(szLabel, (ULONGLONG)(iLine + 1));
             cch = (int)(pEnd - szLabel);
         }
+        // 5.8/5.9: a bookmarked line gets a blue dot in the left zone of
+        // the column, before its number (or its hex offset). The dot never
+        // crosses into the labels: the clip region is the column and the
+        // label cells start further right (right-aligned on the grid).
+        if (hbrBm != nullptr && hpenBm != nullptr)
+        {
+            while (iBm < g_cBookmarks && (int)g_pBookmarks[iBm] < iLine)
+            {
+                iBm++;
+            }
+            if (iBm < g_cBookmarks && (int)g_pBookmarks[iBm] == iLine)
+            {
+                int d = iHexLineH / 2;
+                if (d > 2 * iHexCharW) d = 2 * iHexCharW;
+                if (d < 5) d = 5;
+                int cy = y + (iHexLineH - d) / 2;
+                Ellipse(hdc, 4, cy, 4 + d, cy + d);
+            }
+        }
         atxt[ctxt].x = iW - 6 - cch * iHexCharW;      // right-aligned on the grid
         atxt[ctxt].y = y;
         atxt[ctxt].n = (UINT)cch;
@@ -6513,59 +8484,259 @@ void PaintGutter(void)
     {
         PolyTextOutW(hdc, atxt, ctxt);           // one GDI call for the whole column
     }
+    SelectClipRgn(hdc, nullptr);   // 5.5: restore the default clip before releasing
     SelectObject(hdc, hOldFont);
     ReleaseDC(hWndMain, hdc);
 }
-
 
 /* -------------------------------------------------------------------------------------------- */
 // View > Word Wrap: the wrap is a pair of styles (WS_HSCROLL + ES_AUTOHSCROLL
 // off), and edit styles are chosen at creation, so the control is recreated.
 // The content ALWAYS comes back from the raw bytes of the page (ApplyView),
 // so no text is copied across controls.
-void RecreateEditControl(void)
+void RecreateEditControl(bool bApplyContent)
 {
     if (hWndMain == nullptr)
     {
         return;
     }
+    // V5: free the custom control's line index + view text before destroying
+    ReleaseViewContent();   // 5.2: one helper
     if (hEdit != nullptr)
     {
-        // 2.98: swap in the tiny empty block first. DestroyWindow would
-        // free the control's buffer itself, tens of MB at a time; handing
-        // it a 2-byte block makes the destroy trivial and frees the big
-        // one HERE, on our clock, instead of inside the destroy.
-        AdoptEmptyText();
-        DestroyWindow(hEdit);           // the subclass removes itself on WM_DESTROY
+        DestroyWindow(hEdit);
         hEdit = nullptr;
     }
-    DWORD dwStyle = WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY;
-    if (!g_bWrap)
-    {
-        dwStyle |= WS_HSCROLL | ES_AUTOHSCROLL;         // no wrap: horizontal scrolling
-    }
-    hEdit = CreateWindowEx(0, L"EDIT", L"", dwStyle, 0, 0, 0, 0, hWndMain, (HMENU)ID_EDITCHILD, hInst, nullptr);
+    // 5.4: the custom control serves EVERY view now, hex included — the
+    // standard EDIT branch (ES_MULTILINE + EM_SETHANDLE + EditSubclassProc)
+    // is gone, and with it the synchronous line-table build that made the
+    // hex view the slowest path in the program.
+    hEdit = CreateTextView(hWndMain);
     if (hEdit == nullptr)
     {
-        return;                        // without a control there is nothing to show
+        return;
     }
-    SendMessage(hEdit, EM_SETLIMITTEXT, 0x7FFFFFFE, 0);
-    SetWindowSubclass(hEdit, EditSubclassProc, 1, 0);
-    if (hFont != nullptr)
-    {
-        SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, MAKELPARAM(TRUE, 0));
-    }
-    UpdateHexMetrics();                    // measures through the (new) control
-    ApplyView();                           // rebuilds the text of the page from the raw bytes
-    SetFocus(hEdit);                       // 3.06: the destroyed control had the focus
+    if (hFont != nullptr) SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, MAKELPARAM(TRUE, 0));
+    UpdateHexMetrics();
+    if (bApplyContent) ApplyView();   // 5.2: loads sync the type and deliver themselves
+    SetFocus(hEdit);
 }
 
 void ToggleWrap(void)
 {
+    // 5.4: the hex dump has fixed lines — wrap does not apply to it.
+    if (iView == VIEW_HEX) return;
     g_bWrap = !g_bWrap;
-    ClearBookmarks();                      // wrapped lines renumber everything
+    // V4: if turning wrap ON with a fixed width set, clear it (wrap to window)
+    if (g_bWrap && g_iWrapWidth > 0)
+    {
+        g_iWrapWidth = 0;   // fixed-width wrap uses a different mechanism
+    }
+    // 5.9.2: no ClearBookmarks here: since 5.4 the wrap happens at paint
+    // time, the LOGICAL lines never renumber, and the bookmarks (logical
+    // line + file offset) stay valid across the toggle.
     UpdateViewMenu();                      // paints the check mark
-    RecreateEditControl();
+    // 5.4: no recreate — the control wraps at paint time, so a flag sync
+    // (which also retires/restores WS_HSCROLL) plus one invalidate is the
+    // whole toggle. The old path re-decoded the whole page.
+    TV_SyncState();
+    if (g_tv.hWnd != nullptr)
+    {
+        InvalidateRect(g_tv.hWnd, nullptr, FALSE);
+    }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// V4: Greenbar — toggle alternating line backgrounds for readability.
+// The stripes are painted natively by the V5TextView's WM_PAINT (one
+// FillRect per visual row with the cached brush): the old PatBlt overlay
+// in EditSubclassProc died with V5, and 5.4 retired the EDIT itself, so
+// the custom control paints every view. The brush lives in TV_SyncState.
+void ToggleGreenbar(void)
+{
+    g_bGreenbar = !g_bGreenbar;
+    TV_SyncState();   // 5.3: updates the flag AND creates/retires the brush
+    UpdateViewMenu();
+    // 5.4: the custom control paints the stripes in the hex view too, so
+    // every view invalidates (this also fixes a stale brush on hex).
+    if (hEdit != nullptr)
+    {
+        InvalidateRect(hEdit, nullptr, FALSE);
+    }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 5.8: View > Highlight Current Line — a full-width band on the caret line.
+// The band is painted natively by the V5TextView's WM_PAINT (the row fill
+// picks the cached yellow brush for the caret line); TV_UpdateCurLine, hooked
+// into TV_InvalidateSelPainted, keeps the band following the caret for free
+// on every selection change. The brush lives in TV_SyncState.
+void ToggleHiliteLine(void)
+{
+    g_bHiliteLine = !g_bHiliteLine;
+    TV_SyncState();   // creates/retires the brush AND resets iPaintedCurLine
+    UpdateViewMenu();
+    if (hEdit != nullptr)
+    {
+        InvalidateRect(hEdit, nullptr, FALSE);
+    }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 5.8: View > ESC to Exit (default ON, the behavior every build had). With
+// the option OFF, ESC only cancels a byte search or closes the Find dialog;
+// the exit lives in Alt+X (new accelerator), Alt+F4 or File > Exit.
+void ToggleEscExit(void)
+{
+    g_bEscExit = !g_bEscExit;
+    UpdateViewMenu();
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// V4: Ruler — toggle a column ruler at the top of the text area.
+// LayoutEdit reserves space for it (the EDIT starts below the ruler strip),
+// and the parent's WM_PAINT paints it. On toggle we must re-layout the
+// EDIT and invalidate the parent (the ruler lives in the parent's area).
+void ToggleRuler(void)
+{
+    g_bRuler = !g_bRuler;
+    UpdateViewMenu();
+    LayoutEdit();   // V4: reposition the EDIT to make room for (or remove) the ruler
+    if (hWndMain != nullptr)
+    {
+        InvalidateRect(hWndMain, nullptr, FALSE);   // V5: FALSE = no erase (reduces flicker)
+    }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// V4: PaintRuler — draws a column ruler at the top of the text area.
+// Painted by the PARENT's WM_PAINT in the strip reserved by LayoutEdit.
+// rcRuler is the full ruler rect (x = gutter, y = 0, bottom = iHexLineH).
+// xOrigin is the pixel x of the gutter (the ruler starts to its right).
+// Accounts for the custom control's horizontal scroll so column numbers
+// align with the visible text (5.4: no EDIT anymore; the ruler does not
+// even show in the hex view).
+void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin)
+{
+    if (iHexCharW <= 0 || iHexLineH <= 0 || hEdit == nullptr)
+    {
+        return;
+    }
+    // V4: fill the ruler background with the 3D face color so it looks
+    // like a separate toolbar strip, not overlapping text.
+    FillRect(hdc, &rcRuler, GetSysColorBrush(COLOR_3DFACE));
+    int iScrollXPx = g_tv.iScrollX;   // V5: pixels, the control owns the scroll
+    HFONT hOld = (HFONT)SelectObject(hdc, hFont);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+    int iFirstCol = iScrollXPx / iHexCharW;
+    int xStart = rcRuler.left - (iScrollXPx % iHexCharW);
+    int iColsVisible = (rcRuler.right - xStart) / iHexCharW + 2;
+    int iRulerH = rcRuler.bottom - rcRuler.top;
+    int y = rcRuler.top;
+    for (int i = 0; i <= iColsVisible; i++)
+    {
+        int iCol = iFirstCol + i;
+        if (iCol <= 0) continue;   // no label at column 0
+        int x = xStart + i * iHexCharW;
+        if (x > rcRuler.right) break;
+        if (iCol % 10 == 0)
+        {
+            WCHAR szLabel[8];
+            int cch = wsprintfW(szLabel, L"%d", iCol);
+            RECT rcCell = { x, y, x + 10 * iHexCharW, y + iRulerH };
+            DrawTextW(hdc, szLabel, cch, &rcCell, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+        else
+        {
+            RECT rcTick = { x, y + iRulerH - 4, x + 1, y + iRulerH };
+            FillRect(hdc, &rcTick, GetSysColorBrush(COLOR_3DSHADOW));
+        }
+    }
+    // bottom border line
+    RECT rcLine = { rcRuler.left, y + iRulerH - 1, rcRuler.right, y + iRulerH };
+    FillRect(hdc, &rcLine, GetSysColorBrush(COLOR_3DSHADOW));
+    SelectObject(hdc, hOld);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// V4: Wrap to Fixed Width — dialog to set a column count for wrapping.
+// V5: the decode no longer inserts virtual CRLFs; the custom control
+// computes the wrap per visible line during paint (g_tv.iWrapWidth).
+void SetWrapWidth(int iCols)
+{
+    if (iCols < 0)
+    {
+        iCols = 0;
+    }
+    if (iCols > 0 && iCols < 10)
+    {
+        iCols = 10;   // sanity floor
+    }
+    g_iWrapWidth = iCols;
+    if (iCols > 0)
+    {
+        g_bWrap = false;   // fixed-width wrap is its own mode, separate from window wrap
+    }
+    // 5.9.2: no ClearBookmarks (see ToggleWrap): the fixed-width wrap is
+    // paint-time too, the logical lines never renumber.
+    UpdateViewMenu();
+    // 5.4: no recreate — like ToggleWrap, a flag sync (it also retires/
+    // restores WS_HSCROLL) plus one invalidate is the whole change.
+    TV_SyncState();
+    if (g_tv.hWnd != nullptr)
+    {
+        InvalidateRect(g_tv.hWnd, nullptr, FALSE);
+    }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// V4: Wrap Width dialog — asks the user for a column count.
+INT_PTR CALLBACK WrapWidthProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        SetDlgItemTextW(hDlg, IDC_GOTO_EDIT, L"80");
+        SendDlgItemMessageW(hDlg, IDC_GOTO_EDIT, EM_SETSEL, 0, -1);
+        return (INT_PTR)TRUE;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK)
+        {
+            WCHAR szVal[32];
+            GetDlgItemTextW(hDlg, IDC_GOTO_EDIT, szVal, _countof(szVal));
+            // 5.9.1: ParseU64 does the parsing (its prototype is already in
+            // sight at the top of the file): the hand-rolled digit loop
+            // duplicated its walk and its overflow guard. Refused input
+            // degrades to 0 (fixed width off); anything over the cap wraps
+            // to the cap, exactly as the old loop's mid-parse clamp did.
+            ULONGLONG qwVal = 0;
+            int iCols = ParseU64(szVal, qwVal) ? (int)((qwVal > 10000) ? 10000 : qwVal) : 0;
+            EndDialog(hDlg, 1);
+            SetWrapWidth(iCols);
+            return (INT_PTR)TRUE;
+        }
+        if (LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, 0);
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}
+
+void WrapWidthDialog(HWND hWnd)
+{
+    DialogBox(hInst, MAKEINTRESOURCE(IDD_GOTO), hWnd, WrapWidthProc);
 }
 
 
@@ -6658,49 +8829,37 @@ BOOL ParseU64(LPCWSTR psz, ULONGLONG& rqw)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// View-text block pair (2.98). AllocViewText hands back a LOCKED pointer into
-// a movable global block: exactly what EM_SETHANDLE adopts. Every builder of
-// view text (NormalizeNewlines, BuildHexText, BuildViewText) allocates
-// through this pair now, so the delivery is copy-free end to end.
-// The control frees nothing on its own while the block is in its care: the
-// NEXT swap (DeliverTextToEdit / AdoptEmptyText) is what frees the previous
-// block, and DestroyWindow frees whatever tiny block is current. A failed
+// View-text block pair. 5.4: GMEM_FIXED — the block stops being movable.
+// With the standard EDIT gone there is no EM_SETHANDLE adoption left (it
+// needed a locked pointer into a MOVABLE block), so the GlobalLock/
+// GlobalUnlock round trip on every allocation and access is dead weight.
+// Every builder of view text (NormalizeNewlines, BuildHexText,
+// BuildViewText) allocates through this pair; the buffers live until the
+// next delivery or ResetViewer frees them (FreeViewText). A failed
 // allocation answers nullptr, the same contract the old new[] paths had.
 WCHAR* AllocViewText(DWORD cch)
 {
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, ((SIZE_T)cch + 1) * sizeof(WCHAR));
+    HGLOBAL hMem = GlobalAlloc(GMEM_FIXED, ((SIZE_T)cch + 1) * sizeof(WCHAR));
     if (hMem == nullptr)
     {
         return(nullptr);
     }
-    WCHAR* pwsz = (WCHAR*)GlobalLock(hMem);
-    if (pwsz == nullptr)
-    {
-        GlobalFree(hMem);              // allocated but un-lockable: do not leak it
-        return(nullptr);
-    }
-    pwsz[0] = L'\0';                       // empty until the caller fills it
-    return(pwsz);
+    ((WCHAR*)hMem)[0] = L'\0';             // empty until the caller fills it
+    return((WCHAR*)hMem);
 }
 
 
 /* -------------------------------------------------------------------------------------------- */
 // Frees what AllocViewText handed out (nullptr-safe). Every block this
-// program frees by hand goes through here; the ones the EDIT control adopted
-// are freed by the next EM_SETHANDLE swap, never by this pair.
+// program frees by hand goes through here. GMEM_FIXED: the pointer IS the
+// handle, so GlobalFree takes it directly.
 void FreeViewText(WCHAR* psz)
 {
     if (psz == nullptr)
     {
         return;
     }
-    HGLOBAL hMem = GlobalHandle(psz);
-    if (hMem == nullptr)
-    {
-        return;                         // not ours: refuse instead of freeing garbage
-    }
-    GlobalUnlock(hMem);
-    GlobalFree(hMem);
+    GlobalFree((HGLOBAL)psz);
 }
 
 
@@ -6766,7 +8925,7 @@ void BuildIniPath(void)
     {
         return;                         // no room: no persistence, no overflow
     }
-    lstrcpynW(g_szIniPath, szExe, MAX_PATH);
+    (void)lstrcpynW(g_szIniPath, szExe, MAX_PATH);
     lstrcatW(g_szIniPath, L"\\4More.ini");
 }
 
@@ -6805,6 +8964,14 @@ void LoadSettings(void)
     g_bLineNums = (ProfileLong(L"LineNumbers", 0) != 0);
     g_bWrap = (ProfileLong(L"WordWrap", 0) != 0);
     g_bTail = (ProfileLong(L"Tail", 0) != 0);
+    // V4: new view features
+    g_bGreenbar = (ProfileLong(L"Greenbar", 0) != 0);
+    g_bRuler = (ProfileLong(L"Ruler", 0) != 0);
+    g_bHiliteLine = (ProfileLong(L"HighlightLine", 0) != 0);   // 5.8: off until asked for
+    g_bEscExit = (ProfileLong(L"EscExit", 1) != 0);            // 5.8: ON by default (the classic behavior)
+    g_iWrapWidth = (int)ProfileLong(L"WrapWidth", 0);
+    if (g_iWrapWidth > 0 && g_iWrapWidth < 10) { g_iWrapWidth = 10; }
+    if (g_iWrapWidth > 10000) { g_iWrapWidth = 10000; }
     // Window placement: all four edges must be present AND land on a
     // monitor that exists right now.
     long lLeft = ProfileLong(L"WinLeft", INI_WINPOS_INVALID);
@@ -6865,6 +9032,12 @@ void SaveSettings(void)
     p += wsprintfW(p, L"LineNumbers=%d", g_bLineNums ? 1 : 0) + 1;
     p += wsprintfW(p, L"WordWrap=%d", g_bWrap ? 1 : 0) + 1;
     p += wsprintfW(p, L"Tail=%d", g_bTail ? 1 : 0) + 1;
+    // V4: new view features
+    p += wsprintfW(p, L"Greenbar=%d", g_bGreenbar ? 1 : 0) + 1;
+    p += wsprintfW(p, L"Ruler=%d", g_bRuler ? 1 : 0) + 1;
+    p += wsprintfW(p, L"HighlightLine=%d", g_bHiliteLine ? 1 : 0) + 1;   // 5.8
+    p += wsprintfW(p, L"EscExit=%d", g_bEscExit ? 1 : 0) + 1;            // 5.8
+    p += wsprintfW(p, L"WrapWidth=%d", g_iWrapWidth) + 1;
     WINDOWPLACEMENT wp = {};
     wp.length = sizeof(wp);
     if (GetWindowPlacement(hWndMain, &wp))
@@ -6884,7 +9057,7 @@ void SaveSettings(void)
         // cannot resurrect from a stale line.
         WCHAR szRec[RECENT_MAX * (MAX_PATH + 8) + 2];
         p = szRec;
-        for (int i = 0; i < g_cRecent && g_szRecent[i][0] != L'\0'; i++)
+        for (int i = 0; i < g_cRecent && i < RECENT_MAX && g_szRecent[i][0] != L'\0'; i++)   // 5.2: RECENT_MAX bound (the analyzer cannot prove g_cRecent <= RECENT_MAX)
         {
             p += wsprintfW(p, L"%d=%s", i + 1, g_szRecent[i]) + 1;
         }
@@ -7037,9 +9210,9 @@ void AddRecentEntry(LPCWSTR pszEntry)
     // Shift [iHit-1 .. 0] down one slot, then the new entry sits at [0].
     for (int i = iHit; i > 0; i--)
     {
-        lstrcpynW(g_szRecent[i], g_szRecent[i - 1], MAX_PATH);
+        (void)lstrcpynW(g_szRecent[i], g_szRecent[i - 1], MAX_PATH);
     }
-    lstrcpynW(g_szRecent[0], pszEntry, MAX_PATH);
+    (void)lstrcpynW(g_szRecent[0], pszEntry, MAX_PATH);
     RebuildRecentMenu();
 }
 

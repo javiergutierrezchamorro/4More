@@ -1,4 +1,22 @@
-﻿// 4More.rc — recursos del visor (Build 3.20)
+﻿// 4More.rc — recursos del visor (Build 5.9.4)
+//
+// 5.9: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. La revisión es del
+// .cpp: la línea con bookmark se pinta con fondo azul (siempre, con o sin
+// line numbers, hex incluido) y la bola azul también se dibuja en la
+// columna de la vista hex. El manifest sube a 5.9.0.0.
+//
+// 5.8: MENÚ, ACELERADORES Y MANIFEST CAMBIAN. View añade dos opciones
+// (Highlight Current Line, ESC to Exit) y File > Exit gana el acelerador
+// Alt+X (el menú lo anuncia). El manifest sube a 5.8.0.0.
+//
+// 5.5: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. La revisión es del .cpp:
+// las últimas filas volvían a quedarse sin número de línea (el bucle del
+// gutter comparaba coordenadas del padre contra el alto del control) y el
+// repaint de selección/caret pasa a ser mínimo. El manifest sube a 5.7.0.0.
+//
+// 4.0: AÑADE 3 ITEMS AL MENÚ VIEW (Greenbar, Ruler, Wrap to Fixed Width).
+// Los 3 IDs nuevos (ID_VIEW_GREENBAR, ID_VIEW_RULER, ID_VIEW_WRAPWIDTH)
+// viven en resource.h. El manifest sube a 4.0.0.0.
 //
 // 3.20: NI MENÚ NI ACELERADORES NI RECURSOS CAMBIAN. La revisión es del
 // .cpp: corrección de bugs (PostMessage sin check, g_qwSearchResult non-volatile,
@@ -161,7 +179,7 @@ BEGIN
         // Recent Files (2.96) se inserta aquí en ejecución: EnsureRecentMenu
         // añade el popup antes de Exit (3.13: SIN separador propio — el
         // separador estático de arriba ya separa el bloque del popup).
-        MENUITEM "E&xit",                               ID_EXIT
+        MENUITEM "E&xit\tAlt+X",                        ID_EXIT
     END
     POPUP "&Edit"
     BEGIN
@@ -195,6 +213,11 @@ BEGIN
         MENUITEM "&Tail File\tCtrl+T",                  ID_VIEW_TAIL
         MENUITEM "&Line Numbers",                       ID_VIEW_LINENUMS
         MENUITEM "&Word Wrap",                          ID_VIEW_WRAP
+        MENUITEM "Wrap to &Fixed Width...",              ID_VIEW_WRAPWIDTH
+        MENUITEM "&Greenbar",                            ID_VIEW_GREENBAR
+        MENUITEM "&Ruler",                              ID_VIEW_RULER
+        MENUITEM "&Highlight Current Line",              ID_VIEW_HILITE
+        MENUITEM "ESC to E&xit",                         ID_VIEW_ESCEXIT
         MENUITEM SEPARATOR
         MENUITEM "Font &+\tCtrl++",                     ID_VIEW_FONTPLUS
         MENUITEM "Font &-\tCtrl+-",                      ID_VIEW_FONTMINUS
@@ -212,6 +235,7 @@ END
 IDC_MY4MORE ACCELERATORS
 BEGIN
     "O",            ID_FILE_OPEN,           VIRTKEY, CONTROL, NOINVERT
+    "X",            ID_EXIT,                VIRTKEY, ALT, NOINVERT
     "C",            ID_COPY,                VIRTKEY, CONTROL, NOINVERT
     "A",            ID_SELECTALL,           VIRTKEY, CONTROL, NOINVERT
     "F",            ID_FIND,                VIRTKEY, CONTROL, NOINVERT

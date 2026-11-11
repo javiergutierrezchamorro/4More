@@ -29,3 +29,4 @@
 #define IDC_PROGRESS     3
 
 #endif // _4MORE_H_
+

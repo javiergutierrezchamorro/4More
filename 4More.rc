@@ -211,15 +211,20 @@ BEGIN
         // Recent Files (2.96) se inserta aquí en ejecución: EnsureRecentMenu
         // añade el popup antes de Exit (3.13: SIN separador propio — el
         // separador estático de arriba ya separa el bloque del popup).
+        MENUITEM "&Print...\tCtrl+P",                   ID_FILE_PRINT
         MENUITEM "E&xit\tAlt+X",                        ID_EXIT
     END
     POPUP "&Edit"
     BEGIN
         MENUITEM "&Copy\tCtrl+C",                       ID_COPY
+        MENUITEM "Copy &Append\tCtrl+Shift+C",          ID_COPY_APPEND
+        MENUITEM "Copy Colu&mn\tCtrl+Shift+M",          ID_COPY_COLUMN
         MENUITEM "Select &All\tCtrl+A",                 ID_SELECTALL
         MENUITEM SEPARATOR
         MENUITEM "&Find...\tCtrl+F",                    ID_FIND
         MENUITEM "Find &Next\tF3",                      ID_FINDNEXT
+        MENUITEM "Find with &Regex",                    ID_FIND_REGEX
+        MENUITEM "Find &All\tCtrl+Shift+F3",            ID_FIND_ALL
         MENUITEM SEPARATOR
         MENUITEM "&Bookmark\tF2",                       ID_EDIT_BOOKMARK
         MENUITEM "&Next Bookmark\tShift+F2",            ID_EDIT_NEXTBOOKMARK
@@ -232,30 +237,45 @@ BEGIN
     END
     POPUP "&View"
     BEGIN
-        MENUITEM "&ANSI",                               ID_VIEW_ANSI
-        MENUITEM "&UTF-8",                              ID_VIEW_UTF8
-        MENUITEM "&Unicode (UTF-16 LE)",                ID_VIEW_UNICODE
-        MENUITEM "UTF-16 &BE",                          ID_VIEW_UTF16BE
-        MENUITEM "&EBCDIC",                             ID_VIEW_EBCDIC
-        MENUITEM "&Hexadecimal",                        ID_VIEW_HEX
+        POPUP "&Mode"
+        BEGIN
+            MENUITEM "&Text",                               ID_VIEW_MODE_TEXT
+            MENUITEM "&Hexadecimal",                        ID_VIEW_HEX
+            MENUITEM "&CSV / TSV Table",                     ID_VIEW_CSV
+        END
+        POPUP "&Encoding"
+        BEGIN
+            MENUITEM "&ANSI",                               ID_VIEW_ANSI
+            MENUITEM "&UTF-8",                              ID_VIEW_UTF8
+            MENUITEM "&Unicode (UTF-16 LE)",                ID_VIEW_UNICODE
+            MENUITEM "UTF-16 &BE",                          ID_VIEW_UTF16BE
+            MENUITEM "&EBCDIC",                             ID_VIEW_EBCDIC
+        END
         MENUITEM SEPARATOR
         MENUITEM "&Next Page\tPgDn",                    ID_VIEW_NEXTPAGE
         MENUITEM "&Previous Page\tPgUp",                ID_VIEW_PREVPAGE
         MENUITEM "&Refresh\tF5",                        ID_VIEW_REFRESH
         MENUITEM "&Tail File\tCtrl+T",                  ID_VIEW_TAIL
-        MENUITEM "&Line Numbers",                       ID_VIEW_LINENUMS
-        MENUITEM "&Word Wrap",                          ID_VIEW_WRAP
-        MENUITEM "Wrap to &Fixed Width...",              ID_VIEW_WRAPWIDTH
-        MENUITEM "&Greenbar",                            ID_VIEW_GREENBAR
-        MENUITEM "&Ruler",                              ID_VIEW_RULER
-        MENUITEM "&Highlight Current Line",              ID_VIEW_HILITE
-        MENUITEM "ESC to E&xit",                         ID_VIEW_ESCEXIT
         MENUITEM SEPARATOR
         MENUITEM "Font &+\tCtrl++",                     ID_VIEW_FONTPLUS
         MENUITEM "Font &-\tCtrl+-",                      ID_VIEW_FONTMINUS
     END
+    POPUP "&Options"
+    BEGIN
+        MENUITEM "&Line Numbers",                       ID_VIEW_LINENUMS
+        MENUITEM "&Word Wrap",                          ID_VIEW_WRAP
+        MENUITEM "Wrap to &Fixed Width...",              ID_VIEW_WRAPWIDTH
+        MENUITEM "&Freeze Columns...",                   ID_VIEW_FREEZECOLS
+        MENUITEM SEPARATOR
+        MENUITEM "&Greenbar",                            ID_VIEW_GREENBAR
+        MENUITEM "&Ruler",                              ID_VIEW_RULER
+        MENUITEM "&Highlight Current Line",              ID_VIEW_HILITE
+        MENUITEM "ESC to E&xit",                         ID_VIEW_ESCEXIT
+    END
     POPUP "&Help"
     BEGIN
+        MENUITEM "&Command Line...",                     ID_HELP_CMDLINE
+        MENUITEM SEPARATOR
         MENUITEM "&About 4More...",                      ID_ABOUT
     END
 END
@@ -267,10 +287,14 @@ END
 IDC_MY4MORE ACCELERATORS
 BEGIN
     "O",            ID_FILE_OPEN,           VIRTKEY, CONTROL, NOINVERT
+    "P",            ID_FILE_PRINT,          VIRTKEY, CONTROL, NOINVERT
     "X",            ID_EXIT,                VIRTKEY, ALT, NOINVERT
     "C",            ID_COPY,                VIRTKEY, CONTROL, NOINVERT
+    "C",            ID_COPY_APPEND,         VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "M",            ID_COPY_COLUMN,         VIRTKEY, CONTROL, SHIFT, NOINVERT
     "A",            ID_SELECTALL,           VIRTKEY, CONTROL, NOINVERT
     "F",            ID_FIND,                VIRTKEY, CONTROL, NOINVERT
+    VK_F3,          ID_FIND_ALL,            VIRTKEY, CONTROL, SHIFT, NOINVERT
     "G",            ID_SEARCH_GOTO,         VIRTKEY, CONTROL, NOINVERT
     "T",            ID_VIEW_TAIL,           VIRTKEY, CONTROL, NOINVERT
     "F",            ID_SEARCH_BYTES,        VIRTKEY, CONTROL, SHIFT, NOINVERT
@@ -382,6 +406,22 @@ BEGIN
     PUSHBUTTON      "Cancel", IDCANCEL, 152, 50, 50, 14
 END
 
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Freeze Columns
+
+IDD_FREEZECOLS DIALOGEX 0, 0, 210, 68
+STYLE DS_MODALFRAME | WS_CAPTION | WS_SYSMENU | WS_POPUP
+CAPTION "Freeze Columns"
+FONT 8, "MS Shell Dlg 2", 400, 0, 0x1
+BEGIN
+    LTEXT           "&Columns:", IDC_STATIC, 12, 14, 40, 8
+    EDITTEXT        IDC_FREEZE_COLS, 60, 12, 60, 14, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "Keep this many columns fixed while scrolling horizontally (0 = off, max 200).", IDC_STATIC, 12, 34, 186, 16
+    DEFPUSHBUTTON   "OK", IDOK, 96, 50, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 152, 50, 50, 14
+END
 
 /////////////////////////////////////////////////////////////////////////////
 // Tabla de cadenas

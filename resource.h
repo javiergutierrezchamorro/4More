@@ -50,6 +50,16 @@
 // 5.8: opciones nuevas del menú View (banda de la línea actual, ESC to Exit)
 #define ID_VIEW_HILITE                  32820
 #define ID_VIEW_ESCEXIT                 32821
+// 6.00 high-priority features
+#define ID_COPY_APPEND                  32822
+#define ID_COPY_COLUMN                  32823
+#define ID_FIND_REGEX                   32824
+#define ID_FIND_ALL                     32825
+#define ID_VIEW_FREEZECOLS              32826
+#define ID_VIEW_CSV                     32827
+#define ID_FILE_PRINT                   32828
+#define ID_HELP_CMDLINE                 32830
+#define ID_VIEW_MODE_TEXT               32831
 // Recent Files (2.96): bloque contiguo de 10 IDs dinámicos, resuelto antes del switch WM_COMMAND (no hay case estático para ellos).
 #define ID_FILE_RECENT_FIRST            32807
 #define ID_FILE_RECENT_LAST             (ID_FILE_RECENT_FIRST + 9)
@@ -64,6 +74,8 @@
 // 5.9.13: the Wrap Width dialog's own edit (the dialog used IDD_GOTO's
 // controls, showing a wrong caption and stray radio buttons, since V4)
 #define IDC_WRAP_COLS                   1109
+#define IDC_FREEZE_COLS                 1110
+#define IDD_FREEZECOLS                  132
 #define IDC_STATIC                      -1
 
 // Next default values for new objects
@@ -71,9 +83,9 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
-#define _APS_NEXT_RESOURCE_VALUE        132
-#define _APS_NEXT_COMMAND_VALUE         32822
-#define _APS_NEXT_CONTROL_VALUE         1110
+#define _APS_NEXT_RESOURCE_VALUE        133
+#define _APS_NEXT_COMMAND_VALUE         32832
+#define _APS_NEXT_CONTROL_VALUE         1111
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

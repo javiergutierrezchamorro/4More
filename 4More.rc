@@ -1,4 +1,9 @@
-﻿// 4More.rc — recursos del visor (Build 5.9.13)
+﻿// 4More.rc — recursos del visor (Build 6.00)
+//
+// 6.00: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Revisión del .cpp
+// (OffsetOfLine UTF-16 con memchr, consolidación). Manifest 6.00.0.0.
+//
+// --- historial 5.9.x ---
 //
 // 5.9.13: LOS DIÁLOGOS CAMBIAN. View > Wrap to Fixed Width deja de reusar
 // la plantilla IDD_GOTO (título "Go To", radios Line/Offset sin función,

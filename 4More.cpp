@@ -1,1562 +1,65 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 5.9.14
+   Build 6.00
 
-   Novedades de la versión 5.9.14 (REVISIÓN: PÁGINAS, MARCADORES, BÚSQUEDA Y RUEDA):
-   - FIX: LA LECTURA DE LA PÁGINA RELEÍA LA CABECERA SI NO PODÍA MAPEAR. La
-     ventana de detección (64 KB) se copia desde una vista mapeada, y una
-     vista mapeada NO mueve el puntero del fichero. Si luego la página no
-     se podía mapear (en x86 una vista de 32 MB puede fallar por
-     fragmentación del espacio de direcciones), el bucle de ReadFile seguía
-     desde el offset del principio y añadía OTRA copia de los primeros
-     64 KB: contenido duplicado y todo lo posterior desplazado. Ahora el
-     puntero se coloca tras la cabecera en cuanto la copia mapeada acaba.
-   - FIX: OffsetOfLine ERA CUADRÁTICA EN FICHEROS CON UN SOLO TIPO DE EOL.
-     Cada línea lanzaba un memchr de LF y otro de CR desde la posición
-     actual: el que no existe (CR en cualquier log Unix) recorría TODO el
-     resto de la página en cada vuelta. Un marcador (F2) en la línea
-     500.000 de una página de 32 MB eran cientos de miles de barridos de
-     32 MB: la ventana quedaba congelada muchísimo tiempo (medido en un
-     banco: ~19 s para llegar a la línea 20.000, ahora ~1,5 ms). Ahora el siguiente LF y
-     el siguiente CR se buscan una vez y solo se vuelven a buscar cuando el
-     recorrido los pasa: una pasada lineal, mismo resultado.
-   - FIX: LineAtOffset NO CONTABA LOS CR SUELTOS ANTERIORES AL ÚLTIMO LF. El
-     segundo bucle (CR) arrancaba donde acabó el primero (tras el último
-     LF) en vez de al principio: en un fichero con EOL mezclados, Go To,
-     Find Bytes y el rebinding de marcadores caían en otra línea que
-     OffsetOfLine (que sí cuenta en orden de flujo).
-   - FIX: EL BOM SE QUITABA EN CUALQUIER PÁGINA. BuildViewText descartaba
-     EF BB BF / FF FE / FE FF al principio de los bytes de la página,
-     también en las páginas 2 y siguientes, donde esos bytes son datos: se
-     perdían caracteres y el rango de bytes del aviso desfasaba. El BOM
-     solo existe en el offset 0 del fichero.
-   - FIX: LA ÚLTIMA PÁGINA UTF-16 PODÍA EMPEZAR EN UN OFFSET IMPAR.
-     LastPageBase(cbSize) = cbSize - página: con un tamaño impar (típico de
-     un fichero que otro programa está escribiendo, con Tail) la página
-     entera se decodificaba desplazada un byte. La base se redondea hacia
-     arriba a unidad de 2 bytes en las vistas UTF-16 (el final sigue dentro).
-   - FIX: FIND NO PASABA DE UN NUL. wcsstr/StrStrIW paran en el primer NUL
-     del texto: en la vista ANSI de un binario, lo que había detrás de él no
-     se podía buscar y salía "Cannot find" para texto que estaba en pantalla.
-     FindPatternFrom recorre los segmentos sin NUL.
-   - FIX: LA RUEDA DE PRECISIÓN NO DESPLAZABA. cScroll = delta / 120 daba 0
-     con los deltas pequeños (30, 15...) de touchpads y ruedas de alta
-     resolución. El resto se acumula entre mensajes.
-   - FIX: BuildHexText ESCRIBÍA A TRAVÉS DE NULL SIN MEMORIA. Los llamadores
-     ya esperaban nullptr; ahora lo recibe de verdad.
-   - FIX MENORES: la etiqueta de la regla era WCHAR[8] (la columna 10.000.000
-     la desbordaba, ahora [12]); Home en una vista vacía dejaba iSelEnd en
-     -1; reabrir el diálogo Find olvidaba "Match case"; un '&' en el nombre
-     de un fichero reciente se leía como marca de acceso rápido y se perdía
-     (ahora se duplica).
-   - BUILD: 4More.h ya no redefine WIN32_LEAN_AND_MEAN (aviso C4005 en
-     Release, que lo define por línea de comandos) y define NOMINMAX igual
-     que el .vcxproj. El .vcxproj lleva a Debug los defines y stdcpp17 que
-     el changelog de 5.9.11 describe y que el .vcxproj entregado no tenía. Release
-     x64 ya no usa /arch:AVX2: el programa anuncia Windows 7 como suelo, y
-     un binario AVX2 muere con una instrucción ilegal en las CPU sin AVX2; el
-     código caliente es de CRT (memchr/wmemchr/memcpy, que despachan en
-     ejecución) y tablas, donde AVX2 no tiene qué acelerar. El manifest
-     sube a 5.9.14.0.
+   Novedades de la versión 6.00 (CARGA, OFFSETS, PINTADO):
+   - FIX: OffsetOfLine UTF-16 contaba mal CRLF (saltaba el LF al avanzar
+     s+4). Ahora avanza solo el CR (s+2) y el LF cuenta, igual que
+     LineAtOffset — Go To y marcadores caen en la línea correcta.
+   - RENDIMIENTO CARGA: si la página se mapea, el resto tras la cabecera
+     se copia en UN solo memcpy (antes trozos de 4 MB innecesarios con
+     vista mapeada). Cancelación comprobada antes de la copia.
+   - RENDIMIENTO OFFSET: OffsetOfLine UTF-16 usa memchr (no bucle por
+     unidad). LineAtOffset ANSI pasa a un único walk dual (antes dos
+     barridos completos del prefijo).
+   - PARIDAD: UTF-16/ANSI de OffsetOfLine y LineAtOffset comparten reglas
+     de ruptura (LF cuenta; CR solo si no forma CRLF).
+   - Sin cambios de menú, aceleradores ni diálogos. Manifest 6.00.0.0.
+   - Base 5.9.14 intacta: sin relectura de cabecera, BOM solo en 0, última
+     página UTF-16 alineada, Find atraviesa NULs, rueda con acumulador.
 
-   Novedades de la versión 5.9.13 (REVISIÓN: DIÁLOGO DE WRAP WIDTH + SEH EN LA BÚSQUEDA):
-   - FIX: "WRAP TO FIXED WIDTH..." ABRÍA EL DIÁLOGO "GO TO". WrapWidthDialog
-     reusaba la plantilla IDD_GOTO desde la V4: el usuario veía el título
-     "Go To", la etiqueta "Go to:", los radios Line/Offset (Line marcado y
-     sin función alguna) y el texto de ayuda del Go To, con el edit
-     rellenado a "80". Estrena ahora su propia plantilla IDD_WRAPWIDTH
-     (título "Wrap to Fixed Width", etiqueta "Columns:", ayuda propia,
-     botones OK/Cancel) y el control IDC_WRAP_COLS (1109). La lógica de
-     WrapWidthProc no cambia: ParseU64, cap a 10000, entrada vacía o
-     basura = ancho fijo desactivado.
-   - FIX: LA BÚSQUEDA DE BYTES NO TENÍA RED DE SEH EN EL CAMINO MAPEADO.
-     Un EXCEPTION_IN_PAGE_ERROR leyendo la vista mapeada (el disco suelta
-     un sector a mitad de escaneo, un fichero de red se cae) subía sin
-     capturar desde el hilo worker y mataba el proceso con el cartel de
-     "4More must close". El loader lo atrapa en el __try de
-     LoadThreadProc desde siempre; el worker de búsqueda no tenía
-     jacket. Los dos bucles de escaneo (mapeado y ReadFile) viven ahora
-     dentro de uno, y el error se reporta como "could not scan" (wParam
-     2), el mismo parte que ya usa un fallo de apertura o de memoria.
-     Todos los locales son POD, así que el __try cumple la regla de
-     unwinding de MSVC; en el banco de auditoría las sentencias siguen
-     mapeando a if (1) / else if (0).
-   - FIX MENOR: EDIT > SELECT ALL NO LLEVABA EL CARET A LA VISTA. El
-     comando de menú/acelerador hacía TV_SetSel(0, len) y se quedaba
-     ahí: con una página larga, la selección quedaba pintada pero el
-     caret (su final) seguía fuera de pantalla. El Ctrl+A interno del
-     control sí llamaba TV_ScrollCaret, pero es una rama muerta hoy (el
-     acelerador se come la tecla antes de que llegue al control). Ahora
-     el comando pasa también por TV_ScrollCaret.
-   - SIMPLIFICACIÓN: TV_WrapBreak RECIBE EL TEXTO. El helper del punto
-     de ruptura leía g_tv.pText por detrás (la última dependencia
-     global escondida dentro de un helper); los cinco consumidores le
-     pasan el puntero que ya tienen en la mano (pState->pText o
-     g_tv.pText, el mismo bloque en la práctica). El código generado no
-     cambia.
-   - SIMPLIFICACIÓN: TV_SyncState COMPARTE EL CICLO DE VIDA DE PINCELES.
-     Los gemelos crear/retirar del greenbar y de la banda de la línea
-     actual (dos ternarios espejo que solo podían divergir) viven ahora
-     en TV_SyncBrush(bOn, hbr, clr), idempotente.
-   - RECURSOS: IDD_WRAPWIDTH (131) y IDC_WRAP_COLS (1109) nuevos;
-     _APS_NEXT sube en consecuencia. El manifest sube a 5.9.13.0.0.
-   - El repaso del resto del fichero no encontró más errores: el ciclo
-     de vida del LoadJob (5.9.9), el índice de líneas en paralelo, el
-     fichero mapeado, la paginación, los diálogos y el teardown se
-     re-verificaron línea a línea. Las rutas calientes quedan como
-     están: el propio changelog documenta (5.9.10) que unificar los
-     walks de wrap toca la aritmética de filas y el riesgo no compensa.
+   Historial (resumen; una o dos líneas por versión):
+   - 5.9.14: páginas sin relectura de cabecera; OffsetOfLine lineal; BOM solo
+     en offset 0; última página UTF-16 alineada; Find atraviesa NULs; rueda
+     de precisión con acumulador; BuildHexText nullptr-safe.
+   - 5.9.13: diálogo Wrap Width propio (ya no reusa Go To); SEH en búsqueda
+     de bytes mapeada; Select All lleva el caret a la vista.
+   - 5.9.12: columna deseada del caret recortada al display end; TV_WrapChars
+     pinza a >= 1 en ventanas estrechas.
+   - 5.9.11: VK_UP/DOWN/END usan TV_DispEnd; toolset v143; Debug gana defines
+     y stdcpp17.
+   - 5.9.10: TV_DispEnd y TV_WrapChars unificados; TV_SetText no refresca
+     scroll dos veces.
+   - 5.9.9: aOrphan[4] (corrupción de pila); doble free del job si la ventana
+     muere; gutter hex en preview; scroll tras alternar wrap.
+   - 5.9.8: números de línea alineados con wrap; scrollbars honestas al vaciar;
+     techo de filas visibles en TV_ScrollCaret.
+   - 5.9.7: line numbers, ruler, greenbar y hilite ON por defecto; regla
+     recortada al gutter; color de chrome unificado.
+   - 5.9.6: gutter en gris apagado; fichero mapeado; ScanForPattern compartido
+     por búsqueda de bytes.
+   - 5.9.5: índice de líneas en paralelo (2-4 hilos) en el worker.
+   - 5.9.4: paridad del caret; fila parcial; pintado en una llamada donde
+     aplica.
+   - 5.9.3: pintado en una pasada; caret sin bucle costoso.
+   - 5.9.2: bookmarks con offset de fichero (sobreviven al cambio de vista);
+     pinta antes de devolver el control.
+   - 5.9.1: GDI sin desperdicio (puntos de bookmark cacheados); simplificación
+     de brushes.
+   - 5.9: línea de bookmark en azul; bola también en vista hex.
+   - 5.8: foco de diálogos; marcas visuales; Highlight Current Line y ESC to
+     Exit; Alt+X para salir.
+   - 5.7: clic en wrap; columna persistente; regla bajo demanda.
+   - 5.6: índice de líneas en el worker; gutter bajo demanda; caps mayores en
+     x64.
+   - 5.5: últimas filas recuperan número de línea; repaint mínimo de selección.
+   - 5.4: gutter alineado; hex sin EDIT estándar; pintado por suciedad;
+     GMEM_FIXED para el texto de vista.
+   - 5.3: greenbar en la primera carga; hex más rápido.
+   - 5.2: sync del tipo de control; scroll horizontal real; rendimiento.
+   - 5.1: corrección de bugs del custom text view.
+   - 4.0: greenbar, ruler y wrap a longitud fija.
 
-   Novedades de la versión 5.9.12 (REVISIÓN: COLUMNA DEL CARET + DEFENSA WRAP):
-   - FIX MENOR: AL SEMBRAR g_iCaretCol DESDE UN CARET SOBRE EL CR/LF, LA
-     COLUMNA DESEADA INCLUÍA LOS CARACTERES INVISIBLES DEL FINAL DE LÍNEA.
-     VK_RIGHT puede dejar el caret encima del \r o del \n; el primer
-     VK_UP/VK_DOWN tomaba iSelEnd - iLS como columna preferida y esa
-     columna "fantasma" sobrevivía a saltos verticales (inofensivo por el
-     clamp a iDE de la línea destino, pero no es la semántica de los
-     editores: la columna deseada es la del último carácter visible).
-     Ahora el seed se recorta con TV_DispEnd de la línea actual.
-   - DEFENSA: TV_WrapChars devuelve al menos 1 cuando calcula desde el
-     ancho de cliente (iClientWidth / iHexCharW). HitTest y el gutter ya
-     pinzaban el resultado; PositionCaret y WM_PAINT no. Con una ventana
-     más estrecha que un carácter el cociente es 0 y el camino de wrap
-     degradaba a "sin wrap" de forma implícita. Un solo sitio, misma
-     pinza en todos los consumidores.
-   - El repaso del resto del fichero no encontró más errores. Ni menú ni
-     aceleradores ni diálogos ni IDs cambian. El manifest sube a 5.9.12.0.0.
-
-   Novedades de la versión 5.9.11 (REVISIÓN: PARIDAD DE TV_DispEnd + BUILD):
-   - SIMPLIFICACIÓN: VK_UP/VK_DOWN y VK_END usan TV_DispEnd. El refactoring
-     de 5.9.10 factorizó el recorte del rabo CR/LF ("display end") en
-     TV_DispEnd desde SIETE sitios, pero dejó DOS sitios más en
-     TextViewProc —los manejadores de flechas verticales y de End— con la
-     misma aritmética inline: cuatro líneas idénticas que solo podían
-     divergir. Ahora son una llamada al helper; el compilador la inlinea y
-     el código generado no cambia.
-   - BUILD: el .vcxproj corrige PlatformToolset v145 → v143 (v145 no
-     existe; v143 es el toolset de VS2022). Las configuraciones Debug
-     ganan los preprocessor defines que solo tenía Release (NOMINMAX,
-     _WIN32_WINNT=0x0601, WIN32_LEAN_AND_MEAN, PSAPI_VERSION=2) y
-     LanguageStandard stdcpp17, sin el cual los magic statics thread-safe
-     (HexDigits, HexPairs, EbcdicTable, CtrlMap, LocaleInfo) no están
-     garantizados en Debug.
-   - El repaso del resto del fichero no encontró más errores: ni menú ni
-     aceleradores ni diálogos ni IDs cambian. El manifest sube a 5.9.11.0.0.
-
-   Novedades de la versión 5.9.10 (LIMPIEZA: UN SOLO SITIO PARA CADA ARITMÉTICA):
-   - SIMPLIFICACIÓN: TV_DispEnd(pText, iLS, iLE). El recorte del rabo CR/LF
-     ("display end" de una línea lógica) vivía copiado en SIETE sitios
-     (posicionamiento del caret, hit test, WM_PAINT y gutter): catorce líneas
-     idénticas que solo podían divergir. Ahora es UNA función static; el
-     compilador la inlinea y el código generado no cambia.
-   - SIMPLIFICACIÓN: TV_WrapChars(iWrapWidth, iClientWidth). El ternario del
-     ancho de wrap en caracteres (fijo del usuario o ancho de cliente sobre
-     la rejilla) vivía copiado en CUATRO sitios (caret, hit test, WM_PAINT y
-     gutter). Un helper, sin cambio de comportamiento (la pinza < 1 se queda
-     donde estaba).
-   - SIMPLIFICACIÓN: TV_SetText ya no llama TV_UpdateScrollRanges después de
-     TV_SyncState: desde 5.9.9 el final de TV_SyncState refresca los rangos,
-     y cada entrega ejecutaba la pasada DOS veces (idempotente, pero era
-     trabajo doble). ApplyEditorFont conserva su llamada propia (no pasa por
-     TV_SyncState).
-   - RENDIMIENTO: sin cambios en las rutas calientes. El repaso confirma lo
-     que el changelog ya documenta: índice de líneas en el worker con
-     wmemchr SIMD, pintado en una pasada con ETO_OPAQUE, gutter en UN
-     PolyTextOutW, búsqueda binaria con memo LRU en TV_LineFromChar. Los
-     walks de wrap duplicados entre TV_HitTest/TV_PositionCaret/PaintGutter
-     se dejan como están: unificarlos toca la aritmética de filas y el
-     riesgo no compensa.
-
-   Novedades de la versión 5.9.9 (REVISIÓN: CORRUPCIÓN DE PILA + DOBLE FREE + GUTTER HEX + SCROLL):
-   - CRÍTICO: ESCRITURA FUERA DEL ARRAY EN EL ÍNDICE PARALELO. El array
-     aOrphan[3] de TVIndexRunRounds se indexa por TROZO (k = 1..nChunks-1),
-     no por hueco de worker: con 4 trozos y un fallo de _beginthreadex en el
-     último, la marca del trozo huérfano escribía y leía aOrphan[3], un byte
-     PAST el final (corrupción de pila). El array vale ahora 4 entradas,
-     una por trozo posible. En la práctica normal (ningún fallo de hilo) el
-     código generado es idéntico.
-   - CRÍTICO: DOBLE LIBERACIÓN DEL JOB SI LA VENTANA MUERE EN LA CARRERA.
-     LoadThreadProc borraba el job en cuanto PostMessage(WM_APP_LOADDONE)
-     fallaba, pero WM_DESTROY también lo borra tras el join del worker: si
-     la ventana muere entre el check de LoadCancelled() del worker y el
-     post (cola llena o ventana ya muerta), el job se liberaba DOS veces.
-     Ahora el worker reintenta el post 20 veces x 100 ms (una cola llena es
-     transitoria) y, si se rinde SIN cancelación, marca la bandera global
-     g_bLoadJobWorkerFreed ANTES del delete (el job puede ya no existir
-     cuando WM_DESTROY la lea) y solo entonces lo libera; si hubo
-     cancelación, nunca libera (el dueño tras el join es la UI). WM_DESTROY
-     borra g_pJob solo si la bandera sigue a 0. BeginLoadJob la resetea a 0
-     (un job cada vez, hilo UI).
-   - FIX: LA COLUMNA DE OFFSETS HEX FALTABA EN LA PRIMERA CARGA. PaintGutter
-     exigía pFileBytes != nullptr para pintar la vista hex, pero durante la
-     etapa de preview (WM_APP_LOADPREVIEW) los bytes crudos aún no llegaron:
-     la columna de offsets tardaba en aparecer hasta terminar la página. El
-     pintor hex solo usa cbFile y g_qwBase: el guard mira ahora cbFile == 0
-     (y Line Numbers solo para las vistas de texto).
-   - FIX: SCROLL VERTICAL DESFASADO TRAS ALTERNAR WRAP. TV_SyncState cambia
-     el estilo WS_HSCROLL con SWP_FRAMECHANGED | SWP_NOSIZE, que NO dispara
-     WM_SIZE: la página de SB_VERT quedaba medida con el alto de cliente
-     ANTERIOR y el pulgar iba una línea desfasado hasta el próximo resize.
-     TV_SyncState refresca ahora los rangos al final (TV_UpdateScrollRanges,
-     idempotente: TV_SetText ya la llama después de su propio sync).
-   - El repaso del resto del fichero no encontró más errores: ni menú ni
-     aceleradores ni diálogos ni IDs cambian. El manifest sube a 5.9.9.0.0.
-
-   Novedades de la versión 5.9.8 (REVISIÓN DETALLADA: NÚMEROS EN WRAP + SCROLL HONESTO):
-   - FIX: LOS NÚMEROS DE LÍNEA SE DESALINEABAN EN WORD WRAP. La columna
-     pintaba una etiqueta por LÍNEA LÓGICA una fila aparte, pero en wrap el
-     control pinta varias FILAS VISUALES por línea: la primera línea envuelta
-     de arriba empujaba todos los números siguientes fuera de su línea (el
-     "5" quedaba en la segunda fila visual de la línea 3). Ahora el gutter
-     recorre la misma aritmética que el WM_PAINT (TV_WrapBreak): cada número
-     se sienta en la PRIMERA fila visual de su línea y el cursor salta el
-     recuento completo de filas de la línea. Sin wrap y en hex la salida es
-     idéntica a la de antes (mismo bucle 1:1).
-   - FIX: SCROLLBARS HONESTAS TRAS VACIAR LA VISTA. TV_ClearText dejaba los
-     rangos SB_VERT/SB_HORZ del fichero ANTERIOR vivos: tras un ResetViewer
-     (apertura fallida) o un fichero vacío, la barra seguía arrastrándose
-     por un rango que ya no existía (TV_ScrollRows devolvía cada paso a 0,
-     así que era inofensivo, pero la barra mentía). TV_ClearText refresca
-     ahora los dos rangos (la llamada sale por el guard si no hay ventana).
-   - FIX: FILA PARCIALMENTE VISIBLE DISPARABA UN SCROLL DE SOBRA.
-     TV_ScrollCaret contaba las filas visibles con división entera (suelo)
-     mientras el pintado, TV_UpdateCurLine y TV_HitTest las cuentan con
-     techo: un caret en la última fila medio visible parecía "fuera de
-     vista" y un clic o una flecha sobre ella scrolleaba una línea entera
-     sin necesidad. Con el techo, no hay scroll hasta que el caret sale
-     de verdad del área pintada.
-   - SIMPLIFICACIÓN: los ternarios min/max del rango de selección (ocho
-     líneas copiadas en WM_PAINT x2, TV_Copy y TV_InvalidateSelPainted)
-     viven ahora en dos helpers de una línea (TV_LoI/TV_HiI): una sola
-     fuente que no puede desajustarse.
-   - El repaso completo no encontró más errores: índice paralelo (5.9.5),
-     fichero mapeado y búsqueda (5.9.6), INI, bookmarks, Go To, paginación,
-     diálogos y teardown revisados línea a línea.
-
-   Build 5.9.7
-
-   Novedades de la versión 5.9.7 (AYUDAS DE VISTA ACTIVADAS POR DEFECTO + REVISIÓN):
-   - PREFERENCIAS: LINE NUMBERS, RULER, GREENBAR Y HIGHLIGHT CURRENT LINE
-     VIENEN ACTIVADAS POR DEFECTO. Las cuatro ayudas de lectura pasan de
-     "off hasta que las pidas" a "on desde la primera carga": números de
-     línea, regla (columnas en texto, cabecera de bytes en hex), franjas
-     alternas y banda del caret. El INI mantiene la precedencia de siempre:
-     un 4More.ini existente que ya guardó estas claves conserva la elección
-     del usuario; los nuevos defaults aplican cuando la clave no existe
-     (primera ejecución, o INI anterior a la opción). Wrap y Tail siguen
-     OFF por defecto (son modos de trabajo, no ayudas de lectura).
-   - FIX: LAS ETIQUETAS DE LA REGLA NO SANGRAN SOBRE EL GUTTER. Una columna
-     medio scrolleada fuera dejaba su etiqueta pintando píxeles a la
-     izquierda de la franja (encima de la esquina del gutter): el WM_PAINT
-     del padre lo tapaba pintando la esquina DESPUÉS de la regla, pero el
-     camino de repintado del control (scroll horizontal) no pinta esa
-     esquina y los píxeles quedaban ahí hasta el siguiente repintado del
-     padre. Ambas reglas se recortan ahora a su franja (SelectClipRgn, la
-     misma técnica del gutter desde la 5.5): imposible en cualquier camino.
-   - SIMPLIFICACIÓN: LAS DOS REGLAS COMPARTEN PLUMÁTICA. PaintRuler y
-     PaintHexRuler mantenían prólogos y epílogos gemelos (relleno 3DFACE,
-     fuente, color, borde inferior): la fuente y el color ya habían
-     divergido una vez (la regla de texto seguía en negro mientras el
-     gutter y la cabecera hex hablaban el gris apagado de la 5.9.6). Ahora
-     viven una vez en RulerStripBegin/RulerStripEnd: la regla de texto
-     hereda el color apagado de la 5.9.6 (era el último elemento que
-     gritaba) y ambos pintores comparten recorte y borde.
-   - SIMPLIFICACIÓN: EL COLOR DEL CHROME ES UNA CONSTANTE. El gris apagado
-     del gutter (0x8A929E) estaba escrito dos veces (PaintGutter y la
-     cabecera hex); ahora es s_clrGutter, una sola fuente de verdad.
-   - SIMPLIFICACIÓN: CÓDIGO MUERTO EN LA BÚSQUEDA. El `if (!bFound)` que
-     envolvía el acarreo de solape del bucle ReadFile quedó muerto cuando
-     el escaneo se mudó a ScanForPattern (5.9.6): un hit sale por el break
-     de arriba; llegar a esa línea significa que no lo hubo. El acarreo
-     corre incondicional, con el comentario que lo explica.
-
-   Novedades de la versión 5.9.6 (ESTÉTICA: GUTTER Y HEX + FICHERO MAPEADO):
-   - ESTÉTICA: LA COLUMNA LATERAL HABLA MÁS BAJO. Los números de línea y los
-     offsets hex eran negrita negra, la misma voz que el contenido: peleaban
-     con el texto por la atención en cada línea. Son chrome, no contenido:
-     ahora van en un gris azulado apagado (RGB 0x8A929E, el tono que usan
-     los gutters de los editores modernos). Los offsets hex conservan la
-     negrita (SON datos: la dirección de byte de la fila); los números de
-     línea pasan a la fuente regular (mismo motivo). La bola azul de los
-     bookmarks se queda como está: es una marca, no una etiqueta.
-   - ESTÉTICA: LÍNEA SEPARADORA. Un pelo vertical (COLOR_3DLIGHT, el gris
-     claro del sistema, cero gestión de pinceles) cierra la columna por su
-     borde derecho en todas las vistas: la franja se lee como un raíl entre
-     las etiquetas y el texto, no como tierra de nadie.
-   - HEX MÁS BONITO (Y MÁS ÚTIL): CABECERA DE POSICIONES DE BYTE. La opción
-     View > Ruler es dueña de la franja superior en TODAS las vistas ahora:
-     en las vistas de texto pinta su regla de columnas de siempre y en la
-     vista hex pinta la cabecera clásica de los hexdumps: 00 04 08 0C
-     alineados sobre los dos dígitos de cada byte (el hueco central de la
-     línea hex desplaza la segunda mitad una columna, y la cabecera lo
-     replica exactamente) y "ASCII" sobre el bloque de caracteres. Se
-     desplaza en horizontal con la vista (la misma regla de refresco por
-     iScrollX que la regla de texto) y el gutter empieza una línea más
-     abajo cuando está activa, como en texto.
-   - COLORES, REVISADOS: greenbar (0xE8F0E8), fila actual (0xFFF0B0),
-     línea con bookmark (0xB8D4F0) y bola (0x1E66D6) se quedan. Son pastel,
-     legibles con ambos colores de texto y distinguibles entre sí; la
-     revisión de esta ronda es del gutter, que era el elemento que no
-     tenía voz propia.
-   - RENDIMIENTO: FICHERO MAPEADO (CreateFileMapping + MapViewOfFile). El
-     loader leía cada página con ReadFile: el kernel copiaba los bytes a su
-     caché y ReadFile los volvía a copiar al buffer del viewer. Un mapeado
-     de solo lectura colapsa el viaje: la copia lee directamente las
-     páginas de la caché del sistema (un memcpy por trozo, sin syscall por
-     chunk, sin doble buffering). Ahorro estimado: 20-30% de la fase de
-     lectura en páginas grandes (desaparece una de las dos copias); las
-     páginas pequeñas que no se benefician son justo las que ya eran
-     rápidas. El contrato no cambia: el job sigue dueño de su buffer
-     (pJob->pBytes), el menú View sigue re-decodificando desde él y la copia
-     sigue en trozos de CB_READ_CHUNK, así que la cancelación (ESC) y los
-     tics de la barra de progreso mantienen su cadencia exacta. Si el SO
-     rechaza el mapeado (handle que no soporta sección, presión de espacio
-     en Win32, fichero vacío), los bucles ReadFile originales quedan
-     como camino de recaída, intactos. Un error de página durante la copia
-     (EXCEPTION_IN_PAGE_ERROR) cae en el __try/__except de LoadThreadProc,
-     la misma última red de siempre.
-   - RENDIMIENTO: LA BÚSQUEDA EN FICHERO CRUDO TAMBIÉN SE MAPEA. El worker
-     de Find Bytes escaneaba el fichero con ReadFile en trozos de 4 MB con
-     su acarreo de solape entre trozos. Con el fichero entero bajo una sola
-     vista el escaneo va directo sobre la caché: sin buffer, sin acarreos,
-     sin ReadFile. La ventana de cada trozo alcanza siempre cbPat-1 bytes
-     más allá del trozo, así que un patrón que cruza el borde se encuentra
-     igual, y el primer hit en orden ascendente gana (cero duplicados). La
-     latencia de cancelación y la cadencia de progreso (~10 Hz) son las
-     mismas; el escaneo memchr/memcmp vive ahora en UNA función compartida
-     por las dos vías (mapeada y ReadFile), así que no pueden divergir.
-     Fallback ReadFile intacto (Win32 ante ficheros que no caben en su
-     espacio de direcciones, mapeado rechazado, tamaño desconocido).
-
-   Novedades de la versión 5.9.5 (ÍNDICE DE LÍNEAS EN PARALELO):
-   - RENDIMIENTO (x64, páginas grandes): TV_BuildLineIndex parte la página
-     entre 2-4 hilos (uno por núcleo, tope 4). Las dos pasadas wmemchr del
-     builder serie (contar + rellenar) son trabajo de ancho de banda de
-     memoria: repartidas entre núcleos, una página de 128 MB se indexa en
-     una fracción del tiempo (el índice de una página grande era el último
-     punto caliente que quedaba en la ruta de carga).
-   - DESCOMPOSICIÓN EXACTA, NO APROXIMADA: las fronteras de trozo se alinean
-     HACIA ADELANTE a inicio de línea (ninguna línea lógica cruza dos
-     trozos); la ronda A cuenta saltos de línea y mide la línea más larga
-     por trozo con la MISMA regla del builder serie (el \\n no es parte de
-     la línea; la última línea vacía tras un \\n final se incluye); el
-     coordinador hace la suma de prefijos, asigna el trozo del array final
-     a cada parte y la ronda B escribe los starts globales en su porción.
-     El resultado es idéntico al builder serie (validado por fuzzing contra
-     el camino serie: 100.060 casos, 0 desajustes).
-   - RECAÍDAS: por debajo de 4M caracteres o con un solo núcleo corre el
-     builder serie (los viajes de ida y vuelta de hilos costarían más de lo
-     que ahorran); si falla la creación de un hilo, el coordinador ejecuta
-     ese trozo en línea tras la espera (la misma regla de LaunchLoadJob); si
-     falla la reserva del array final, TV_BuildLineIndexParallel devuelve
-     false y corre el builder serie. El camino serie queda intacto para
-     páginas pequeñas y como última opción.
-   - SIN CAMBIOS DE COMPORTAMIENTO: el índice producido es byte a byte el
-     mismo (mismos starts, mismo cLines, mismo iMaxLine), y el builder corre
-     donde ya corría (worker de carga desde la 5.6, o TV_SetText).
-
-   Novedades de la versión 5.9.4 (REVISIÓN: PARIDAD DEL CARET + FILA PARCIAL + UNA LLAMADA):
-   - BUG (regresión de 5.9.3): EL ATAJO DE TV_PositionCaret EN NO-WRAP NO
-     REPLICABA EL CASO DEL CARET SOBRE EL CR/LF. El atajo dibujaba el caret
-     pasado el último carácter visible cuando iSelEnd caía encima del \\r o
-     el \\n de su línea (alcanzable con las flechas); el camino antiguo
-     caía al fallback SetCaretPos(0, y): columna 0 de la fila. El atajo
-     calcula ahora el final visible de la línea (el mismo iDE de todo el
-     fichero) y replica el fallback exacto: cero cambio de comportamiento,
-     solo aritmética directa en el caso normal.
-   - OPTIMIZACIÓN: SALIDA TEMPRANA EN TV_PositionCaret CUANDO LA LÍNEA DEL
-     CARET ESTÁ ENCIMA DE LA VISTA (wrap). El bucle antiguo recorría todas
-     las líneas visibles contando filas para concluir que no estaba; ahora
-     sale sin recorrer nada.
-   - RENDIMIENTO: LA FILA DEL CARET SIN SELECCIÓN TAMBIÉN EN UNA LLAMADA.
-     La condición de la 5.9.3 enviaba la fila que contiene un caret
-     colapsado (selección vacía) al camino de tres partes, que dibujaba los
-     mismos píxeles con dos ExtTextOutW y un FillRect. Con
-     iSelLo < iSelHi en la condición, esa fila usa la llamada única.
-   - SIMPLIFICACIÓN: EL COLOR DE FILA SE ELIGE UNA VEZ COMO PAR
-     (pincel, COLORREF). Antes el pincel y el COLORREF de la llamada única
-     eran dos cadenas de ternarios paralelas que podían divergir; ahora el
-     COLORREF (clrBg) se elige junto al pincel (hbrBg) y la llamada única
-     lo consume. GetSysColor(COLOR_WINDOW) se consulta una vez por paint.
-   - BUG MENOR: TV_UpdateCurLine Y LAS FILAS PARCIALES. El recuento de
-     filas visibles usaba división entera (suelo) mientras el bucle de
-     pintado sí dibuja la última fila parcialmente visible: un cambio de
-     banda sobre esa fila no se invalidaba y la banda vieja persistía
-     hasta el siguiente repintado. Ahora cuenta la fila parcial (techo,
-     igual que TV_InvalidateSelPainted).
-
-   Novedades de la versión 5.9.3 (PINTADO EN UNA LLAMADA + CARET SIN BUCLE):
-   - RENDIMIENTO: CADA FILA PLANA SE PINTA CON UNA SOLA LLAMADA GDI. Antes
-     cada fila visual hacía FillRect (fondo) + ExtTextOutW (texto): dos
-     llamadas al sistema por fila. Ahora las filas SIN selección usan una
-     sola ExtTextOutW con ETO_OPAQUE: el rectángulo completo de la fila se
-     rellena con el color de fondo de la fila (bookmark, banda del caret,
-     greenbar o ventana, los mismos colores exactos que los pinceles
-     cacheados) y el texto se dibuja encima en la misma llamada. Las filas
-     que solapan con la selección conservan el camino de tres partes porque
-     su fondo no es uniforme. Un repintado completo de una ventana de 60
-     filas pasa de unas 120 llamadas GDI a unas 60.
-   - RENDIMIENTO: TV_PositionCaret SIN BUCLE EN MODO NO-WRAP. Esta función
-     corre al final de CADA WM_PAINT y antes recorría todas las líneas
-     visibles contando filas. En modo no-wrap cada línea lógica es
-     exactamente una fila visual, así que ahora es aritmética directa
-     (línea - primera visible) * alto de línea; el bucle solo queda en
-     wrap, donde es imprescindible. Era el último punto caliente por
-     repintado del caso común.
-   - EVALUADO Y DESCARTADO: DirectWrite. El control pinta texto
-     monoespaciado con avance fijo medido (iHexCharW) y una llamada por
-     fila, ya con CLEARTYPE_QUALITY en la fuente (Consolas). DirectWrite no
-     aceleraría ese camino: añadiría fábricas D2D/DWrite, layout por glifo
-     y rompería el blit directo de ScrollWindowEx y la matemática de
-     columnas x = col * iHexCharW, con reescritura grande del pintado para
-     una ganancia dudosa en texto monoespaciado. Queda documentado como
-     decisión, no como pendiente.
-
-   Novedades de la versión 5.9.2 (BOOKMARKS QUE SOBREVIVEN + SITIO GUARDADO + PINTA ANTES):
-   - USABILIDAD: LOS BOOKMARKS YA NO SE PIERDEN AL CAMBIAR DE VISTA. Antes
-     SetView borraba todos los bookmarks en cada cambio de codificación
-     (UTF a hex y vuelta, se perdían). Ahora cada bookmark es el PAR
-     (línea de la vista en pantalla, offset ABSOLUTO de fichero del primer
-     byte de la línea): el offset es el ancla que sobrevive al cambio y
-     RebindBookmarksToView recalcula las líneas de la vista que aterriza
-     (hex: /16; EBCDIC: una sola línea; texto: LineAtOffset). Dos offsets
-     que colapsen a la misma línea (dos líneas de texto dentro de una fila
-     hex) se funden en una. Los bookmarks siguen muriendo con la página
-     (un fichero o una página nueva re-basan los bytes).
-   - USABILIDAD: EL CAMBIO DE VISTA CONSERVA EL SITIO. El cambio de vista
-     reseteaba el caret al principio del texto. Ahora la línea del caret
-     se ancla a su offset de fichero ANTES de reconstruir y vuelve con
-     PositionAtOffset después: cambias de UTF a hex y el caret sigue en la
-     misma zona del fichero.
-   - BUG DE USABILIDAD: TOGGLE WRAP Y WRAP A ANCHO FIJO BORRABAN LOS
-     BOOKMARKS SIN MOTIVO. El ClearBookmarks venía de la 5.2 (el rewrap
-     renumeraba las líneas al re-decodificar); desde la 5.4 el wrap es de
-     PINTADO y las líneas lógicas no se renumeran, así que los dos
-     ClearBookmarks (ToggleWrap y SetWrapWidth) sobraron. Con F2 puestos,
-     alternar wrap ya no los borra.
-   - RENDIMIENTO PERCIBIDO: PINTAR ANTES. La entrega de contenido solo
-     invalidaba: el primer fotograma esperaba a la bomba de mensajes, por
-     detrás de la entrada ya encolada (el ratón del clic que lo disparó,
-     entre otra). DeliverTextToEdit hace ahora un UpdateWindow del control
-     y del marco al terminar: el contenido nuevo aparece en el acto (y el
-     paint del marco trae consigo gutter y regla), tanto en un cambio de
-     vista como cuando aterriza una página o un fichero.
-   - USABILIDAD: GO TO PREFILLA LA LÍNEA ACTUAL (antes siempre "1"): el
-     diálogo abre con la línea donde estás, preseleccionada para
-     sustituirla al teclear.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos ni IDs.
-     El manifest sube a 5.9.2.0.0.
-
-   Novedades de la versión 5.9.1 (REVISIÓN: GDI SIN DESPERDICIO + SIMPLIFICACIÓN):
-   - OPTIMIZACIÓN: PaintGutter ya no crea y destruye el pincel y el lápiz
-     de la bola de bookmark en CADA repintado (dos objetos GDI de más por
-     paint, más un par de SelectObject por cada fila marcada). Ahora se
-     crean UNA vez (la primera que hacen falta), viven en TextViewState
-     junto a hbrBookmark y se seleccionan una sola vez por repintado,
-     antes del bucle de filas. El repintado del gutter con bookmarks deja
-     de tocar el heap de GDI.
-   - SIMPLIFICACIÓN: el diálogo de Wrap Width usa ParseU64 (el prototipo
-     ya existía) en lugar de su bucle de dígitos a mano: misma validación
-     de desbordamiento, menos código duplicado. Entrada basura o mayor que
-     10000 sigue degradando igual (cap a 10000, o ancho fijo desactivado).
-   - SIN CAMBIOS DE RECURSOS ni de comportamiento visible: ni menú ni
-     aceleradores ni diálogos ni IDs. El manifest sube a 5.9.1.0.0.
-
-   Novedades de la versión 5.9 (LÍNEA DE BOOKMARK AZUL + BOLA EN HEX):
-   - NUEVO: LA LÍNEA MARCADA CON BOOKMARK SE PINTA CON FONDO AZUL, igual
-     que la banda de Highlight Current Line pero en azul suave. Es
-     SIEMPRE así: con Line Numbers o sin ellos, en las vistas de texto y
-     en la hex (el control es único y sirve todas las vistas). El WM_PAINT
-     lleva un cursor sobre g_pBookmarks (ordenada, como el del gutter):
-     el test de pertenencia cuesta O(1) amortizado por fila y el fondo
-     elegido es bookmark > banda del caret > greenbar > blanco (la
-     selección sigue pintando encima con su ETO_OPAQUE de siempre).
-   - NUEVO: LA BOLA AZUL TAMBIÉN EN MODO HEX. PaintGutter ya no limita la
-     bola a las vistas de texto: la dibuja siempre que el bookmark caiga
-     en una fila etiquetada de la columna, offsets incluidos. En las
-     vistas de texto sigue atada a Line Numbers (sin columna no hay dónde
-     dibujarla); en hex la columna existe siempre.
-   - El pincel azul vive en TV_SyncState (creación única, no atada a un
-     flag: los bookmarks entran y salen por F2 y por las cargas de página,
-     fuera del alcance de TV_SyncState).
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos ni IDs.
-     El manifest sube a 5.9.0.0.
-
-   Novedades de la versión 5.8 (FOCO DE DIÁLOGOS + MARCAS VISUALES + OPCIONES):
-   - BUG: EL FOCO SE QUEDABA EN EL EDIT TRAS UNA BÚSQUEDA. SearchNext hacía
-     SetFocus(hEdit) al encontrar una coincidencia, así que con el diálogo
-     Find abierto el ESC (y cualquier tecla) iba al visor y no al diálogo.
-     Ahora el foco solo vuelve al control si el diálogo Find NO está
-     abierto; y como cinturón, los dos manejadores de ESC cierran el
-     diálogo Find si sigue abierto ANTES de mirar la salida del programa.
-   - NUEVO: LOS BOOKMARKS SE VEN. Con Line Numbers activo, PaintGutter
-     dibuja un círculo azul en la zona izquierda de la columna junto a
-     cada línea marcada (antes F2 no dejaba rastro visual alguno).
-     ToggleBookmark marca la columna como sucia y repinta: el círculo
-     aparece/desaparece al instante. F2 ya alternaba (poner/quitar);
-     sigue haciéndolo, ahora a la vista.
-   - NUEVO: VIEW > HIGHLIGHT CURRENT LINE (ID_VIEW_HILITE, INI
-     "HighlightLine", por defecto OFF). El WM_PAINT del control rellena
-     toda la línea del caret con un amarillo suave (pincel cacheado en
-     TV_SyncState, como el greenbar). TV_UpdateCurLine (llamado desde
-     TV_InvalidateSelPainted, por donde pasa CUALQUIER cambio de
-     selección/caret) invalida solo las filas de la línea que pierde y
-     la que gana la banda; en wrap invalida el control entero (las filas
-     por línea varían).
-   - NUEVO: VIEW > ESC TO EXIT (ID_VIEW_ESCEXIT, INI "EscExit", por
-     defecto ON, como siempre funcionó). Con la opción OFF, ESC solo
-     cancela una búsqueda de bytes o cierra el diálogo Find: la salida
-     queda en Alt+X (nuevo acelerador de File > Exit), Alt+F4 o menú.
-   - NUEVO: ALT+X = FILE > EXIT. Fila nueva en la tabla de aceleradores
-     y el menú lo anuncia ("Exit\tAlt+X").
-   - resource.h: dos IDs nuevos (32820, 32821). El manifest sube a
-     5.8.0.0.
-
-   Novedades de la versión 5.7 (CLIC EN WRAP + COLUMNA PERSISTENTE + REGLA BAJO DEMANDA):
-   - BUG: EL CLIC Y EL ARRASTRE FALLABAN EN MODO WRAP. WM_LBUTTONDOWN y
-     WM_MOUSEMOVE mapeaban fila visual -> línea lógica 1:1, así que en un
-     párrafo envuelto en 5 filas, clicar la fila 3 ponía el caret en la
-     LÍNEA 3 (otra) y arrastrar seleccionaba saltando entre líneas. Ahora
-     un único TV_HitTest recorre las filas visibles contando sub-filas (la
-     misma aritmética que el pintado) y responde el carácter exacto, en
-     wrap y sin wrap. De paso: una columna negativa ya no se cuela y
-     arrastrar por debajo de la última fila extiende hasta el final en
-     vez de ignorarse. El bloque de 15 líneas estaba DUPLICADO en los dos
-     mensajes: muere la duplicación.
-   - BUG: VK_UP/VK_DOWN PERDIAN LA COLUMNA (el caret saltaba a la columna
-     0 de la línea contigua). Ahora se recuerda la columna deseada
-     (g_iCaretCol) como los editores estándar: los movimientos verticales
-     la conservan aunque pasen por líneas cortas, y cualquier movimiento
-     horizontal (flechas, Home/End, clic) la invalida.
-   - RENDIMIENTO: LA REGLA SOLO CUANDO TOCA. El WM_PAINT del control
-     repintaba la regla (fill + un DrawTextW/FillRect por columna visible)
-     en CADA pintado, también en un drag de selección que no la afecta.
-     El estado recuerda el iScrollX que dejó pintado (iPaintedRulerX): la
-     regla se repinta solo si cambió el scroll horizontal o hubo cambio de
-     contenido/fuente. El WM_PAINT del padre (exposición/resize) sigue
-     pintándola siempre y actualiza el recuerdo.
-   - RENDIMIENTO: MEMO DE DOS ENTRADAS en TV_LineFromChar. Con una
-     selección activa, TV_InvalidateSelPainted pregunta por los DOS
-     extremos en cada cambio: el memo de una entrada fallaba siempre
-     (caracteres alternantes) y pagaba la búsqueda binaria dos veces.
-   - RENDIMIENTO: CB_READ_CHUNK POR ARQUITECTURA: 8 MB en x64 (una página
-     de 128 MB son 16 lecturas en vez de 32), 4 MB en x86 como antes.
-   - SIMPLIFICACIÓN: los rangos de scrollbar que TV_SetText y
-     ApplyEditorFont mantenían como bloques gemelos viven ahora en un
-     único TV_UpdateScrollRanges.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
-     El manifest sube a 5.7.0.0.
-
-   Novedades de la versión 5.6 (ÍNDICE EN EL WORKER + GUTTER BAJO DEMANDA + CAPS x64):
-   - RENDIMIENTO: EL ÍNDICE DE LÍNEAS SE CONSTRUYE EN EL WORKER. Las dos
-     pasadas wmemchr de TV_SetText (contar + rellenar) se ejecutaban en el
-     hilo de UI dentro de la entrega, justo cuando la barra ya está al 100%:
-     para una página de 32 MB eran decenas de ms de UI bloqueada. Ahora el
-     worker de carga las ejecuta justo tras decodificar/normalizar
-     (TV_BuildLineIndex) y la entrega ADOPTA el índice (TV_SetText con
-     pLineStarts/cLines/iMaxLineChars preconstruidos): la entrega es O(1)
-     (intercambio de punteros, sin escaneo) y la UI solo pinta el primer
-     fotograma. Si el worker se queda sin memoria, TV_SetText cae al
-     construcción inline de siempre. Las rutas sin worker (preview de 64 KB,
-     ApplyView, portapapeles) siguen construyendo el índice en línea.
-   - RENDIMIENTO: GUTTER SOLO CUANDO TOCA. El estado del control lleva
-     bGutterDirty: la columna de números/offsets se repinta solo cuando
-     cambia el contenido, el scroll vertical o la fuente. Un drag de
-     selección, un scroll horizontal o un repintado de selección ya no
-     pagan el fill + PolyTextOutW de la columna en cada tick (antes se
-     repintaba la columna en CADA WM_PAINT del control). El WM_PAINT del
-     padre (exposición/resize) sigue pintándola siempre.
-   - RENDIMIENTO: MEMO DE TV_LineFromChar. La búsqueda binaria
-     carácter->línea guarda su último resultado: TV_PositionCaret y
-     TV_InvalidateSelPainted preguntan por los MISMOS caracteres en cada
-     repintado (el caret no se mueve mientras se hace scroll o se arrastra
-     una selección); una comparación sustituye la búsqueda.
-   - CAPS POR ARQUITECTURA (#ifdef _WIN64): CB_TEXT_MAX sube a 128 MB en
-     x64 (el índice ya no se construye en la UI y el espacio de direcciones
-     de 2 GB de x86 sigue limitando a 32 MB) y CB_HEX_MAX a 32 MB en x64
-     (8 MB en x86). El build x64 abre páginas 4 veces mayores con el mismo
-     coste de entrega.
-   - SIMPLIFICACIÓN: MUERE CB_WRAP_TEXT_MAX (el cap de 2 MB para vistas con
-     ajuste de línea, de la era del EDIT estándar). El control custom envuelve
-     por fila visible en el pintado desde V5, así que el cap solo truncaba
-     contenido que el visor ya maneja: con wrap activo se muestra la página
-     completa (hasta CB_TEXT_MAX) y el toggle de wrap sigue siendo instantáneo.
-     PageCapBytes, RunLoadJob y ApplyView pierden su rama de wrap.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
-     El manifest sube a 5.6.0.0.
-
-   Novedades de la versión 5.5 (ÚLTIMAS FILAS SIN NÚMERO + REPAINT MÍNIMO):
-   - CRÍTICO: LAS ÚLTIMAS FILAS QUEDABAN SIN NÚMERO DE LÍNEA (con la regla
-     activa, las 1-2 últimas de la ventana). El bucle de PaintGutter
-     comparaba y —en coordenadas del PADRE, donde las etiquetas empiezan en
-     y = iRulerH— contra rcEdit.bottom, que es el ALTO DEL CONTROL (iRulerH
-     píxeles menos que el hueco del padre): dejaba de etiquetar antes de
-     tiempo. Ahora el borde es iRulerH + rcEdit.bottom en coordenadas del
-     padre y la condición es "y < borde", no "y + alto <= borde": una fila
-     parcialmente visible recibe su número igual que recibe su texto, y el
-     recuento de etiquetas queda clavado al de filas del WM_PAINT.
-   - El DC del gutter se recorta a la columna (SelectClipRgn): la etiqueta
-     de la última fila parcial no puede invadir la barra de estado (la
-     ventana principal no tiene WS_CLIPCHILDREN).
-   - RENDIMIENTO: REPAINT MÍNIMO EN SELECCIÓN Y CARET. El estado guarda el
-     rango de selección que dejó el último pintado en pantalla
-     (iPaintedSelLo/Hi) y TV_InvalidateSelPainted (sustituye a
-     TV_InvalidateSelRange) invalida solo la diferencia: una flecha sin
-     Shift con selección vacía NO repinta nada (antes invalidaba el control
-     entero en cada tecla), un drag o Shift+flechas repinta solo las filas
-     que gana o pierde el extremo móvil, y un clic dentro de una selección
-     activa ya no deja resaltados obsoletos en pantalla (bug: el helper
-     viejo medía solo desde iSelEnd).
-   - BUG: el thumb horizontal no se movía al seguir al caret con teclas:
-     el SetScrollInfo inline de TV_ScrollCaret pasaba si.fMask = 0 (no
-     actualizaba nada). Ahora el tracking horizontal pasa por TV_ScrollX,
-     que además blitea el desplazamiento en vez de invalidar todo.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
-     El manifest sube a 5.5.0.0.
-
-   Novedades de la versión 5.4 (GUTTER ALINEADO + HEX SIN EDIT + PINTADO POR SUCIEDAD):
-   - CRÍTICO: EL GUTTER PINTABA UNA FILA POR ENCIMA DE SU TEXTO. PaintGutter
-     empezaba sus etiquetas en y=0 del padre, pero LayoutEdit baja el
-     control iHexLineH píxeles cuando la regla está activa: cada número
-     quedaba sobre la línea anterior (el "58" solapaba la regla) y las 1-2
-     últimas filas visibles se quedaban sin número. Ahora el gutter usa el
-     mismo offset de regla que LayoutEdit y cubre exactamente el alto del
-     control. El cuadrado sobre el gutter (x < gutter, y < regla) lo pinta
-     el WM_PAINT del padre junto a la regla.
-   - HEX SIN EDIT: la vista hex usa ya el control custom V5TextView, como
-     las vistas de texto. Muere el EM_SETHANDLE (la construcción síncrona
-     de la tabla de líneas del EDIT era el último cuello de botella del
-     hex) y con él: la rama EDIT de RecreateEditControl, EnsureEditControl-
-     Type (queda solo el caso "sin control"), la rama hex de
-     DeliverTextToEdit, AdoptEmptyText, EditSubclassProc, las ramas
-     WM_CTLCOLOREDIT/WM_CTLCOLORSTATIC del padre y la rama EDIT de
-     PaintRuler. Las teclas que solo existían en el EDIT (Ctrl+Home/End
-     salto de página, PgDn/PgUp con salto de página en el borde) viven
-     ahora en TextViewProc. CB_HEX_MAX vuelve a 8 MB.
-   - RENDIMIENTO: PINTADO POR SUCIEDAD. El WM_PAINT del control limita el
-     pintado a las filas que tocan el rectángulo de actualización, y el
-     scroll vertical/horizontal usa ScrollWindowEx (solo se repinta la
-     franja descubierta, el resto se desplaza en blit): una rueda del
-     ratón o un drag de selección ya no repintan las ~200 filas visibles
-     por cada tick.
-   - RENDIMIENTO: TV_SetText construye el índice de líneas con dos pasadas
-     wmemchr (contar + rellenar) en vez de un bucle carácter a carácter;
-     sobre 26 MB pasa de decenas de ms a unos pocos.
-   - RENDIMIENTO: AllocViewText/FreeViewText usan GMEM_FIXED (el bloque
-     deja de ser movible: sin EM_SETHANDLE ya no hay adopción de handle y
-     sobra el par GlobalLock/GlobalUnlock en cada acceso).
-   - SIMPLIFICACIÓN: ToggleWrap ignora la vista hex (líneas fijas) y ya NO
-     recrea el control: el wrap se calcula al pintar, así que basta un sync
-     de flags (TV_SyncState, que también retira/restaura WS_HSCROLL) más un
-     invalidate; SetWrapWidth igual. ToggleGreenbar la permite en hex (el
-     control custom pinta las franjas también); ApplyView/ResetViewer
-     unifican el caso de texto vacío en ReleaseViewContent; SearchNext lee
-     g_tv directamente (sin copia LocalLock del EDIT); ID_COPY/ID_SELECTALL
-     van directos a TV_Copy/TV_SetSel; los helpers Edit* quedan como alias
-     de TV_*; ApplyEditorFont refresca los rangos de las scrollbars con las
-     métricas nuevas (iban una fuente por detrás).
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
-     El manifest sube a 5.4.0.0.
-
-   Novedades de la versión 5.3 (GREENBAR EN LA PRIMERA CARGA + HEX MÁS RÁPIDO):
-   - CRÍTICO: LA GREENBAR FUNCIONABA EN LA PRIMERA CARGA. Con Greenbar=1
-     restaurado del INI, la primera carga pintaba SIN franjas y había que
-     alternar la opción dos veces. Causa: TV_SyncState copiaba el flag
-     g_bGreenbar a g_tv.bGreenbar pero NUNCA creaba g_tv.hbrGreen; el pincel
-     solo se creaba en ToggleGreenbar y RecreateEditControl, así que el
-     WM_PAINT del V5TextView encontraba hbrGreen==null y pintaba fondo blanco.
-     FIX: la creación/retirada del pincel vive ahora DENTRO de TV_SyncState
-     (idempotente), que cubre arranque, primera carga, cambios de vista y
-     toggles. ToggleGreenbar simplificado (solo flag + sync + menú +
-     invalidate) y bloque duplicado fuera de RecreateEditControl.
-   - RENDIMIENTO HEX: CB_HEX_MAX baja de 8 MB a 4 MB. La página hex es el
-     único camino que alimenta un EDIT estándar, cuya tabla de líneas se
-     construye de forma síncrona dentro de EM_SETHANDLE: el tamaño de página
-     se percibe directamente como segundos de helada. 4 MB parte a la mitad
-     la construcción del dump (~15M chars en vez de ~30M) y el indexado del
-     EDIT, y ahorra ~34 MB de buffer. La paginación (PgDn/PgUp, Go To,
-     Next/Previous Page, Ctrl+Home/End) sigue alcanzando el fichero entero.
-   - CRÍTICO: VER PORTAPAPELES COMO FICHERO TRAS UNA VISTA HEX dejaba el
-     dump anterior en pantalla bajo el título "CLIPBOARD". El portapapeles
-     pone iView=VIEW_UTF16 pero no sincronizaba el tipo de control: el
-     texto entraba por la rama del control custom con g_tv.hWnd==null y
-     nada se pintaba. Ahora EnsureEditControlType() se llama antes de
-     entregar (la misma sincronización que ApplyLoadResult).
-   - PINTADO: la vista VACÍA (sin texto entregado aún) no pintaba su
-     fondo: el early-out de WM_PAINT validaba sin rellenar y el
-     WM_ERASEBKGND del control responde 1 SIN borrar, así que quedaban
-     píxeles indefinidos. Ahora rellena con COLOR_WINDOW.
-   - SIMPLIFICACIÓN: declaración muerta GetEditBackground fuera (V4, sin
-     definición ni usos); FindPatternFrom sin la condición redundante
-     (*t == *s ya lo cubre ChrCmpIW).
-   - COMENTARIOS: chunks "1 MB" -> CB_READ_CHUNK (4 MB) en RunLoadJob y
-     SearchThreadProc; la técnica PatBlt obsoleta en ToggleGreenbar; el
-     "decode inserta CRLF virtuales" de SetWrapWidth (V5 envuelve al pintar).
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos cambian.
-     El manifest sube a 5.3.0.0.
-
-   Novedades de la versión 5.2 (REVISIÓN: CONTROL-TYPE SYNC, SCROLL H Y RENDIMIENTO):
-   - CRÍTICO: EL TIPO DE CONTROL SE SINCRONIZA EN TODA CARGA. WM_CREATE
-     crea siempre el V5TextView; hasta ahora solo SetView/ToggleWrap
-     cambiaban el tipo de control, así que la PRIMERA carga de un
-     binario (detección -> VIEW_HEX) o un /hex enviaba EM_SETHANDLE al
-     control custom (que no lo maneja): pantalla en blanco y fuga del
-     bloque de texto. Y al revés, tras ver un binario, abrir un texto
-     no pintaba nada (g_tv.hWnd quedaba null). Nuevo EnsureEditControl-
-     Type() se llama en ApplyLoadResult y en WM_APP_LOADPREVIEW antes
-     de entregar; RecreateEditControl gana el parámetro bApplyContent
-     para no entregar dos veces.
-   - ResetViewer: la comprobación "if (iView == VIEW_HEX)" era muerta
-     (iView acaba de ponerse a ANSI): el bloque del EDIT hex nunca se
-     liberaba. Ahora se guarda el view ANTES de resetearlo.
-   - SCROLL HORIZONTAL del V5TextView arreglado: nadie fijaba el rango
-     de SB_HORZ, así que las líneas largas sin wrap no se podían
-     recorrer y el caret se salía por la derecha. TV_SetText calcula
-     la línea más larga, fija el rango (en píxeles) y TV_ScrollCaret
-     desplaza también en horizontal.
-   - Find Bytes: si el PostMessage final fallaba, g_bInByteSearch
-     quedaba true para siempre (todas las cargas bloqueadas). El post
-     final reintenta 20x100 ms y el ESC reapera el hilo terminado
-     (ReapSearchThread).
-   - RENDIMIENTO: TV_SetText construye el índice de líneas con wmemchr
-     (SIMD del CRT); LooksLikeUTF16Text cuenta los NUL con memchr;
-     IsBinaryData clasifica con LUT de 256; Find Bytes lee en chunks de
-     4 MB (CB_READ_CHUNK, igual que el loader).
-   - SIMPLIFICACIÓN: g_iForcedView se consume SOLO en RunLoadJob (el
-     doble manejo con ApplyLoadResult era una divergencia esperando
-     pasar); helper ReleaseViewContent para el par TV_ClearText +
-     FreeViewText repetido 4 veces; código muerto fuera (EN_UPDATE del
-     custom, LayoutEdit condicional imposible en la rama hex, rama
-     forzada de ApplyLoadResult); CS_HREDRAW/CS_VREDRAW de la clase V5
-     fuera (WM_SIZE ya invalida todo); SetWrapWidth limpia bookmarks;
-     ID_SELECTALL usa TV_GetTextLength.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni diálogos
-     cambian. El manifest sube a 5.2.0.0.
-
-   Novedades de la versión 5.1 (CORRECCIÓN DE BUGS DEL CUSTOM CONTROL):
-   - V5 REEMPLAZA EL CONTROL EDIT ESTÁNDAR por un control custom
-     (V5TextView) para todas las vistas de TEXTO (ANSI/UTF-8/UTF-16/
-     EBCDIC). Hex sigue usando el EDIT estándar (su tabla de líneas es
-     simple y el gutter está acoplado a su scroll).
-   - EL CONTROL EDIT ESTÁNDAR RECALCULABA TODOS LOS PUNTOS DE RUPTURA
-     (soft breaks) sincrónicamente al recibir texto con wrap, helando la
-     ventana ~10 segundos para 26 MB. El control custom:
-     * Construye un índice de líneas (offsets de inicio) UNA vez al
-       entregar el texto — O(n) scan de \n, rápido incluso para 32 MB
-     * Pinta SOLO las líneas visibles (~50) en WM_PAINT
-     * Calcula el wrap de cada línea visible durante el paint — no de
-       todo el archivo
-     * Soporta selection, caret, keyboard (arrows/PgUp/PgDn/Home/End),
-       copy, find, goTo, bookmarks, tail
-   - RESULTADO: wrap es INSTANTÁNEO para archivos de CUALQUIER tamaño.
-     Ya no hay cap de 2 MB para wrap (aunque el código de CB_WRAP_TEXT_MAX
-     se mantiene como salvaguarda pero ya no es necesario).
-   - ADAPTADORES TV_*: las funciones existentes (Find, GoTo, Bookmarks,
-     UpdateStatusBar, etc.) usan wrappers (EditGetSel, EditLineFromChar,
-     EditSetSel, etc.) que redirigen al control correcto (custom para
-     texto, EDIT para hex) sin cambios en la lógica.
-   - GESTIÓN DE MEMORIA: el control custom NO copia el texto — almacena
-     un puntero al buffer de AllocViewText. El global g_pViewText guarda
-     el puntero actual para liberarlo en la siguiente entrega o en
-     ResetViewer.
-   - LAS FEATURES V4 (Greenbar, Ruler) funcionan nativamente con el
-     custom control: greenbar se pinta como franjas FillRect en el
-     WM_PAINT del control (no necesita PatBlt), y el ruler funciona
-     igual que antes.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
-     cambian. El manifest sube a 5.0.0.0.
-
-   Novedades de la versión 4.0 (GREENBAR, RULER, WRAP A LONGITUD FIJA):
-   - V4 añade tres features inspiradas en V File Viewer (fileviewer.com)
-     que mejoran la legibilidad de archivos grandes sin reescribir el
-     control EDIT (eso sería una futura V5 con custom draw completo).
-   - NOTA ARQUITECTÓNICA: 4More usa el control EDIT estándar de Windows
-     (CreateWindowEx L"EDIT"), NO un custom control. El control EDIT
-     estándar NO soporta colores de fondo por línea ni envía
-     WM_ERASEBKGND a su subclass (pinta su fondo internamente). Las
-     features V4 se implementan como overlays pintados DESPUÉS del texto
-     del EDIT, usando técnicas que no rompen el texto existente.
-   - GREENBAR (View > Greenbar): pinta franjas alternas (blanco / verde
-     claro RGB(232,240,232)) sobre las líneas impares. Se implementa en
-     EditSubclassProc::WM_PAINT DESPUÉS de DefSubclassProc (que pinta el
-     texto), usando PatBlt con PATPAINT (dest = dest | pattern). Esta
-     operación OR solo afecta los píxeles blancos del fondo (RGB alto),
-     dejando el texto oscuro (RGB bajo) intacto. Resultado: líneas
-     alternas con fondo verde claro, texto legible. No afecta a hex.
-   - RULER (View > Ruler): regla de columnas en una franja separada en
-     la parte superior. LayoutEdit reserva iHexLineH píxeles (el EDIT
-     empieza en y=iRulerH), y la regla se pinta en esa franja del
-     parent. Muestra números cada 10 columnas y marcas (ticks) en las
-     demás. Tiene en cuenta el scroll horizontal del EDIT (lee
-     GetScrollInfo SB_HORZ) para alinear las columnas con el texto
-     visible. Se pinta tanto en el WM_PAINT del parent como en el del
-     subclass del EDIT (para mantenerse sincronizada al hacer scroll).
-   - WRAP A LONGITUD FIJA (View > Wrap to Fixed Width...): pide un
-     número de columnas (default 80) y activa un modo de wrap distinto
-     al wrap-a-ventana. El esqueleto, el diálogo y la persistencia están
-     en sitio; el wrap real a N chars requeriría insertar CRLF
-     virtuales durante el decode (V5).
-   - PERSISTENCIA: Greenbar, Ruler y WrapWidth se guardan en 4More.ini
-     y se restauran al arrancar.
-   - RECURSOS: se añaden 3 IDs de menú nuevos en resource.h
-     (ID_VIEW_GREENBAR, ID_VIEW_RULER, ID_VIEW_WRAPWIDTH) y 3 items en
-     el menú View del .rc. El manifest sube a 4.0.0.0.
-
-   Novedades de la revisión 3.20 (CORRECCIÓN DE BUGS Y SIMPLIFICACIÓN):
-   - AUDITORÍA COMPLETA: se revisó todo el código buscando bugs, race
-     conditions, código muerto e inconsistencias. Se encontraron 28 issues
-     y se corrigieron los más importantes.
-   - BUG: PostMessage(LOADDONE) SIN CHECK. Si PostMessage fallaba (cola
-     llena o ventana destruida), el LoadJob se leakaba y g_pJob quedaba
-     non-null para siempre, wedgeando todas las cargas posteriores con
-     "Still loading the previous file". Ahora se comprueba el return y se
-     libera el job si falla.
-   - BUG: LoadThreadProc dereferenciaba pParameter sin null check. Si el
-     caller pasaba null (imposible hoy pero frágil), el SEH capturaba el
-     primer access violation pero luego PostMessage fuera del __try
-     causaba un crash no capturable. Ahora se retorna temprano.
-   - BUG: g_qwSearchResult (64-bit) era non-volatile y se leía cross-thread
-     en WM_APP_SEARCHDONE. En Win32 un load de 64-bit puede tear. Ahora es
-     volatile y se lee una sola vez en un local antes de usarlo.
-   - BUG: hEdit creation failure no se comprobaba en WM_CREATE. Si
-     CreateWindowEx devolvía null (raro pero posible), el programa
-     continuaba con un control null y la ventana quedaba rota. Ahora
-     retorna -1 (WM_CREATE falla limpiamente).
-   - BUG: POLYTEXTW[160] cap demasiado pequeño para monitores 4K. Con
-     fuente pequeña (-8, ~12px/línea) y ventana alta (~180 líneas), las
-     últimas ~20 líneas no tenían etiqueta en el gutter. Subido a 256.
-   - THREAD-SAFETY: g_bLoadCancel se asignaba con un plain store en
-     BeginLoadJob, mientras que todos los demás writes usaban
-     InterlockedExchange. Ahora es consistente (con memory barrier).
-   - SIMPLIFICACIÓN: duplicate cbPage computation en RunLoadJob eliminada.
-   - SIMPLIFICACIÓN: redundant ternary en LoadFile call de WM_CREATE.
-   - SIMPLIFICACIÓN: magic number 4 << 20 → CB_READ_CHUNK named constant.
-   - LIMPIEZA: hFontStatus no se nulleaba tras DeleteObject (consistencia).
-   - LIMPIEZA: NULL vs L"" en CreateWindowEx unificado a L"".
-   - LIMPIEZA: \n → \r\n en MessageBox de stdin reopen.
-   - LIMPIEZA: stray space en "* p++" → "*p++".
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
-     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
-     "3.20"; el manifest puede subir a 3.20.0.0 (opcional, cosmético).
-
-   Novedades de la revisión 3.19 (OPTIMIZACIONES DE CARGA):
-   - DOUBLE-DECODE ELIMINADO: /hex /utf8... forzaban al worker a decodificar
-     la vista detectada y luego ApplyLoadResult re-decodificaba la vista
-     forzada en el hilo UI. Ahora RunLoadJob aplica g_iForcedView ANTES
-     del cap y del decode, así el worker decodifica directamente la vista
-     correcta y ApplyLoadResult no necesita re-decodificar (~100 ms ahorrado
-     para 32 MB).
-   - CHUNKS DE LECTURA DE 4 MB (era 1 MB): menos syscalls de ReadFile (24
-     menos para 32 MB). FILE_FLAG_SEQUENTIAL_SCAN mantiene el read-ahead.
-     La granularidad de la barra no sufre: 8 ticks para 32 MB, interpolados
-     por el poll de 16 ms. Para hex los ticks del build (cada 4096 líneas)
-     son independientes del tamaño del chunk de lectura.
-   - AUDITORÍA COMPLETA: se revisó todo el pipeline de carga. El cuello
-     restante es el coste inherente del control EDIT (construcción de la
-     tabla de líneas dentro de EM_SETHANDLE, ~0.5-2 s para 32 MB), que no
-     se puede eliminar sin reemplazar el control (RichEdit/Scintilla). Las
-     siguientes áreas ya están bien optimizadas:
-     * Detección (memchr/SIMD en bytes crudos, no en texto decodificado)
-     * CRLF normalization (CountCRLFExpansion en bytes, memchr; solo copia
-       cuando hay expansión real)
-     * Hex dump (LUT de pares precomputada, PolyTextOut para el gutter)
-     * Preview (64 KB, gated a >256 KB restante)
-     * Memory (EM_SETHANDLE zero-copy, GlobalAlloc movable para adopción)
-   - OPORTUNIDADES FUTURAS (no implementadas, documentadas para referencia):
-     * ApplyView en worker thread: los view switches en archivos grandes
-       (32 MB) congelan el UI 1-2 s. Requeriría la misma plomería de
-       LoadJob pero para re-decodificar bytes existentes.
-     * Pipeline read+decode: decodificar cada chunk conforme llega en
-       lugar de leer todo primero. Ahorro ~40 ms en SSD, complejo por
-       el carry-over de secuencias UTF-8 parciales.
-     * Hex build paralelo: dividir el rango de bytes entre N threads.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
-     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
-     "3.19"; el manifest puede subir a 3.19.0.0 (opcional, cosmético).
-
-   Novedades de la revisión 3.18 (WORD WRAP: cap de 2 MB para entrega instantánea):
-   - CON WORD WRAP, EL CONTROL EDIT RECALCULA TODOS LOS PUNTOS DE RUPTURA
-     del texto completo en una llamada síncrona del hilo UI. Para 26 MB
-     de texto (chat de WhatsApp) eso son millones de cálculos de wrap,
-     helando la ventana ~10 segundos — tanto al cargar con wrap activo
-     como al activar wrap en un archivo ya cargado. Sin wrap no hay
-     problema: el control solo indexa CRLF, que es O(n) rápido.
-   - CB_WRAP_TEXT_MAX (2 MB): cuando Word Wrap está activado, el visor
-     limita el texto que entrega al control a 2 MB. El control EDIT
-     recalcula los breaks de 2 MB en <0.5 s en lugar de ~10 s para 26 MB.
-     El usuario ve el principio del archivo y un aviso de truncamiento
-     "[Showing bytes 0-X of Y]"; Next Page (PgDn) avanza al siguiente
-     bloque de 2 MB. Sin wrap, el límite se mantiene en CB_TEXT_MAX
-     (32 MB) porque el control lo maneja eficientemente.
-   - PageCapBytes respeta wrap: la paginación (Next/Previous Page, Go
-     To, Ctrl+End, tail) avanza en bloques de 2 MB con wrap en lugar de
-     32 MB, así el usuario puede navegar todo el archivo.
-   - RunLoadJob respeta wrap: al cargar un archivo con wrap activo, el
-     worker solo lee 2 MB en lugar de 32 MB — la carga es tan rápida
-     como sin wrap.
-   - ApplyView respeta wrap: al activar wrap en un archivo ya cargado
-     (32 MB en memoria), ApplyView recorta el texto a 2 MB antes de
-     entregarlo al control, evitando el recálculo de 10 segundos.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
-     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
-     "3.18"; el manifest puede subir a 3.18.0.0 (opcional, cosmético).
-
-   Novedades de la revisión 3.17 (WORD WRAP: WM_SETTEXT en lugar de EM_SETHANDLE):
-   - CON WORD WRAP ACTIVADO, EM_SETHANDLE ERA MUY LENTO: el control EDIT
-     recalcula TODOS los puntos de ruptura (soft breaks) del texto
-     completo en una sola llamada síncrona del hilo UI. Para un log de
-     26 MB (conversación de WhatsApp exportada) eso son millones de
-     cálculos de wrap, helando la ventana varios segundos.
-   - WM_SETTEXT PARA WRAP: con Word Wrap activado, la entrega usa
-     WM_SETTEXT en lugar de EM_SETHANDLE. WM_SETTEXT hace que el control
-     copie el texto a su propio buffer, pero el control EDIT de Windows
-     tiene optimizaciones internas para WM_SETTEXT (gestión de memoria
-     y layout diferido) que no aplican a EM_SETHANDLE con wrap. La copia
-     extra es marginal comparada con el coste de recalcular todos los
-     breaks. Sin wrap, EM_SETHANDLE se mantiene: zero-copy es la mejor
-     opción cuando no hay tabla de wrap que reconstruir.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
-     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
-     "3.17"; el manifest puede subir a 3.17.0.0 (opcional, cosmético).
-
-   Novedades de la revisión 3.16 (RENDIMIENTO: la entrega vuelve a ser O(1)):
-   - 3.14-3.15 TROCEARON LA ENTREGA CON EM_REPLACESEL para que la barra
-     caminara permille a permille durante la entrega. Era la idea
-     correcta con el transporte equivocado: cada EM_REPLACESEL sobre un
-     control EDIT que ya tiene N MB de texto fuerza al control a
-     REALLOCAR Y COPIAR su buffer acumulado ENTERO (no sólo el trozo que
-     entra), así que el coste es CUADRÁTICO en el tamaño del texto. Un
-     TXT de 30 MB se entregaba en 30 trozos de 1 MB: cada trozo pagaba
-     una realloc+copy de media 15 MB. El resultado: ~8 segundos de
-     entrega, frente a <2 s de lectura+decode. El usuario lo leía como
-     "se ejecuta todo muy lento" — y tenía razón.
-   - EL TROCEO SALE, EM_SETHANDLE VUELVE. La entrega monolítica de 2.98
-     (EM_SETHANDLE adopta el bloque pre-construido por AllocViewText)
-     es O(1) en el puntero del buffer: el control intercambia su buffer
-     por el nuestro sin copiar nada. El único coste que el hilo UI paga
-     es la CONSTRUCCIÓN DE LA TABLA DE LÍNEAS del control (una pasada
-     sobre el texto para indexar los CRLF), que para 30 MB son del
-     orden de 0.5-2 s — frente a los ~8 s cuadráticos del troceo. Word
-     Wrap ya no es un caso especial: el reenvuelto ocurre en una sola
-     pasada dentro del EM_SETHANDLE, no trozo a trozo.
-   - LA BARRA SE PINTA A 100% ANTES DEL SWAP. ApplyLoadResult pinta
-     PBM_SETPOS 1000 ANTES de llamar a EM_SETHANDLE, para cualquier job
-     cuya barra se mostró (bBarPosted) y que no sea stdin. Durante el
-     medio segundo o segundo que el control tarda en indexar las líneas,
-     el usuario ve "casi terminado" (barra llena + tamaño real en la
-     status bar), no un valor congelado a medias. La escala del worker
-     (read+build) se mantiene como en 3.10: la barra sube durante la
-     lectura y el read-done tick la deja en su valor final; el pintado
-     a 1000 es la señal honesta de "entregando".
-   - LIMPIEZA DE CÓDIGO MUERTO: el troceo dejó tras de sí g_bInDelivery,
-     s_pmDeliver, qwProgRead, qwProgBuild y los parámetros bProgress/
-     pmStart/qwProgRead/qwProgBuild de DeliverTextToEdit/DeliverTextSafely.
-     Todo eso se elimina: las puertas de carga ya no miran g_bInDelivery
-     (siempre false), el poll ya no sondea s_pmDeliver (siempre -2), y
-     las firmas de las funciones de entrega pierden 4 parámetros que
-     nadie usaba. OnLoadProgressTimer se simplifica a una sola fuente
-     (el átomo del job vivo).
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
-     cambian. La revisión es del .cpp únicamente. APP_VERSION dice
-     "3.16"; el manifest a 3.15.0.0 (no cambia nada visible; subir a
-     3.16.0.0 es opcional y cosmético).
-
-
-   Novedades de la revisión 3.15 (WORD WRAP YA NO EXCLUYE EL TROCEO):
-   - 3.14 DEJÓ FUERA DEL TROCEO A WORD WRAP ("el reenvuelto del control
-     no se puede trocear") Y CON WRAP ACTIVO (recordado en 4More.ini) LA
-     PÁGINA GRANDE SEGUÍA ENTRANDO MONOLÍTICA: el EM_SETHANDLE caía
-     intacto detrás de la señal de barra llena de 3.10, el control
-     reenvolvía TODO su texto en UNA llamada del hilo UI y la barra se
-     quedaba CLAVADA en 1000 — la misma barra helada de siempre, justo
-     donde 3.14 la había resuelto para el camino sin wrap. La exclusión
-     era una cautela teórica: el reenvuelto del EDIT no bloquea el
-     troceo (cada EM_REPLACESEL reenvuelve sólo lo que entra, igual que
-     su tabla de líneas se mantiene incremental desde el punto de
-     edición — la misma razón por la que teclear en Notepad no se
-     ralentiza en documentos de varios MB).
-   - LA EXCLUSIÓN SALE: el troceo del EDIT es incremental desde el punto
-     de edición igual que su tabla de líneas, así que el troceo vale
-     también con wrap. El reenvuelto se hace por trozo (no de golpe al
-     final) y ENTRE TROZOS el hilo UI bombea: la barra camina permille
-     real en TODOS los caminos de página grande — con wrap o sin él.
-   - TROZOS MÁS PEQUEÑOS CON WRAP: EM_REPLACESEL con wrap es mucho más
-     caro (recalcula los puntos de ruptura del texto que entra Y bombea
-     mensajes internamente, lo que se come el WM_TIMER del sondeo antes
-     de que PumpDuringDelivery lo vea). Con un trozo de 1M el hilo UI
-     se queda atrapado dentro del SendMessage y la barra no pinta entre
-     trozos: el sondeo no llega a correr. Con 256K (CB_SLICE_CHARS_WRAP)
-     recupera el control cuatro veces antes y la barra pinta cuatro
-     veces más. Sin wrap se queda en 1M: ahí EM_REPLACESEL es O(slice)
-     puro, sin reenvuelto que pagar.
-   - PINTADO DIRECTO, NO POR TIMER: el sondeo de 16 ms (IDT_LOADPROG)
-     vale mientras el hilo UI bombea su propia cola, pero con wrap el
-     control EDIT bombea DENTRO de EM_REPLACESEL y puede procesar
-     (y descartar) el WM_TIMER antes de que DeliverTextSliced lo vea.
-     Resultado: s_pmDeliver se actualizaba, pero el poll no corría y la
-     barra saltaba del último valor de lectura (~10%) al 100% final de
-     golpe. Ahora DeliverTextSliced llama a OnLoadProgressTimer() justo
-     después de cada actualización de s_pmDeliver: el pintado es
-     síncrono (UpdateWindow sobre la barra) y no depende de que el
-     WM_TIMER sobreviva al bombeo interno del control.
-   - SIN CAMBIOS DE RECURSOS: ni menú ni aceleradores ni recursos
-     cambian. La revisión es del .cpp únicamente. APP_VERSION ya dice
-     "3.15"; el manifest a 3.15.0.0 (ya alineado en 4More.manifest).
-
-   Novedades de la revisión 3.14 (LA BARRA CUBRE LA CARGA ENTERA):
-   - SEIS REVISIONES (3.08-3.13) ARREGLARON EL TRANSPORTE DEL PROGRESO Y LA
-     BARRA SEGUÍA CLAVADA EN PÁGINAS GRANDES: en un log de 30 MB la barra
-     trepa hasta ~50% en menos de un segundo y luego se queda HELADA unos
-     diez segundos, hasta que la página aparece y la barra desaparece. El
-     transporte no tenía culpa: lo que queda tras la lectura no es carga de
-     fichero, es la ENTREGA — el EM_SETHANDLE con el que el control EDIT
-     adopta el texto (30M de caracteres, medio millón de líneas) reconstruye
-     su tabla de líneas ENTERA dentro de UNA llamada del hilo UI. Dentro de
-     esa llamada no corre temporizador, no hay repintado, no hay NADA: seis
-     revisiones de tics y sondeos no podían mover la barra ahí, y el 100%
-     congelado se leía como "estancada". El propio 2.98 señalaba al
-     culpable ("la indexación de líneas del propio control EDIT") y el
-     /timing lo mide: es el tramo "deliver".
-   - LA ENTREGA SE TROCEA Y SE BOMBEA: por encima de 1M de caracteres (y
-     con Word Wrap fuera: el reenvuelto del control no se puede trocear) el
-     texto ya NO entra en un EM_SETHANDLE monolítico. El control arranca
-     vacío y cada trozo de 1M de caracteres aterriza con EM_REPLACESEL al
-     final — el mantenimiento de la tabla de líneas del EDIT es incremental
-     desde el punto de edición (teclear en Notepad sobre documentos de
-     varios MB no se ralentiza, por la misma razón), así que el coste total
-     sigue siendo O(n). ENTRE TROZOS el hilo UI bombea la cola
-     (PeekMessage): el sondeo de 16 ms vive toda la entrega, la ventana
-     nunca pasa a "(No responde)", y la barra publica permille REAL —
-     caracteres ya dentro del control — sobre la MISMA escala de la
-     lectura: camina de ~50% a 100% durante los antiguos diez segundos.
-     Nada inventado: las unidades son caracteres entregados.
-   - EL 100% YA NO MIENTE: el tic forzado a 1000 del worker (3.10) SALE.
-     Decía "terminado" cuando solo terminaba LA LECTURA, y era el tic que
-     pintaba la barra LLENA justo antes de que la entrega helara el hilo:
-     la barra llena congelada era su obra. El worker termina en el tick de
-     fin de lectura (~50% de la escala compartida) y el 1000 lo publica
-     AHORA la entrega, tras el último trozo, cuando el texto está de verdad
-     dentro del control — y la primera pantalla pinta al instante porque la
-     tabla de líneas ya está completa. Donde no hay bomba (página pequeña,
-     o Word Wrap activo) se conserva la señal de 3.10: barra llena ANTES
-     del intercambio.
-   - LA PUERTA DE CARGAS: la entrega troceada bombea mensajes, y en la cola
-     puede entrar de todo. g_bInDelivery (la gemela de g_bInByteSearch)
-     cierra Load File, Load Page, Go To, portapapeles y Find Bytes mientras
-     dura; el temporizador del tail rebota en la LoadPage rechazada; ESC
-     sigue cerrando el programa (la bomba aborta limpia con IsWindow, y un
-     WM_QUIT ajeno se re-postea, no se come). El KillTimer del poll sale de
-     WM_APP_LOADDONE: muere al FINAL de ApplyLoadResult — el sondeo alimenta
-     la barra del job vivo (el átomo) o de la entrega en curso
-     (s_pmDeliver), y una excepción dentro de la entrega reabre las puertas
-     en el SEH de DeliverTextSafely.
-   - COSTE: la entrega troceada paga las realloc del buffer del control
-     (amortizadas: como mucho una copia extra del texto) y pierde el
-     cero-copias de 2.98 SOLO en páginas grandes, donde el pico de memoria
-     sube ~el tamaño del texto durante la entrega. El precio de que la
-     barra viva toda la carga y la ventana respire.
-
-   Novedades de la revisión 3.13 (LA BARRA SUBE DE VERDAD):
-   - CUATRO REVISIONES (3.09-3.12) CAMBIARON EL TRANSPORTE DEL PROGRESO Y LA
-     BARRA SEGUÍA SIN MOVERSE EN EL SSD: el cuello nunca estuvo en el
-     transporte, estuvo en la CANTIDAD de valores publicados. El throttle de
-     62 ms del worker (heredado de 3.08, cuando cada tic era un PostMessage)
-     se comía TODOS los tics de trozo de una lectura rápida: los 30 MB de la
-     página entran dentro de la primera ventana de 62 ms y la única
-     publicación que sobrevivía era el tic inicial (~0%). El sondeo del
-     átomo era correcto pero el átomo solo cambió tres veces (0% -> 50% ->
-     100%): no había nada que animar en NINGÚN transporte. La simulación de
-     la tubería lo confirma: 0 pasos intermedios pintados en 3.09-3.12.
-   - EL THROTTLE DESAPARECE: publicar en el átomo cuesta nanosegundos y no
-     hay cola que inundar; lo que hay que dosificar es el REPINTADO, y eso
-     ya lo hace el sondeo (pinta solo cuando el valor cambia). Cada trozo
-     de 1 MB publica su permille (hasta ~32 publicaciones por página) y el
-     WM_TIMER pasa de 50 a 16 ms (~60 muestreos/s): la barra trepa de
-     verdad hasta el 100 a medida que llega la página, sea SSD, USB o red.
-     msNextProgress y el parámetro bForce salen del LoadJob: menos estado.
-   - SEPARADOR DOBLE EN FILE FUERA: EnsureRecentMenu insertaba un
-     separador propio junto al estático del .rc y el menú mostraba dos
-     líneas seguidas. El popup Recent Files entra ya sin separador
-     adicional: el estático separa el bloque.
-
-   Novedades de la revisión 3.12 (LA BARRA SONDEA, NO ESPERA MENSAJES):
-   - TRES REVISIONES SEGUIDAS (3.09-3.11) PUBLICARON EL PERMILLE CORRECTO
-     Y LA BARRA AUN ASÍ SE CLAVABA AL MOSTRAR LA PRIMERA PÁGINA. La causa
-     común: un tic publicado con PostMessage es solo una PETICIÓN de
-     repintado, y la petición perdía carreras contra la cola — tics
-     seguidos, tramos modales, la entrega final bloqueando el hilo UI.
-     3.11 forzó el repintado con UpdateWindow tras cada tic procesado y
-     en la máquina real siguió igual: la cadena tic→mensaje→repaint
-     tiene demasiados eslabones que el código no controla.
-   - LA CADENA SE CORTA: el worker publica el permille en un campo
-     ATÓMICO del job (pmProgress: -2 nada, -1 marquee de stdin,
-     0..1000) y la UI lo SONDEA con un WM_TIMER de 50 ms (IDT_LOADPROG)
-     que corre solo mientras el job vive: lee el átomo, mueve
-     PBM_SETPOS y pinta en el acto con UpdateWindow. No hay mensaje que
-     perder, no hay coalescencia que retenga un cuadro viejo, no hay
-     serial que cuadrar: el valor leído ES el del job vivo. El timer
-     muere en WM_APP_LOADDONE, en WM_DESTROY y por autoprotección si el
-     job ya no está. WM_APP_LOADPROGRESS y su handler desaparecen.
-   - GARANTÍA FINAL INDEPENDIENTE DE TODA CARRERA: ApplyLoadResult pinta
-     el estado FINAL de la barra (el 1000 publicado en el éxito, el
-     último real en una carga fallida) ANTES de la entrega EM_SETHANDLE.
-     Si la entrega es lo único que seguro se ejecuta, el usuario ve la
-     barra LLENA durante el intercambio. Después se retira.
-   - LECTURA MÁS FINA: los trozos de la fase 2 bajan de 4 MB a 1 MB —
-     ocho tics de lectura reales por página hex en vez de dos, y
-     granularidad honesta en medios lentos (USB, red). El coste por
-     llamada sigue siendo marginal y el read-ahead secuencial paga el
-     ancho de disco.
-
-   Novedades de la revisión 3.11 (LA BARRA PINTA CADA PASO):
-   - 3.10 CALCULABA LAS POSICIONES CORRECTAS Y AUN ASÍ LA BARRA SE VEÍA
-     CLAVADA EN EL PRIMER TROZO (10-15%). PBM_SETPOS solo invalida la
-     franja que cambia: el control repinta cuando la cola de mensajes se
-     vacía, y durante una carga no llega a vaciarse — los tics entran
-     seguidos y WM_APP_LOADDONE encadena la entrega (EM_SETHANDLE del
-     volcado, segundos en x86) que bloquea el hilo UI con todos los
-     repintados pendientes SIN EJECUTAR. El último cuadro que la barra
-     pintó de verdad era el del primer trozo; de ahí saltaba a
-     desaparecer: el 100% existía como mensaje, nunca como píxeles.
-   - CADA TIC SE PINTA EN EL ACTO: WM_APP_LOADPROGRESS cierra con
-     UpdateWindow sobre la barra. Es un hijo de ~150x15 px (pintarla
-     cuesta microsegundos, <= 16 veces/s tras el throttle): la posición
-     en pantalla es SIEMPRE la del último tic procesado, y el 100%
-     forzado se pinta ANTES de que WM_APP_LOADDONE saque de la cola la
-     entrega — el intercambio corre con la barra LLENA a la vista.
-   - EL 100% YA NO EXIGE ÉXITO: el tic forzado sale siempre que la barra
-     llegó a mostrarse (bBarPosted), también si la carga termina en
-     error (OOM, lectura) — una barra que se mostró no muere a medias.
-
-   Novedades de la revisión 3.10 (LA BARRA LLEGA AL 100):
-   - LA BARRA SE QUEDABA EN UN 10-15% Y MORÍA SIN COMPLETARSE. Tres
-     defectos encadenados: (1) los tics de lectura caían dentro de la
-     ventana de throttle (62 ms) que abre el primer tic — la página hex
-     se lee en dos trozos de 4 MB en pocos milisegundos y el throttle se
-     comía ambos: la barra jamás pasó del tic inicial; (2) al acabar la
-     lectura la barra pasaba a MARQUEE para cubrir la construcción, y la
-     entrega final (EM_SETHANDLE del volcado) bloquea el hilo UI: el
-     bloque verde —un 10-15% del ancho de la barra— se congelaba junto al
-     borde izquierdo durante segundos, y la barra parecía clavada en un
-     10-15% que nunca llegaba a 100; (3) nada escribía jamás un 100%: la
-     barra se retiraba sin completarse.
-   - UNA SOLA ESCALA DETERMINADA PARA TODA LA CARGA. El total pasa a ser
-     "bytes de la página + caracteres estimados de su construcción"
-     (EstBuildChars: hex x4.25, UTF-16 /2, texto 1:1). Sobre ella
-     escriben los tics de lectura (trozos de 4 MB), un tic FORZADO de fin
-     de lectura —aterriza la barra donde el throttle dejó los trozos sin
-     pintar— y tics de CONSTRUCCIÓN nuevos: el bucle del volcado hex
-     avisa cada 4096 líneas (64 KB de página) con los caracteres ya
-     escritos, así el tramo lento de CPU sube la barra en vez de esconder
-     un marquee. El tic inicial medía el FICHERO ENTERO (64 KB sobre
-     200 MB: primer tic en torno al 0%) mientras los tics de trozo medían
-     la página: dos escalas para la misma barra — ahora una.
-   - EL 100% EXISTE: con la página construida, el worker manda un tic
-     forzado a 1000 permille antes del WM_APP_LOADDONE. El intercambio
-     EM_SETHANDLE bloquea después el hilo UI sin poder repintar: ahí la
-     barra se ve LLENA —la señal honesta de "terminando"—, no un bloque
-     marquee congelado. stdin conserva su marquee: con total desconocido
-     un 100% determinado sería un invento.
-   - SOLO UN TIC REAL MUESTRA LA BARRA: LoadProgressPost marca bBarPosted
-     en el LoadJob y el 100% forzado no sale si ningún tic la levantó —
-     una carga pequeña no parpadea.
-
-   Novedades de la revisión 3.09 (HEX VE LA CARGA):
-   - LA VISTA HEX TAMBIÉN PINTA SU PRIMERA PANTALLA MIENTRAS CARGA. 3.08
-     la saltaba creyendo que su lectura limitada (8 MB) era todo el
-     coste, pero construir el volcado (x4.25) y entregarlo añade tiempo
-     visible en ficheros reales: binario grande = pantalla en blanco.
-     El preview de la ventana de detección (64 KB) vale ahora para hex
-     igual que para los textos y viaja con la base y el tamaño de la
-     ventana, de modo que la columna de offsets ya está en la primera
-     pintada (GutterWidth responde 0 mientras cbFile es 0).
-   - LA BARRA DE PROGRESO SUBE AL EMPEZAR LA LECTURA LARGA, no tras el
-     primer trozo de 4 MB: con el tope hex (8 MB) la lectura entera son
-     dos trozos y el primer tic caía en el ~50% de una lectura de
-     milisegundos — la barra no llegaba a verse. Un tic inicial (~1%)
-     la levanta en cuanto la fase 2 va a leer de verdad, con el mismo
-     umbral de "resto con sentido" que el preview (256 KB).
-
-   - LA BARRA VIVE TODA LA CARGA, no solo la lectura: al terminar de
-     leer, el worker manda un marquee FORZADO (sin throttle) y la barra
-     anima mientras se construye el volcado o se decodifica la página,
-     fases sin tics naturales. La barra se retira al FINAL de
-     ApplyLoadResult (tras la entrega), no en WM_APP_LOADDONE, y el
-     status escribe su estado definitivo ANTES de la entrega: el tramo
-     congelado del EM_SETHANDLE ya nunca enseña "Loading..." sin barra.
-
-   Novedades de la revisión 3.08 (BARRA DE PROGRESO, PRIMERA PINTADA Y X86):
-   - BARRA DE PROGRESO EN LA CARGA. El trozo derecho de la barra de estado
-     (donde vive "0 bytes") acoge ahora un control de progreso real: el
-     worker mide la lectura de la página y manda permille (~16 tics/s) por
-     WM_APP_LOADPROGRESS; la barra aparece con el PRIMER tic (una carga
-     pequeña no llega a parpadear) y se retira en WM_APP_LOADDONE. Cuando
-     el total es desconocido (stdin) la barra pasa a marquee (comctl32 6,
-     la misma dependencia del manifest). El grip de redimensionar conserva
-     su hueco: el control le deja ~18 px a la derecha.
-   - PRIMERA PINTADA MIENTRAS CARGA. La ventana ya no mira una pantalla en
-     blanco hasta el fin de la lectura: en cuanto el worker tiene la
-     ventana de detección y la codificación decidida, decodifica ese
-     trozo, lo normaliza EN el worker y lo manda por WM_APP_LOADPREVIEW;
-     el hilo UI lo entrega con el EM_SETHANDLE de siempre y el principio
-     del fichero —varias pantallas— se lee MIENTRAS el resto de la página
-     sigue llegando del disco. La página completa la sustituye al
-     aterrizar. 3.09: la vista hex TAMBIÉN la usa (el volcado y su
-     entrega cuestan encima de la lectura). El salto del tail no la
-     usa (acaba en el final, no en el principio);
-     las páginas y stdin sí (stdin pinta con la primera ventana llena,
-     aunque el pipe siga aspirando). El preview viaja con el número de
-     serie del trabajo (uSeq): un mensaje en cola de un job sin hilos ya
-     no puede pintarse encima de la carga siguiente.
-   - X86: LECTURAS PARTIDAS DE 64 BITS. g_qwSearchPos (volatile ULONGLONG)
-     lo escribía el worker de Find Bytes y lo leía el hilo UI: en Win32
-     son dos mitades de 32 bits y el "Searching..." podía enseñar un
-     número roto. La posición viaja ahora DENTRO del mensaje (wParam =
-     parte baja, lParam = parte alta) y el global se ha ido. Los cuatro
-     contadores de /timing bajan a DWORD (los milisegundos caben de
-     sobra): la misma carrera, con menos alcance.
-   - MANIFEST: supportedOS suma los GUID de Windows 7 y Windows 8 (el
-     suelo del programa es 7 desde 2.98): sin ellos un Windows 7 trataba
-     el ejecutable como legado. Versión 3.08.0.0.
-   - SIMPLIFICACIÓN: InitInstance pierde los dos CreateWindow gemelos
-     (una sola llamada con la posición calculada antes); el progreso de
-     la carga sale de UN helper (LoadProgressPost) con el throttle en el
-     propio LoadJob. Ni menú ni aceleradores cambian: el .rc 3.06 vale
-     tal cual (su cabecera solo se actualiza). APP_VERSION dice "3.08".
-
-   Novedades de la revisión 3.07 (REVISIÓN: COLA HEX, PORTAPAPELES, GOTO Y RENDIMIENTO):
-   - LA ÚLTIMA PÁGINA HEX PERDÍA HASTA 15 BYTES DEL FINAL DEL FICHERO.
-     LastPageBase devolvía cbSize - CB_HEX_MAX y LoadPage alineaba esa base
-     hacia ABAJO: con un tamaño de fichero que no casara con el módulo 16,
-     la "última" página terminaba 1..15 bytes ANTES que el fichero y ninguna
-     otra página podía enseñar esos bytes (Ctrl+Fin, Tail File, /tail y el
-     reanclaje del temporizador compartían el hueco). La base de la última
-     página hex se alinea ahora hacia ARRIBA: la página cubre siempre el
-     final REAL del fichero, y los pocos bytes empujados delante siguen a un
-     salto (Previous Page aterriza antes de ellos, Next Page los vuelve a
-     cubrir). El resto de vistas no se alinea y no cambia en nada.
-   - VIEW CLIPBOARD AS FILE DURANTE UNA CARGA: CARRERA Y FUGA. El portapapeles
-     construye sus bytes EN el hilo UI sin pasar por la puerta de cargas: con
-     una carga en vuelo reseteaba el visor bajo el worker y, al aterrizar,
-     ApplyLoadResult sobrescribía pFileBytes SIN liberar el bloque del
-     portapapeles (sólo BeginLoadJob libera el anterior) y el fichero
-     cargado reemplazaba el portapapeles en pantalla sin decir nada. Ahora
-     se niega con el mismo aviso que Load File, como ya hacía con Find Bytes
-     desde 3.05.
-   - GO TO / FIND BYTES EN EBCDIC: LÍNEAS FANTASMA. LineAtOffset contaba saltos
-     de línea en los bytes 0x0A/0x0D del crudo... que el decodificador EBCDIC
-     convierte en U+FFFD (su tabla jamás produce CR ni LF): el texto
-     decodificado es UNA línea, EM_LINEINDEX respondía -1 para líneas
-     inexistentes y el clampeo defensivo dejaba el caret en 0 sin explicar
-     nada. EBCDIC responde ahora la línea honesta (0) sin escanear nada.
-   - EL AVISO DE ESTADO PODÍA QUEDARSE PARA SIEMPRE. StatusFlash ("Bookmark
-     set.", la línea de /timing...) escribe la parte 0 sin tocar la cache de
-     UpdateStatusBar: si el siguiente movimiento del caret no cambiaba
-     caret/tamaño/carga, la actualización se retiraba por la cache y el
-     aviso seguía en pantalla hasta que algo SÍ cambiara (clic en el mismo
-     sitio: para siempre). Un flag fuerza la reescritura en la actualización
-     siguiente.
-   - FIND BYTES: "PATTERN NOT FOUND" MENTÍA DOS VECES. Si el fichero desaparecía
-     después de cargarlo (o no había memoria para el buffer de 1 MB), el hilo
-     respondía "no encontrado". Nuevo código 2 = "no se pudo escanear".
-   - BUCLE DE MENSAJES: msg SIN INICIALIZAR. Un GetMessage que fallara de
-     entrada (-1) salía del bucle leyendo msg.wParam sin escribir: MSG a cero.
-   - RENDIMIENTO: LINEATOFFSET UTF-16. Cada Go To y cada acierto de Find Bytes
-     caminaba hasta 16 millones de unidades en el hilo UI (página UTF-16 de
-     32 MB): ahora son las dos cadenas memchr de paridad que el contador CRLF
-     ya usaba (el escaneo SIMD del CRT, el mismo truco de 3.02/O3): ~3x.
-   - (Compatibilidad: ni menú ni aceleradores cambian; el .rc 3.06 vale tal
-     cual. APP_VERSION ya dice "3.07"; el manifest puede subir a 3.07.0.0.)
-
-   Novedades de la revisión 3.06 (REVISIÓN A FONDO: 4 CORRECCIONES Y RENDIMIENTO):
-   - COLUMNA DE LÍNEAS DESCUADRADA. DeliverTextToEdit coloca el control ANTES
-     de entregar el texto (3.03) y GutterWidth() cuenta las líneas del texto
-     que hay en ese momento: el viejo, vacío tras ResetViewer. Con View >
-     Line Numbers activo y más de 9.999 líneas, la columna se pintaba una
-     cifra más ancha que el hueco reservado y tapaba el primer carácter del
-     texto. Ahora, con la columna de líneas activa, el control se recoloca
-     tras la entrega (siempre dentro del bloque WM_SETREDRAW(FALSE)).
-   - PGDN SALTABA BYTES. Cargado un texto de 32 MB y cambiado a Hex, la vista
-     muestra 8 MB pero cbFile sigue valiendo 32 MB: la página siguiente
-     arrancaba en +32 MB y los bytes 8..32 MB no se veían NUNCA. ChangePage
-     avanza ahora lo que cabe en la vista activa; el seguimiento del final
-     del tail usa la misma medida.
-   - WORD WRAP DEJABA EL TECLADO MUERTO. RecreateEditControl destruye el
-     control que tiene el foco; el foco pasaba a la ventana principal y su
-     WM_SETFOCUS reenviaba a un hEdit ya destruido. Tras el cambio las
-     flechas y PgUp/PgDn no hacían nada hasta hacer clic. Ahora el control
-     nuevo recibe el foco.
-   - CTRL+MAYÚS+INICIO/FIN. El subclass los trataba como Ctrl+Inicio/Fin
-     (salto de página del fichero) y se perdía la extensión de selección
-     clásica del EDIT. Con Mayús pulsado vuelve a mandar el EDIT.
-   - RENDIMIENTO: FIND (F3) EN MAYÚSCULAS/MINÚSCULAS. StrStrIW compara carácter
-     a carácter con ChrCmpIW (locale incluido): del orden de decenas de MB/s.
-     Con un patrón que empieza por ASCII, el bucle busca el primer carácter en
-     sus dos formas y sólo confirma el resto de los candidatos (ChrCmpIW sólo
-     donde dos caracteres difieren): mismo resultado, mucho más rápido en 32M
-     de caracteres. Patrón no ASCII: sigue StrStrIW.
-   - RENDIMIENTO: NORMALIZACIÓN CRLF. El copiador procesaba cada WCHAR con tres
-     comparaciones y un almacenamiento; ahora localiza cada tramo sin EOL con
-     un escaneo corto y lo mueve con UN memcpy (el caso típico: log con LF
-     solos, una línea cada ~80 caracteres).
-   - RENDIMIENTO: SALIDA Y REDIMENSIONADO. SaveSettings hacía ~25 llamadas
-     WritePrivateProfileString (cada una reabre, reescribe el INI y despierta
-     al antivirus): ahora son DOS WritePrivateProfileSectionW. WM_SIZE sólo
-     rehace las partes de la barra de estado y su texto cuando cambia el
-     ANCHO (arrastrar el borde inferior ya no pregunta al EDIT por línea y
-     columna en cada pixel).
-   - ROBUSTEZ: el bucle de mensajes sale con GetMessage <= 0 (un -1 hacía
-     girar el bucle sobre un MSG sin inicializar).
-
-   Novedades de la revisión 3.05 (TERCERA PASADA: SIMPLIFICAR Y ACELERAR):
-   - LA PASADA CRLF YA NO CAMINA EL TEXTO DECODIFICADO EN UTF-16.
-     CountCRLFExpansionUtf16 cuenta la expansión sobre los BYTES crudos con
-     memchr (la mitad EOL de cada unidad va en el escaneo SIMD; la paridad
-     descarta los 0x0A/0x0D que viven DENTRO de un carácter, como U+0A00),
-     y PlanCRLFPass concentra la decisión para TODAS las vistas: el worker
-     deja de recorrer hasta 16M WCHAR por fichero UTF-16 y el portapapeles
-     deja de pagar su pasada WCHAR en el hilo UI en cada carga.
-   - LOS CAMBIOS DE VISTA SE PLANIFICAN IGUAL QUE UNA CARGA. ApplyView
-     entregaba el texto sin plan: ANSI/UTF-8 pagaban el escaneo completo y
-     EBCDIC — que nunca produce \r ni \n — pagaba UNA PASADA ENTERA INÚTIL
-     de 32M caracteres en cada switch. Ahora todo el programa pregunta al
-     mismo PlanCRLFPass.
-   - UNA RAMA UTF-16 EN VEZ DE DOS: las ramas LE y BE de BuildViewText eran
-     40 líneas gemelas (BOM, recorte, surrogate colgante, copia); una sola
-     con el orden de bytes como parámetro.
-   - 2 CORRECCIONES: Ctrl++ / Ctrl+- NO HACÍAN NADA en los teclados donde
-     '+' y '-' viven detrás de Shift (el estadounidense, entre otros):
-     TranslateAccelerator compara Shift/Ctrl/Alt de forma EXACTA y la tabla
-     sólo traía la variante CONTROL; cada una lleva ahora su gemela
-     CONTROL|SHIFT (Ctrl+= a secas y el numpad siguen valiendo). Y OOM en
-     BuildViewText almacenaba el bloque nulo de AllocViewText y escribía en
-     él — un access violation que sólo los abrigos SEH sobrevivían (el del
-     portapapeles ni ese camino cubría): ahora responde FALSE y cada
-     llamador muestra su aviso de memoria.
-   - CARRERA RESIDUAL, FUERA: el hilo de Find Bytes escanea su PROPIA copia
-     de la ruta (g_szSearchFile) en vez de g_szCurrentFile: la única
-     ventana que quedaba (un ResetViewer desde el camino de fallo de
-     SetView) se cierra con una copia.
-   - SIMPLIFICACIÓN: BuildIniPath pierde el escáner de barras a mano
-     (PathRemoveFileSpecW; shlwapi ya estaba incluida y enlazada);
-     IsBinaryData pierde dos guardas redundantes (memchr con cb==0 ya
-     responde NULL y cero controles nunca gana la regla del 10%);
-     LoadFileSync pasa a LoadStdin — es asíncrono desde 3.02 y el nombre
-     mentía; el About ya no dice "paginas" en mitad de una frase inglesa.
-
-   Novedades de la revisión 3.04 (SEGUNDA PASADA: SIMPLIFICAR Y ACELERAR):
-   - LA PASADA CRLF YA NO ESCANEA DOS VECES. El worker cuenta la expansión
-     sobre los BYTES crudos con memchr (CountCRLFExpansion, SIMD) y
-     NormalizeNewlines repetía el MISMO recuento carácter a carácter sobre
-     el texto decodificado (hasta ~32M WCHAR por carga). Ahora recibe la
-     cifra hecha (cExpandKnown) y salta su pasada de detección: un fichero
-     con EOL mixtos paga una pasada de copia, no dos escaneos más la copia.
-   - DETECTORES MÁS DELGADOS: UTF-16 sin BOM pierde el contador de
-     "tormenta de controles" (regla muerta: todo control cuenta también
-     como no-imprimible, así que la regla del ≤10% no-imprimible ya la
-     implica; un contador y dos ramas menos por palabra); el NUL binario
-     de IsBinaryData sale por memchr (SIMD, y para en el primero); el fin
-     de cadena del portapapeles va por memchr (ANSI) y wmemchr (UTF-16).
-   - SIMPLIFICACIÓN: la medida de página "(iView==HEX)?CB_HEX_MAX:
-     CB_TEXT_MAX" vivía repetida en 6 sitios y la base "(cb>cbPage)?
-     cb-cbPage:0" en 4: PageCapBytes() y LastPageBase() las centralizan
-     (LoadPage aprovecha para clampear y alinear ANTES de BeginLoadJob,
-     mientras iView/g_cbFileTotal aún son los de la página en pantalla);
-     GetViewSubMenu y GetFileSubMenu eran dos gemelos: un solo
-     FindSubMenuWithCommand.
-   - 3 CORRECCIONES: View Clipboard as File durante Find Bytes entraba sin
-     mirar g_bInByteSearch y su ResetViewer borraba g_szCurrentFile
-     mientras el hilo de búsqueda la leía para CreateFileW (carrera; ahora
-     se niega con aviso, como todas las cargas); Find Bytes con otra
-     búsqueda ya en marcha respondía en silencio (ahora avisa, la misma
-     cortesía que Go To desde 3.02); Ctrl+PgDn/PgUp sobre stdin/clipboard
-     se consumían sin efecto — sin páginas que saltar, caminan el caret a
-     los extremos de lo mostrado, como Ctrl+Fin/Inicio (3.01).
-
-   Novedades de la revisión 3.03 (REVISIÓN EXTERNA: ATAJOS, TAIL Y CORRECCIÓN):
-   - LOS ACELERADORES NO LLEGABAN. El bucle de mensajes llamaba a
-     TranslateAccelerator con msg.hwnd — el control EDIT, que es quien
-     tiene el foco siempre — así que el WM_COMMAND traducido se enviaba
-     AL EDIT y moría en su DefSubclassProc: Ctrl+G no abría Go To,
-     Ctrl+PgDn/PgUp no paginaban, Ctrl+O, Ctrl+F, F3, F2, Ctrl+Shift+F,
-     Ctrl+T... NADA respondía con el foco en el visor. Ahora se traduce
-     contra la ventana principal, como pide el patrón clásico del bucle.
-   - PGDN/PGUP A SECAS. El menú anuncia PgDn/PgUp y las teclas las
-     atiende el subclass con semántica de pager: la página en pantalla
-     se desplaza mientras pueda y en su último/primer lleno de pantalla
-     carga la página siguiente/anterior del fichero (Ctrl+PgDn/
-     Ctrl+PgUp siguen valiendo como salto directo). Los aceleradores
-     VK_NEXT/VK_PRIOR salen de la tabla: interceptaban la tecla antes
-     de que el subclass pudiera desplazarse.
-   - TAIL: la última página no enseñaba NUNCA los datos que llegaban.
-     El temporizador recargaba la MISMA ventana; con la página llena,
-     los bytes que entraban más allá del tope quedaban fuera para
-     siempre. Ahora, si se sigue el final y la página está llena, la
-     recarga se reancla al nuevo final del fichero, como tail -f.
-   - 3 CORRECCIONES: FICHERO VACÍO abría con el aviso "Not enough
-     memory" (el descriptor marcaba OOM cuando lo que pasaba es que no
-     había texto QUE decodificar: cbFile==0 no es falta de memoria).
-     ITEM 10 DE RECIENTES: su formato "1&0  %s" se alimentaba con DOS
-     argumentos y wsprintfW consumía el int del número como puntero del
-     %s: al entrar el décimo fichero en la lista, el proceso moría al
-     construir el menú. PORTAPAPELES ANSI: un texto CF_TEXT de más de
-     ~16M caracteres pedía a MultiByteToWideChar más de lo que cabía en
-     el buffer: la conversión fallaba y se mostraban bytes SIN
-     INICIALIZAR como si fueran el portapapeles (el límite de bytes se
-     aplica antes de medir y un fallo de conversión ya no fabrica
-     contenido).
-   - CREATEFILE: se abre con FILE_SHARE_WRITE y FILE_SHARE_DELETE
-     además de FILE_SHARE_READ: un visor no puede impedir que el logger
-     siga escribiendo el log que se está viendo ("in use" era la queja
-     típica sobre logs vivos). Sobre MÁS velocidad: FILE_FLAG_SEQUENTIAL_
-     SCAN ya estaba; el peldaño siguiente (FILE_FLAG_NO_BUFFERING)
-     exige lecturas alineadas al sector y mata las recargas pequeñas del
-     tail: no compensa. El ancho real de lectura es el chunk de 4 MB.
-   - LIMPIEZA Y RENDIMIENTO: el subclass pierde la rama Ctrl+Plus/
-     Ctrl+Minus (la tabla de aceleradores intercepta la tecla antes de
-     que llegue: rama muerta desde que existe el acelerador); el Go To
-     pierde ES_NUMBER (bloqueaba teclear el 0x que el propio cartel
-     anuncia; ParseU64 es quien valida de verdad); DeliverTextToEdit
-     coloca el control DENTRO del bloque WM_SETREDRAW(FALSE): una
-     entrega produce UN repintado, no dos; BuildHexText escribe el
-     hueco central fuera del bucle de parejas (ocho comparaciones
-     menos por cada línea del dump).
-
-   Novedades de la revisión 3.02 (REVISIÓN EXTERNA: CORRECCIÓN Y RENDIMIENTO):
-   - 4 CORRECCIONES: /TAIL NO SALTABA AL FINAL. El switch armaba el
-     temporizador pero nada aplicaba bTailJump a la primera carga: el
-     fichero abría en la página 0 y el tail la recargaba para siempre
-     (el README prometía "jumps to the end when a file loads"). Ahora la
-     primera carga que aterriza consume un salto a la última página.
-     GOTO HUÉRFANO: un Go To rechazado durante un Find Bytes dejaba
-     g_qwPendingGoto armado y la siguiente página que sí cargara
-     posicionaba el caret en un offset pedido minutos antes (LoadPage
-     ahora responde si aceptó el trabajo y el goto sólo se arma entonces).
-     AVISO HEX: el "[Hex view: showing bytes...]" iba pegado a la última
-     línea del dump (el p -= 2 le quitaba su CRLF); ahora es párrafo
-     propio, como en las vistas de texto. PARSEU64: 19-20 dígitos
-     desbordaban en silencio el 2^64; ahora se rechazan.
-   - RENDIMIENTO: STDIN ASÍNCRONO (la carga del pipe corría DENTRO de
-     WM_CREATE: "type enorme.log | 4more" mantenía la ventana sin existir
-     hasta el EOF, el mismo cuelgue que la carga asíncrona de ficheros
-     resolvió en 2.93); la DECISIÓN CRLF corre sobre los BYTES crudos con
-     memchr (en ANSI/UTF-8 cada \r/\n es 1 byte = 1 carácter y los bytes
-     de continuación UTF-8 nunca colisionan: mismo cExpand, media memoria
-     y escaneo SIMD del CRT; EBCDIC ya no paga la pasada: su tabla nunca
-     produce \r ni \n); LineAtOffset usa la misma cadena de memchr que
-     Find Bytes (Go To y los saltos de Find Bytes, ~3x); el dump hex
-     activa la LUT de pares también en Win32 (786 KB constantes no
-     comprometen los 2 GB) y su columna ASCII va por tabla de 256; el
-     gutter sale con UN PolyTextOut en vez de ~40-160 TextOutW por
-     repintado.
-   - LIMPIEZA: teclas muertas del subclass (wParam == '=' / '_', códigos
-     que ningún layout produce para esas teclas); SDKDDKVer.h fuera del
-     .h (llegaba después de windows.h, donde ya no hace nada).
-
-   Novedades de la revisión 3.01 (PIPE Y CTRL+INICIO/FIN):
-   - STDIN: EOF DE PIPE. "type fichero | 4more64" terminaba en "Could not
-     read the whole file." aunque el contenido llegara completo: en un pipe
-     el fin no es ReadFile devolviendo 0 bytes, sino ReadFile FALLANDO con
-     ERROR_BROKEN_PIPE/ERROR_NO_DATA cuando el escritor cierra su extremo.
-     Ese fallo se trataba como error de lectura. Ahora, en stdin, esos dos
-     códigos significan "fin normal del stream": el aviso desaparece y lo
-     leído se muestra tal cual (la redirección "4more < fichero" ya era un
-     handle de disco y seguía funcionando).
-   - CTRL+INICIO/CTRL+FIN CON STDIN/CLIPBOARD: el subclass consume las
-     teclas y JumpFilePage se retiraba sin hacer nada al no haber fichero
-     que paginar... y las teclas quedaban muertas aunque hubiera texto en
-     pantalla. Sin páginas que saltar, el caret salta ahora al principio /
-     final de lo mostrado (el significado clásico de EDIT). Y en un fichero
-     que YA está en su primera página, Ctrl+Inicio sube el caret sin
-     recargar los mismos bytes (antes: recarga y repintado completos).
-
-   Novedades de la revisión 3.00 (REVISIÓN A FONDO: CORRECCIÓN Y RENDIMIENTO):
-   - 3 BUGS: el gutter hex pedía siempre 7 dígitos de más (el bucle contaba
-     8 y encima sumaba una cifra por magnitud: columna desmedida);
-     BuildIniPath podía desbordar g_szIniPath con un ejecutable en un
-     directorio de ~255 caracteres; el WM_PAINT del padre validaba la zona
-     del gutter sin pintarla (píxeles viejos al destapar la ventana).
-   - RENDIMIENTO: la normalización CRLF pasa al hilo de trabajo (la vista
-     hex adopta el texto directamente: cero escaneos de ~36M caracteres en
-     el hilo UI); Find Bytes usa memchr (el escaneo vectorizado/SIMD del
-     CRT) para saltar de candidato en candidato y memcmp solo para
-     confirmar; el locale de los números formateados se consulta UNA vez
-     por sesión (magic static de C++11, thread-safe: también lo usa el
-     worker).
-   - SIMPLIFICACIÓN: los dos pintores de columna y su selector eran tres
-     gemelos: una sola PaintGutter; SearchNext reutiliza FindPatternFrom y
-     pierde el duplicado del wrap-around; variable muerta bAdopted fuera;
-     NormalizeNewlines responde la longitud (NULs embebidos) y reporta OOM
-     como nullptr en vez de desreferenciar el fallo de AllocViewText.
-
-   Novedades de la revisión 2.99 (DETECCIÓN, VENTANA Y LOOK MODERNO):
-   - UTF-8 SIN BOM: DetectDefaultView solo confiaba en el BOM: todo UTF-8
-     sin BOM abría como ANSI y se leía "cambiÃ³". LooksLikeUTF8Text valida
-     ahora las secuencias multi-byte de la ventana de detección: una sola
-     secuencia inválida descarta (los acentos ANSI casi siempre la rompen:
-     un 0xE9 suelto seguido de espacio o letra no es secuencia válida), y se
-     exige al menos una secuencia multi-byte (el ASCII puro es válido en
-     ambas y sigue abriéndose como ANSI).
-   - VENTANA MAXIMIZADA RESTAURADA: el INI ya guardaba Maximized=1 desde la
-     2.94, pero InitInstance nunca lo aplicaba: la ventana se abría siempre
-     en normal. Ahora SW_SHOWMAXIMIZED se aplica al arrancar (salvo que el
-     acceso directo pida minimizado). Y la validación del rectángulo se
-     simplifica a un MonitorFromRect: menos código y una ventana guardada en
-     un monitor secundario ya no se rechaza (SPI_GETWORKAREA sólo describe
-     el primario).
-   - MANIFEST: 4More.manifest embebido desde el .rc (RT_MANIFEST, "1 24"):
-     dependencia de Common-Controls 6.0, que era justo lo que faltaba para
-     que botones, radios y checkboxes de los diálogos (About, Go To, Find
-     Bytes) pinten con el look moderno de Windows en vez del clásico de
-     1995. Añade supportedOS (8.1/10/11) y DPI aware de sistema. MSVC: un
-     proyecto Visual Studio incrusta POR DEFECTO su propio manifiesto
-     (UAC) con el mismo id 1 e idioma 0x0409, y el enlace muere con
-     "recurso duplicado (MANIFEST, 1)" / "error durante la conversión a
-     COFF" (CVT1100/LNK1123). Dos arreglos: Enlazador → Archivo de
-     manifiesto → Crear manifiesto = No (/MANIFEST:NO, recomendado: el del
-     .rc queda como único), o definir NO_RC_MANIFEST en el preprocesador de
-     Recursos para saltar la copia del .rc y dejar que VS incruste
-     4More.manifest él mismo (Herramienta Manifiesto → Manifiesto de
-     entrada). MinGW no se ve afectado: windres no genera manifiesto propio.
-   - SIMPLIFICACIÓN: la validación de posición de LoadSettings pierde el
-     IntersectRect con el área de trabajo (MonitorFromRect ya responde
-     "¿hay monitor bajo este rectángulo?"); fuentes de los diálogos
-     MS Shell Dlg 2 (la clásica de los controles v6).
-
-   Novedades de la revisión 2.98 (RENDIMIENTO: el estudio de por qué V es instantáneo):
-   - EM_SETHANDLE: LA ENTREGA SIN COPIA. El texto de la vista ya no se entrega
-     con WM_SETTEXT (que hace que el control EDIT copie decenas de MB a su
-     propio buffer en el hilo UI): el texto se construye directamente en un
-     bloque móvil GlobalAlloc y se entrega con EM_SETHANDLE, que lo ADOPTA
-     tal cual. Menos memoria de punta (una copia menos del texto completo),
-     menos memcpy en el hilo UI, arranque y cambio de vista más rápidos.
-   - SWITCH /TIMING: INSTRUMENTACIÓN. "4More big.log /timing" mide y muestra
-     en la barra de estado los milisegundos de cada fase (read · decode ·
-     normalize · deliver), en cargas y en cambios de vista. Sin datos no hay
-     optimización: esto dice exactamente dónde están los segundos en tu
-     máquina. (El análisis dice que el cuello de botella restante es la
-     indexación de líneas del propio control EDIT; V lo evita pintando sólo
-     lo visible — el paso siguiente sería una vista hex pintada a demanda.)
-   - FIX .RC (2.97): sin #include "targetver.h" (fichero del asistente de
-     Visual Studio, no del SDK): sólo windows.h + resource.h, compilable con
-     rc.exe y windres.
-   - BÚSQUEDA DE BYTES MULTHILO (2.96): el escaneo del fichero crudo corre
-     en su propio hilo; la ventana NUNCA se congela, ESC cancela al instante,
-     progreso limitado a ~10 avisos/s, resultado vía WM_APP_SEARCHDONE.
-   - HEX 100 GB (2.96): Ctrl+Home / Ctrl+End saltan a la primera / última
-     página del FICHERO; Ctrl+End deja el caret en el último byte; el gutter
-     se ensancha solo a partir de 8 dígitos.
-   - CTRL+ / CTRL- DE TECLADO (2.96): el subclass atiende también la fila
-     principal (VK_OEM_PLUS/MINUS, '=' y '_'); el acelerador cubre el numpad.
-   - RECIENTES (2.96): File > Recent Files, MRU de 10 (ficheros, clipboard,
-     stdin) persistido en 4More.ini; "(stdin)" explica que no se reproduce.
-   - PREFERENCIAS (2.94): fuente, números de línea, wrap, tail, posición de
-     ventana y recientes en 4More.ini; los switches CLI prevalecen.
-   - SIMPLIFICACIÓN (2.97): ScanFileBytes y su bombeo de mensajes eliminados
-     (reemplazado por el hilo); global iGutterW eliminado (GutterWidth() es
-     la única fuente de verdad); manejadores muertos Undo/Cut/Paste/Clear
-     eliminados (el control es ES_READONLY); decimales regionales fix
-     (NumDigits=0, separadores del locale).
    ============================================================================================ */
 
 #include "4More.h"
@@ -1614,7 +117,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"5.9.14"
+#define APP_VERSION L"6.00"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -1690,8 +193,8 @@ bool g_bTailJumpFirst = false;                  // 3.02: /tail o INI: la PRIMERA
 int g_iForcedView = -1;                         // /hex /utf8... initial view from the command line (first load only)
 DWORD* g_pBookmarks = nullptr;                  // bookmarked lines (current view), kept sorted
 ULONGLONG* g_pBookmarkOffs = nullptr;           // 5.9.2: absolute file offset of each bookmarked
-                                                // line's first byte: the anchor that survives
-                                                // a view switch (parallel to g_pBookmarks)
+// line's first byte: the anchor that survives
+// a view switch (parallel to g_pBookmarks)
 int g_cBookmarks = 0, g_cBookmarksMax = 0;
 ULONGLONG g_qwPendingGoto = (ULONGLONG)-1;     // byte offset to position on when its page lands
 bool g_bInByteSearch = false;                   // raw-file byte scan in progress: blocks loads and the tail timer
@@ -1719,7 +222,7 @@ struct TextViewState
 {
     WCHAR* pText;           // decoded + normalized text (CRLF-terminated). Owned externally (the view text buffer).
     int    cch;             // character count (not including final NUL)
-    int*   pLineStarts;     // array of character offsets where each logical line starts. Owned here.
+    int* pLineStarts;     // array of character offsets where each logical line starts. Owned here.
     int    cLines;          // number of logical lines (size of pLineStarts)
     int    iSelStart;       // selection start (char offset)
     int    iSelEnd;         // selection end (caret position)
@@ -1734,18 +237,18 @@ struct TextViewState
     int    iPaintedSelLo;   // 5.5: selection range the last paint left on screen
     int    iPaintedSelHi;   //      (drives the repaint delta of a selection change)
     bool   bGutterDirty;    // 5.6: gutter labels stale (text/scroll changed): the next
-                            //      control paint must redraw them; selection-only and
-                            //      horizontal-only repaints skip the column entirely
+    //      control paint must redraw them; selection-only and
+    //      horizontal-only repaints skip the column entirely
     int    iPaintedRulerX;  // 5.7: horizontal scroll the ruler strip was last painted
-                            //      with: the strip repaints only when it changed (the
-                            //      parent's WM_PAINT repaints it unconditionally)
+    //      with: the strip repaints only when it changed (the
+    //      parent's WM_PAINT repaints it unconditionally)
     bool   bHilite;         // 5.8: View > Highlight Current Line (synced from g_bHiliteLine)
     HBRUSH hbrHilite;       // 5.8: the band brush (created/retired in TV_SyncState, like hbrGreen)
     HBRUSH hbrBookmark;     // 5.9: the bookmarked-line brush (created once in TV_SyncState)
     HBRUSH hbrBmDot;        // 5.9.1: the gutter dot's brush (created once, on first use)
     HPEN   hpenBmDot;       // 5.9.1: the dot's null pen (fill only, no outline)
     int    iPaintedCurLine; // 5.8: logical line the band was last painted on (-1 = none);
-                            //      TV_UpdateCurLine repaints only the rows that change
+    //      TV_UpdateCurLine repaints only the rows that change
 };
 
 static TextViewState g_tv = {};   // the one and only text view instance
@@ -1866,7 +369,7 @@ struct LoadJob
     // decode/normalization (two wmemchr passes, tens of ms on a 32-128 MB
     // page). The UI adopts it in TV_SetText with zero scanning: the whole
     // delivery is O(1) pointer swaps. Freed here if the UI never adopts it.
-    int*   pLineStarts = nullptr;               // cLines+... entries (see TV_BuildLineIndex)
+    int* pLineStarts = nullptr;               // cLines+... entries (see TV_BuildLineIndex)
     int    cLines = 0;                          // logical lines (0 = no index prebuilt)
     int    iMaxLineChars = 0;                   // longest logical line (SB_HORZ range)
     bool   bOpenFailed = false;                 // CreateFile failed
@@ -4048,30 +2551,40 @@ void RunLoadJob(LoadJob* pJob)
                     // neither EOF nor short reads exist on this path.
                     TVMappedView mvPage;
                     const bool bMapped = (!pJob->bStdin) && MapFileRange(hFile, pJob->qwBase, cbFinal, dwGran, &mvPage);
-                    while (cbTotal < cbFinal)
+                    if (bMapped)
                     {
+                        // 6.00: one memcpy for the remainder (head is already in the
+                        // buffer). Chunked copies only paid cancel granularity; a
+                        // single copy is faster and cancel is checked once before.
                         if (LoadCancelled())
                         {
                             bCancelled = true;
-                            break;
                         }
-                        DWORD cbChunk = cbFinal - cbTotal;
-                        // 3.19/3.20: CB_READ_CHUNK (4 MB). Larger chunks amortize
-                        // ReadFile syscall overhead. FILE_FLAG_SEQUENTIAL_SCAN
-                        // keeps read-ahead effective. Progress granularity: 8
-                        // ticks for 32 MB is plenty (the 16 ms poll interpolates).
-                        if (cbChunk > CB_READ_CHUNK)
-                        {
-                            cbChunk = CB_READ_CHUNK;
-                        }
-                        if (bMapped)
+                        else if (cbTotal < cbFinal)
                         {
                             CopyMemory(pJob->pBytes + cbTotal,
-                                mvPage.pView + (pJob->qwBase - mvPage.qwStart) + cbTotal, cbChunk);
-                            cbTotal += cbChunk;
+                                mvPage.pView + (pJob->qwBase - mvPage.qwStart) + cbTotal,
+                                cbFinal - cbTotal);
+                            cbTotal = cbFinal;
+                            LoadProgressPublish(pJob, cbTotal, cbPage + cchExp);
                         }
-                        else
+                        UnmapFileRange(&mvPage);
+                    }
+                    else
+                    {
+                        while (cbTotal < cbFinal)
                         {
+                            if (LoadCancelled())
+                            {
+                                bCancelled = true;
+                                break;
+                            }
+                            DWORD cbChunk = cbFinal - cbTotal;
+                            // CB_READ_CHUNK (4 MB): amortizes ReadFile; poll interpolates.
+                            if (cbChunk > CB_READ_CHUNK)
+                            {
+                                cbChunk = CB_READ_CHUNK;
+                            }
                             if (!ReadFile(hFile, pJob->pBytes + cbTotal, cbChunk, &cbRead, nullptr))
                             {
                                 bReadError = true;
@@ -4082,12 +2595,8 @@ void RunLoadJob(LoadJob* pJob)
                                 break;          // EOF (file shorter than reported)
                             }
                             cbTotal += cbRead;
+                            LoadProgressPublish(pJob, cbTotal, cbPage + cchExp);
                         }
-                        LoadProgressPublish(pJob, cbTotal, cbPage + cchExp);    // 3.10: permille of read+build
-                    }
-                    if (bMapped)
-                    {
-                        UnmapFileRange(&mvPage);
                     }
                 }
             }
@@ -4904,7 +3413,7 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
                 *p++ = szB[2];
             }
 #endif
-            *p++ = L' ';    // 3.20: fixed stray space after dereference operator
+            * p++ = L' ';    // 3.20: fixed stray space after dereference operator
             for (int i = 0; i < 16; i++)
             {
                 *p++ = am.w[q[i]];              // 3.02: LUT, sin compare-and-select
@@ -5536,7 +4045,7 @@ static unsigned __stdcall TVIndexFillProc(void* pParam)
 // the workers run; a failed _beginthreadex degrades per chunk (the
 // coordinator runs the orphan chunk inline after the wait), the same
 // fallback rule LaunchLoadJob applies to the whole job.
-static void TVIndexRunRounds(TVIndexChunk* aC, int nChunks, unsigned (__stdcall* pProc)(void*))
+static void TVIndexRunRounds(TVIndexChunk* aC, int nChunks, unsigned(__stdcall* pProc)(void*))
 {
     HANDLE aH[3];                           // nChunks <= 4: at most 3 workers
     // 5.9.9: indexed by CHUNK (k = 1..nChunks-1), not by worker slot — the
@@ -5758,10 +4267,10 @@ void TV_SetText(WCHAR* pText, int cch, int* pLineStarts, int cLines, int iMaxLin
         g_tv.iMaxLineChars = iMaxLine;
     }
     TV_SyncState();            // wrap/style/brush in step with the new view;
-                               // 5.9.10: its tail already refreshes the scroll
-                               // ranges (the 5.9.9 fix), so the explicit
-                               // TV_UpdateScrollRanges() call here was a
-                               // redundant second pass on every delivery.
+    // 5.9.10: its tail already refreshes the scroll
+    // ranges (the 5.9.9 fix), so the explicit
+    // TV_UpdateScrollRanges() call here was a
+    // redundant second pass on every delivery.
 }
 
 // 5.9.13: the create/retire half of the two flag-tied brushes (greenbar,
@@ -8023,27 +6532,67 @@ bool OffsetOfLine(DWORD iLine, ULONGLONG& rqw)
     }
     if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
     {
+        // 6.00: memchr chains (same break rules as LineAtOffset). Stop as soon
+        // as the iLine-th break is found so a deep bookmark does not walk the
+        // whole page unit-by-unit when EOLs are sparse.
         const DWORD iEol = (iView == VIEW_UTF16) ? 0u : 1u;   // byte of the unit carrying 0x0A/0x0D
+        const BYTE* pBase = pFileBytes;
+        const DWORD cbScan = (cbFile / 2) * 2;                 // whole 2-byte units only
         DWORD cFound = 0;
-        for (DWORD k = 0; k + 1 < cbFile; k += 2)
+        DWORD k = 0;
+        for (;;)
         {
-            bool bLF = (pFileBytes[k + iEol] == 0x0A && pFileBytes[k + (1 - iEol)] == 0x00);
-            bool bCR = (pFileBytes[k + iEol] == 0x0D && pFileBytes[k + (1 - iEol)] == 0x00);
-            if (!bLF && !bCR)
+            // Next candidate: earliest of next 0x0A / 0x0D from k, then accept
+            // only those that land on the EOL byte of a unit and have a zero
+            // pair byte (real UTF-16 CR/LF unit).
+            const BYTE* pA = (k < cbScan)
+                ? (const BYTE*)memchr(pBase + k, 0x0A, (size_t)(cbScan - k)) : nullptr;
+            const BYTE* pD = (k < cbScan)
+                ? (const BYTE*)memchr(pBase + k, 0x0D, (size_t)(cbScan - k)) : nullptr;
+            const BYTE* pB;
+            if (pA != nullptr && (pD == nullptr || pA < pD))
             {
-                continue;
+                pB = pA;
             }
-            if (bCR && k + 3 < cbFile &&
-                pFileBytes[k + 2 + iEol] == 0x0A && pFileBytes[k + 2 + (1 - iEol)] == 0x00)
+            else if (pD != nullptr)
             {
-                continue;               // CRLF: the CR is paid by its LF
+                pB = pD;
             }
-            if (iLine == cFound + 1)    // this is the iLine-th break
+            else
             {
-                rqw = g_qwBase + (ULONGLONG)k + 2;    // the line after this break unit
+                break;
+            }
+            DWORD kb = (DWORD)(pB - pBase);
+            // Advance past this hit even if it is not a valid unit (wrong parity).
+            k = kb + 1;
+            if ((kb & 1) != iEol)
+            {
+                continue;               // not the EOL byte of a unit
+            }
+            DWORD s = kb - iEol;        // start of the 2-byte unit
+            if (s + 1 >= cbScan || pBase[s + (1 - iEol)] != 0x00)
+            {
+                continue;               // not a real U+000A / U+000D unit
+            }
+            if (*pB == 0x0D)
+            {
+                // CRLF: the CR is paid by its LF unit — skip the CR only so the
+                // next hit lands on the LF and counts it (same rule as LineAtOffset).
+                if (s + 3 < cbScan &&
+                    pBase[s + 2 + iEol] == 0x0A && pBase[s + 2 + (1 - iEol)] == 0x00)
+                {
+                    k = s + 2;          // after the CR unit; LF is counted next
+                    continue;
+                }
+            }
+            // Counted break (lone CR, lone LF, or the LF of a CRLF).
+            if (iLine == cFound + 1)
+            {
+                rqw = g_qwBase + (ULONGLONG)s + 2;   // first byte of the next unit
                 return(true);
             }
             cFound++;
+            k = s + 2;                  // continue after this unit
         }
         rqw = g_qwBase + (ULONGLONG)cbFile;   // past the last break: the page end
         return(true);
@@ -8527,36 +7076,44 @@ bool LineAtOffset(ULONGLONG qwOff, int& riLine)
     }
     else                                    // ANSI, UTF-8: byte-oriented
     {
-        // 3.02 (O3): the same memchr chain Find Bytes already uses, in
-        // place of the per-byte walk (Go To and every Find Bytes hit
-        // pass here). Equivalent to the old loop: every \n counts one
-        // line break, and a \r NOT followed by \n counts one too, so
-        // CRLF stays ONE break.
-        const BYTE* p = pFileBytes;
+        // 6.00: one dual-pointer walk (same as OffsetOfLine). Every \n counts;
+        // a lone \r counts; CRLF is one break (CR skipped, LF counts). One
+        // pass over the prefix instead of two full scans.
+        const BYTE* pBase = pFileBytes;
         const BYTE* pEnd = pFileBytes + cbRel;
+        const BYTE* pN = (const BYTE*)memchr(pBase, 0x0A, (size_t)cbRel);
+        const BYTE* pR = (const BYTE*)memchr(pBase, 0x0D, (size_t)cbRel);
+        const BYTE* p = pBase;
         for (;;)
         {
-            const BYTE* pLf = (const BYTE*)memchr(p, 0x0A, (size_t)(pEnd - p));
-            if (pLf == nullptr)
+            if (pN != nullptr && pN < p)
+            {
+                pN = (const BYTE*)memchr(p, 0x0A, (size_t)(pEnd - p));
+            }
+            if (pR != nullptr && pR < p)
+            {
+                pR = (const BYTE*)memchr(p, 0x0D, (size_t)(pEnd - p));
+            }
+            const BYTE* pB;
+            if (pN != nullptr && (pR == nullptr || pN < pR))
+            {
+                pB = pN;
+            }
+            else if (pR != nullptr)
+            {
+                pB = pR;
+            }
+            else
             {
                 break;
             }
-            iLine++;                        // \n: a line break (half of CRLF or alone)
-            p = pLf + 1;
-        }
-        p = pFileBytes;                     // 5.9.14: the CR scan starts over (p sat after the LAST LF: lone CRs before it were never counted)
-        for (;;)
-        {
-            const BYTE* pCr = (const BYTE*)memchr(p, 0x0D, (size_t)(pEnd - p));
-            if (pCr == nullptr)
+            if (*pB == 0x0D && pB + 1 < pEnd && pB[1] == 0x0A)
             {
-                break;
+                p = pB + 1;                 // CRLF: pay at the LF
+                continue;
             }
-            if (pCr + 1 == pEnd || pCr[1] != 0x0A)
-            {
-                iLine++;                // lone \r: its own line break
-            }
-            p = pCr + 1;
+            iLine++;
+            p = pB + 1;
         }
     }
     riLine = iLine;
@@ -8913,86 +7470,86 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
     // map to if (1) / else if (0) as always.
     __try
     {
-    if (pView != nullptr)
-    {
-        ULONGLONG qwPos = 0;                      // file offset of the slice being scanned
-        while (!bFound && !bCancel)
+        if (pView != nullptr)
         {
-            if (qwPos >= cbSearch)
+            ULONGLONG qwPos = 0;                      // file offset of the slice being scanned
+            while (!bFound && !bCancel)
             {
-                break;                            // EOF: the whole view is scanned
+                if (qwPos >= cbSearch)
+                {
+                    break;                            // EOF: the whole view is scanned
+                }
+                ULONGLONG cbRest = cbSearch - qwPos;
+                DWORD cbWindow = (cbRest < (ULONGLONG)(CB_CHUNK + cbOverlap)) ? (DWORD)cbRest : (DWORD)(CB_CHUNK + cbOverlap);
+                ULONGLONG qwHit = 0;
+                if (ScanForPattern(pView + qwPos, cbWindow, qwPos, &qwHit))
+                {
+                    g_qwSearchResult = qwHit;
+                    bFound = true;
+                    break;
+                }
+                qwPos += CB_CHUNK;                    // one slice per pass: the overlap room re-covers the straddle zone
+                // Progress at ~10 Hz: PostMessage is cheap and the UI thread
+                // repaints at its own pace, decoupled from the scan speed.
+                // 3.08: the position travels IN the message (low/high halves) —
+                // no 64-bit global shared with the UI thread (torn reads on x86).
+                ULONGLONG qwNow = GetTickCount64();
+                if (qwNow >= qwNextPost)
+                {
+                    PostMessage(hWndMain, WM_APP_SEARCHPROGRESS, (WPARAM)(DWORD)qwPos, (LPARAM)(DWORD)(qwPos >> 32));
+                    qwNextPost = qwNow + 100;
+                }
+                // The single cancel check per chunk (ESC handler or WM_DESTROY).
+                bCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
             }
-            ULONGLONG cbRest = cbSearch - qwPos;
-            DWORD cbWindow = (cbRest < (ULONGLONG)(CB_CHUNK + cbOverlap)) ? (DWORD)cbRest : (DWORD)(CB_CHUNK + cbOverlap);
-            ULONGLONG qwHit = 0;
-            if (ScanForPattern(pView + qwPos, cbWindow, qwPos, &qwHit))
+        }
+        else
+        {
+            while (!bFound && !bCancel)
             {
-                g_qwSearchResult = qwHit;
-                bFound = true;
-                break;
+                DWORD cbRead = 0;
+                if (!ReadFile(hFile, pBuf + cbKeep, CB_CHUNK, &cbRead, nullptr) || cbRead == 0)
+                {
+                    break;                         // EOF (or read error): the scan is over
+                }
+                DWORD cbHave = cbKeep + cbRead;
+                // 3.00: memchr walks the buffer with the CRT's vectorized scan
+                // (SIMD on every modern toolchain) and memcmp only confirms the
+                // candidates it finds: several times faster than the old
+                // byte-at-a-time loop on big files, with identical results
+                // (verified case by case against the old loop, patterns crossing
+                // chunk borders included). Valid starts: 0 .. cbHave - cbPat.
+                ULONGLONG qwHit = 0;
+                if (ScanForPattern(pBuf, cbHave, qwBase, &qwHit))
+                {
+                    g_qwSearchResult = qwHit;
+                    bFound = true;
+                    break;
+                }
+                // 5.9.7: the old `if (!bFound)` wrapper here was dead code since the
+                // scan moved into ScanForPattern (a hit breaks out above; reaching
+                // this line means no hit). The carry runs unconditionally.
+                // Keep the tail a match could straddle, past the chunk border.
+                cbKeep = (cbHave > cbOverlap) ? cbOverlap : cbHave;
+                if (cbKeep > 0)
+                {
+                    MoveMemory(pBuf, pBuf + cbHave - cbKeep, cbKeep);
+                }
+                qwBase += (ULONGLONG)(cbHave - cbKeep);
+                // Progress at ~10 Hz: PostMessage is cheap and the UI thread
+                // repaints at its own pace, decoupled from the scan speed.
+                // 3.08: the position travels IN the message (low/high halves) —
+                // no 64-bit global shared with the UI thread (torn reads on x86).
+                ULONGLONG qwNow = GetTickCount64();
+                if (qwNow >= qwNextPost)
+                {
+                    PostMessage(hWndMain, WM_APP_SEARCHPROGRESS, (WPARAM)(DWORD)qwBase, (LPARAM)(DWORD)(qwBase >> 32));
+                    qwNextPost = qwNow + 100;
+                }
+                // The single cancel check per chunk (ESC handler or WM_DESTROY).
+                bCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
             }
-            qwPos += CB_CHUNK;                    // one slice per pass: the overlap room re-covers the straddle zone
-            // Progress at ~10 Hz: PostMessage is cheap and the UI thread
-            // repaints at its own pace, decoupled from the scan speed.
-            // 3.08: the position travels IN the message (low/high halves) —
-            // no 64-bit global shared with the UI thread (torn reads on x86).
-            ULONGLONG qwNow = GetTickCount64();
-            if (qwNow >= qwNextPost)
-            {
-                PostMessage(hWndMain, WM_APP_SEARCHPROGRESS, (WPARAM)(DWORD)qwPos, (LPARAM)(DWORD)(qwPos >> 32));
-                qwNextPost = qwNow + 100;
-            }
-            // The single cancel check per chunk (ESC handler or WM_DESTROY).
-            bCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
         }
-    }
-    else
-    {
-    while (!bFound && !bCancel)
-    {
-        DWORD cbRead = 0;
-        if (!ReadFile(hFile, pBuf + cbKeep, CB_CHUNK, &cbRead, nullptr) || cbRead == 0)
-        {
-            break;                         // EOF (or read error): the scan is over
-        }
-        DWORD cbHave = cbKeep + cbRead;
-        // 3.00: memchr walks the buffer with the CRT's vectorized scan
-        // (SIMD on every modern toolchain) and memcmp only confirms the
-        // candidates it finds: several times faster than the old
-        // byte-at-a-time loop on big files, with identical results
-        // (verified case by case against the old loop, patterns crossing
-        // chunk borders included). Valid starts: 0 .. cbHave - cbPat.
-        ULONGLONG qwHit = 0;
-        if (ScanForPattern(pBuf, cbHave, qwBase, &qwHit))
-        {
-            g_qwSearchResult = qwHit;
-            bFound = true;
-            break;
-        }
-        // 5.9.7: the old `if (!bFound)` wrapper here was dead code since the
-        // scan moved into ScanForPattern (a hit breaks out above; reaching
-        // this line means no hit). The carry runs unconditionally.
-        // Keep the tail a match could straddle, past the chunk border.
-        cbKeep = (cbHave > cbOverlap) ? cbOverlap : cbHave;
-        if (cbKeep > 0)
-        {
-            MoveMemory(pBuf, pBuf + cbHave - cbKeep, cbKeep);
-        }
-        qwBase += (ULONGLONG)(cbHave - cbKeep);
-        // Progress at ~10 Hz: PostMessage is cheap and the UI thread
-        // repaints at its own pace, decoupled from the scan speed.
-        // 3.08: the position travels IN the message (low/high halves) —
-        // no 64-bit global shared with the UI thread (torn reads on x86).
-        ULONGLONG qwNow = GetTickCount64();
-        if (qwNow >= qwNextPost)
-        {
-            PostMessage(hWndMain, WM_APP_SEARCHPROGRESS, (WPARAM)(DWORD)qwBase, (LPARAM)(DWORD)(qwBase >> 32));
-            qwNextPost = qwNow + 100;
-        }
-        // The single cancel check per chunk (ESC handler or WM_DESTROY).
-        bCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
-    }
-    }
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -9155,8 +7712,8 @@ void ViewClipboardAsFile(void)
     iView = VIEW_UTF16;
     UpdateViewMenu();
     EnsureEditControlType();   // 5.4: only creates the control if it does not exist yet
-                               // (5.3 fixed the stale hex dump under "CLIPBOARD":
-                               // the type sync had been missing here)
+    // (5.3 fixed the stale hex dump under "CLIPBOARD":
+    // the type sync had been missing here)
     WCHAR szFull[MAX_LOADSTRING + 32];
     wsprintfW(szFull, L"%s - CLIPBOARD", szTitle);
     SetWindowTextW(hWndMain, szFull);

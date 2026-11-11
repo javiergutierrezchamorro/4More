@@ -1,6 +1,63 @@
 /* ============================================================================================
    4More — visor de archivos (Win32)
-   Build 5.9.13
+   Build 5.9.14
+
+   Novedades de la versión 5.9.14 (REVISIÓN: PÁGINAS, MARCADORES, BÚSQUEDA Y RUEDA):
+   - FIX: LA LECTURA DE LA PÁGINA RELEÍA LA CABECERA SI NO PODÍA MAPEAR. La
+     ventana de detección (64 KB) se copia desde una vista mapeada, y una
+     vista mapeada NO mueve el puntero del fichero. Si luego la página no
+     se podía mapear (en x86 una vista de 32 MB puede fallar por
+     fragmentación del espacio de direcciones), el bucle de ReadFile seguía
+     desde el offset del principio y añadía OTRA copia de los primeros
+     64 KB: contenido duplicado y todo lo posterior desplazado. Ahora el
+     puntero se coloca tras la cabecera en cuanto la copia mapeada acaba.
+   - FIX: OffsetOfLine ERA CUADRÁTICA EN FICHEROS CON UN SOLO TIPO DE EOL.
+     Cada línea lanzaba un memchr de LF y otro de CR desde la posición
+     actual: el que no existe (CR en cualquier log Unix) recorría TODO el
+     resto de la página en cada vuelta. Un marcador (F2) en la línea
+     500.000 de una página de 32 MB eran cientos de miles de barridos de
+     32 MB: la ventana quedaba congelada muchísimo tiempo (medido en un
+     banco: ~19 s para llegar a la línea 20.000, ahora ~1,5 ms). Ahora el siguiente LF y
+     el siguiente CR se buscan una vez y solo se vuelven a buscar cuando el
+     recorrido los pasa: una pasada lineal, mismo resultado.
+   - FIX: LineAtOffset NO CONTABA LOS CR SUELTOS ANTERIORES AL ÚLTIMO LF. El
+     segundo bucle (CR) arrancaba donde acabó el primero (tras el último
+     LF) en vez de al principio: en un fichero con EOL mezclados, Go To,
+     Find Bytes y el rebinding de marcadores caían en otra línea que
+     OffsetOfLine (que sí cuenta en orden de flujo).
+   - FIX: EL BOM SE QUITABA EN CUALQUIER PÁGINA. BuildViewText descartaba
+     EF BB BF / FF FE / FE FF al principio de los bytes de la página,
+     también en las páginas 2 y siguientes, donde esos bytes son datos: se
+     perdían caracteres y el rango de bytes del aviso desfasaba. El BOM
+     solo existe en el offset 0 del fichero.
+   - FIX: LA ÚLTIMA PÁGINA UTF-16 PODÍA EMPEZAR EN UN OFFSET IMPAR.
+     LastPageBase(cbSize) = cbSize - página: con un tamaño impar (típico de
+     un fichero que otro programa está escribiendo, con Tail) la página
+     entera se decodificaba desplazada un byte. La base se redondea hacia
+     arriba a unidad de 2 bytes en las vistas UTF-16 (el final sigue dentro).
+   - FIX: FIND NO PASABA DE UN NUL. wcsstr/StrStrIW paran en el primer NUL
+     del texto: en la vista ANSI de un binario, lo que había detrás de él no
+     se podía buscar y salía "Cannot find" para texto que estaba en pantalla.
+     FindPatternFrom recorre los segmentos sin NUL.
+   - FIX: LA RUEDA DE PRECISIÓN NO DESPLAZABA. cScroll = delta / 120 daba 0
+     con los deltas pequeños (30, 15...) de touchpads y ruedas de alta
+     resolución. El resto se acumula entre mensajes.
+   - FIX: BuildHexText ESCRIBÍA A TRAVÉS DE NULL SIN MEMORIA. Los llamadores
+     ya esperaban nullptr; ahora lo recibe de verdad.
+   - FIX MENORES: la etiqueta de la regla era WCHAR[8] (la columna 10.000.000
+     la desbordaba, ahora [12]); Home en una vista vacía dejaba iSelEnd en
+     -1; reabrir el diálogo Find olvidaba "Match case"; un '&' en el nombre
+     de un fichero reciente se leía como marca de acceso rápido y se perdía
+     (ahora se duplica).
+   - BUILD: 4More.h ya no redefine WIN32_LEAN_AND_MEAN (aviso C4005 en
+     Release, que lo define por línea de comandos) y define NOMINMAX igual
+     que el .vcxproj. El .vcxproj lleva a Debug los defines y stdcpp17 que
+     el changelog de 5.9.11 describe y que el .vcxproj entregado no tenía. Release
+     x64 ya no usa /arch:AVX2: el programa anuncia Windows 7 como suelo, y
+     un binario AVX2 muere con una instrucción ilegal en las CPU sin AVX2; el
+     código caliente es de CRT (memchr/wmemchr/memcpy, que despachan en
+     ejecución) y tablas, donde AVX2 no tiene qué acelerar. El manifest
+     sube a 5.9.14.0.
 
    Novedades de la versión 5.9.13 (REVISIÓN: DIÁLOGO DE WRAP WIDTH + SEH EN LA BÚSQUEDA):
    - FIX: "WRAP TO FIXED WIDTH..." ABRÍA EL DIÁLOGO "GO TO". WrapWidthDialog
@@ -1557,7 +1614,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"5.9.13"
+#define APP_VERSION L"5.9.14"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -3780,6 +3837,11 @@ void RunLoadJob(LoadJob* pJob)
             CopyMemory(pJob->pBytes, mvHead.pView + (pJob->qwBase - mvHead.qwStart), cbHead);
             UnmapFileRange(&mvHead);
             cbTotal = cbHead;
+            // 5.9.14: a mapped copy does not move the file pointer. If phase 2 cannot map the page
+            // and falls back to ReadFile, it must continue AFTER the head, not re-read it.
+            LARGE_INTEGER liAfterHead;
+            liAfterHead.QuadPart = (LONGLONG)(pJob->qwBase + (ULONGLONG)cbHead);
+            SetFilePointerEx(hFile, liAfterHead, nullptr, FILE_BEGIN);
         }
         while (cbTotal < cbHead)
         {
@@ -4793,6 +4855,14 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
     static const AsciiMap am;
 
     WCHAR* pOut = AllocViewText(cLines * cchLine + 160);
+    if (pOut == nullptr)
+    {
+        if (pcch != nullptr)
+        {
+            *pcch = 0;
+        }
+        return(nullptr);                // 5.9.14: OOM answers nullptr (the callers expect it), never a write through null
+    }
     WCHAR* p = pOut;
     for (DWORD iLine = 0; iLine < cLines; iLine++)
     {
@@ -4965,7 +5035,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
     {
         LPCCH pSrc = (LPCCH)pBytes;
         int cbSrc = (int)cb;
-        if (cb >= 3 && pBytes[0] == 0xEF && pBytes[1] == 0xBB && pBytes[2] == 0xBF)
+        if (qwBase == 0 && cb >= 3 && pBytes[0] == 0xEF && pBytes[1] == 0xBB && pBytes[2] == 0xBF)   // 5.9.14: a BOM only exists at file offset 0
         {
             pSrc += 3;                              // the BOM is a decoding marker, not text
             cbSrc -= 3;
@@ -5046,7 +5116,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         // assembly and the surrogate guard pick their byte order from
         // bBE; the two branches used to be 40 lines of twins.
         bool bBE = (iViewBuild == VIEW_UTF16BE);
-        bool bBom = (cb >= 2 && pBytes[0] == (bBE ? 0xFE : 0xFF) && pBytes[1] == (bBE ? 0xFF : 0xFE));
+        bool bBom = (qwBase == 0 && cb >= 2 && pBytes[0] == (bBE ? 0xFE : 0xFF) && pBytes[1] == (bBE ? 0xFF : 0xFE));   // 5.9.14: only at file offset 0
         DWORD off = bBom ? 2 : 0;               // the BOM is a decoding marker, not text
         int cwch = (int)((cb - off) / 2);      // whole 2-byte units only
         if (cwch > (int)(CB_TEXT_MAX / 2))
@@ -6376,11 +6446,14 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             bool bBmLine = false;
             if (g_cBookmarks > 0)
             {
-                while (iBm < g_cBookmarks && g_pBookmarks[iBm] < iLine)
+                // 5.9.13 hotfix (build): C4018 signed/unsigned — g_pBookmarks
+                // is DWORD*, iLine is int. Same (int) cast the gutter cursor
+                // uses (PaintGutter); zero behavior change, both 32-bit.
+                while (iBm < g_cBookmarks && (int)g_pBookmarks[iBm] < iLine)
                 {
                     iBm++;
                 }
-                bBmLine = (iBm < g_cBookmarks && g_pBookmarks[iBm] == iLine);
+                bBmLine = (iBm < g_cBookmarks && (int)g_pBookmarks[iBm] == iLine);
             }
             HBRUSH hbrBg;
             COLORREF clrBg;
@@ -6617,7 +6690,10 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         }
         case VK_HOME:
             if (bCtrl) { JumpFilePage(false); return 0; }   // 5.4: first page (lived in EditSubclassProc)
-            pState->iSelEnd = TV_LineIndex(TV_LineFromChar(pState->iSelEnd));
+            {
+                int iHome = TV_LineIndex(TV_LineFromChar(pState->iSelEnd));
+                pState->iSelEnd = (iHome < 0) ? 0 : iHome;   // 5.9.14: an empty view answers -1: never a negative caret
+            }
             if (!bShift) pState->iSelStart = pState->iSelEnd;
             g_iCaretCol = -1;
             TV_ScrollCaret();
@@ -6689,8 +6765,13 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
     case WM_MOUSEWHEEL:
     {
         if (pState == nullptr) return 0;
-        short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
-        int cScroll = zDelta / WHEEL_DELTA;
+        // 5.9.14: the remainder accumulates: precision wheels and touchpads send deltas below
+        // WHEEL_DELTA (30, 15...) and the plain division gave 0 notches: they never scrolled.
+        static int s_iWheelAcc = 0;
+        s_iWheelAcc += GET_WHEEL_DELTA_WPARAM(wParam);
+        int cScroll = s_iWheelAcc / WHEEL_DELTA;
+        s_iWheelAcc -= cScroll * WHEEL_DELTA;
+        if (cScroll == 0) return 0;
         SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_ALL;
         GetScrollInfo(hWnd, SB_VERT, &si);
         TV_ScrollRows(hWnd, pState, si.nPos - cScroll * 3);
@@ -7479,11 +7560,12 @@ void OpenFindDialog(HWND hWnd)
         SetFocus(hDlgFind);
         return;
     }
+    DWORD dwKeepCase = fr.Flags & FR_MATCHCASE;     // 5.9.14: reopening the dialog no longer forgets "Match case"
     ZeroMemory(&fr, sizeof(FINDREPLACEW));
     fr.lStructSize = sizeof(FINDREPLACEW);
     fr.hwndOwner = hWnd;
     fr.hInstance = hInst;
-    fr.Flags = FR_DOWN | FR_HIDEUPDOWN;
+    fr.Flags = FR_DOWN | FR_HIDEUPDOWN | dwKeepCase;
     fr.lpstrFindWhat = szFind;
     fr.wFindWhatLen = _countof(szFind);
     hDlgFind = FindTextW(&fr);
@@ -7495,45 +7577,66 @@ void OpenFindDialog(HWND hWnd)
 // case / StrStrIW pair out twice: a copy waiting to drift).
 static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
 {
+    // 5.9.14: the text may hold embedded NULs (an ANSI view of a binary file): wcsstr/StrStrIW stop at
+    // the first one, so everything after it was unsearchable and Find answered "Cannot find" for text
+    // that was on screen. The scan now walks the NUL-free segments (a match never spans a NUL: the
+    // pattern has none). The buffer always ends with its own NUL, at pszText[g_tv.cch].
     const WCHAR* p = pszText + dwFrom;
-    if (fr.Flags & FR_MATCHCASE)
-    {
-        return(wcsstr(p, szFind));
-    }
+    const WCHAR* pEnd = pszText + g_tv.cch;
     // 3.06: StrStrIW goes through ChrCmpIW for EVERY character (locale aware,
     // tens of MB/s). With an ASCII first character the scan looks for it in
     // its two forms and only confirms the candidates; ChrCmpIW answers only
     // where two characters differ. A non-ASCII start keeps StrStrIW.
     WCHAR wcFirst = szFind[0];
-    if (wcFirst == L'\0' || wcFirst >= 0x80)
-    {
-        return(StrStrIW(p, szFind));
-    }
     WCHAR wcLo = (wcFirst >= L'A' && wcFirst <= L'Z') ? (WCHAR)(wcFirst + 32) : wcFirst;
     WCHAR wcUp = (wcLo >= L'a' && wcLo <= L'z') ? (WCHAR)(wcLo - 32) : wcLo;
-    for (; *p != L'\0'; p++)
+    for (;;)
     {
-        if (*p != wcLo && *p != wcUp)
+        const WCHAR* pHit = nullptr;                // a match inside the segment that starts at p
+        if (fr.Flags & FR_MATCHCASE)
         {
-            continue;
+            pHit = wcsstr(p, szFind);
         }
-        const WCHAR* t = p + 1;
-        const WCHAR* s = szFind + 1;
-        while (*s != L'\0' && *t != L'\0' && ChrCmpIW(*t, *s) == 0)   // 5.3: one call, it already covers exact equality
+        else if (wcFirst == L'\0' || wcFirst >= 0x80)
         {
-            t++;
-            s++;
+            pHit = StrStrIW(p, szFind);
         }
-        if (*s == L'\0')
+        else
         {
-            return(p);
+            for (const WCHAR* pScan = p; *pScan != L'\0'; pScan++)
+            {
+                if (*pScan != wcLo && *pScan != wcUp)
+                {
+                    continue;
+                }
+                const WCHAR* t = pScan + 1;
+                const WCHAR* s = szFind + 1;
+                while (*s != L'\0' && *t != L'\0' && ChrCmpIW(*t, *s) == 0)   // 5.3: one call, it already covers exact equality
+                {
+                    t++;
+                    s++;
+                }
+                if (*s == L'\0')
+                {
+                    pHit = pScan;
+                    break;
+                }
+                if (*t == L'\0')
+                {
+                    break;                  // the segment ended inside the candidate: no later start fits in it
+                }
+            }
         }
-        if (*t == L'\0')
+        if (pHit != nullptr)
         {
-            return(nullptr);        // the text ended inside the candidate: no later start fits
+            return(pHit);
+        }
+        p += lstrlenW(p) + 1;                       // past the NUL that ended this segment
+        if (p >= pEnd)
+        {
+            return(nullptr);
         }
     }
-    return(nullptr);
 }
 
 
@@ -7653,6 +7756,12 @@ ULONGLONG LastPageBase(ULONGLONG cbSize)
         // on-screen hex base is already aligned, and the page size is a
         // multiple of 16.
         qwBase = (qwBase + 15) & ~((ULONGLONG)15);
+    }
+    else if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+    {
+        // 5.9.14: a UTF-16 page must start on a 2-byte unit. An odd file size gave an odd base and the
+        // whole last page decoded shifted by one byte (garbage). Rounding UP keeps the end on screen.
+        qwBase = (qwBase + 1) & ~((ULONGLONG)1);
     }
     return(qwBase);
 }
@@ -7943,10 +8052,22 @@ bool OffsetOfLine(DWORD iLine, ULONGLONG& rqw)
     // only when the byte after it is not the \n of a CRLF pair).
     DWORD cFound = 0;
     DWORD k = 0;
+    // 5.9.14: the next LF and the next CR are searched ONCE and searched again only when the walk
+    // passes them. The old loop ran both memchr from k on EVERY line: on a file with only one kind
+    // of EOL (any Unix log) the absent one scanned the whole rest of the page each time, quadratic:
+    // a bookmark deep in a 32 MB page froze the window for minutes.
+    const BYTE* pN = (const BYTE*)memchr(pFileBytes, 0x0A, (size_t)cbFile);
+    const BYTE* pR = (const BYTE*)memchr(pFileBytes, 0x0D, (size_t)cbFile);
     for (;;)
     {
-        const BYTE* pN = (const BYTE*)memchr(pFileBytes + k, 0x0A, (size_t)(cbFile - k));
-        const BYTE* pR = (const BYTE*)memchr(pFileBytes + k, 0x0D, (size_t)(cbFile - k));
+        if (pN != nullptr && pN < pFileBytes + k)
+        {
+            pN = (const BYTE*)memchr(pFileBytes + k, 0x0A, (size_t)(cbFile - k));
+        }
+        if (pR != nullptr && pR < pFileBytes + k)
+        {
+            pR = (const BYTE*)memchr(pFileBytes + k, 0x0D, (size_t)(cbFile - k));
+        }
         const BYTE* pB;
         if (pN != nullptr && (pR == nullptr || pN < pR))
         {
@@ -8423,6 +8544,7 @@ bool LineAtOffset(ULONGLONG qwOff, int& riLine)
             iLine++;                        // \n: a line break (half of CRLF or alone)
             p = pLf + 1;
         }
+        p = pFileBytes;                     // 5.9.14: the CR scan starts over (p sat after the LAST LF: lone CRs before it were never counted)
         for (;;)
         {
             const BYTE* pCr = (const BYTE*)memchr(p, 0x0D, (size_t)(pEnd - p));
@@ -9675,7 +9797,7 @@ void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin)
         if (x > rcRuler.right) break;
         if (iCol % 10 == 0)
         {
-            WCHAR szLabel[8];
+            WCHAR szLabel[12];          // 5.9.14: was [8]: column 10,000,000 (8 digits + NUL) overflowed it
             int cch = wsprintfW(szLabel, L"%d", iCol);
             RECT rcCell = { x, y, x + 10 * iHexCharW, y + iRulerH };
             DrawTextW(hdc, szLabel, cch, &rcCell, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -10238,20 +10360,31 @@ void RebuildRecentMenu(void)
                 pszName = p + 1;
             }
         }
-        WCHAR szItem[MAX_PATH + 8];
+        WCHAR szItem[2 * MAX_PATH + 8];     // 5.9.14: room for every '&' of the name doubled
         // 3.03: format and arguments paired by hand. The old one-liner
         // handed "1&0  %s" TWO arguments: wsprintfW consumed the INT of
         // the item number as the %s pointer — the tenth entry in the
         // list dereferenced address 10 and killed the process while the
         // menu was being built.
+        WCHAR* pItem = szItem;
         if (i == 9)
         {
-            wsprintfW(szItem, L"1&0  %s", pszName);
+            pItem += wsprintfW(szItem, L"1&0  ");
         }
         else
         {
-            wsprintfW(szItem, L"&%d  %s", i + 1, pszName);
+            pItem += wsprintfW(szItem, L"&%d  ", i + 1);
         }
+        // 5.9.14: a '&' in a file name is a menu mnemonic marker: "a&b.txt" showed as "ab.txt". Doubled, it shows as typed.
+        for (const WCHAR* pc = pszName; *pc != L'\0'; pc++)
+        {
+            if (*pc == L'&')
+            {
+                *pItem++ = L'&';
+            }
+            *pItem++ = *pc;
+        }
+        *pItem = L'\0';
         AppendMenuW(g_hRecentMenu, MF_STRING, ID_FILE_RECENT_FIRST + i, szItem);
     }
 }

@@ -6,7 +6,14 @@
 #ifndef _4MORE_H_
 #define _4MORE_H_
 
+// Guarded: the .vcxproj also defines both on the command line (a bare #define here
+// redefined WIN32_LEAN_AND_MEAN with another value: warning C4005 in every Release build).
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>

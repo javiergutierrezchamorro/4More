@@ -1,4 +1,12 @@
-﻿// 4More.rc — recursos del visor (Build 6.07)
+﻿// 4More.rc — recursos del visor (Build 6.09)
+//
+// 6.09: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Columna de la barra de estado,
+// Copy Column e impresión con tabuladores. Manifest 6.09.0.0. Compilar junto al
+// 4More.cpp 6.09.
+//
+// 6.08: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Expansión de tabuladores (INI
+// TabWidth) y regla hex con columnas congeladas. Manifest 6.08.0.0. Compilar junto
+// al 4More.cpp 6.08.
 //
 // 6.07: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Find Bytes continúa tras el
 // último acierto (y da la vuelta); regla con columnas congeladas. Manifest 6.07.0.0.

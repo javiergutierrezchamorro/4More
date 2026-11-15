@@ -1,6 +1,23 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.07
+   Build 6.09
+
+   Version 6.09 (tabs everywhere):
+   - FIX: the status bar column, Copy Column and Print ignored the tab stops 6.08 gave
+     the view: the column counted a tab as one, Copy Column took the wrong character on
+     tabbed lines, and Print used GDI's default stops and cut rows by characters (a row
+     with tabs overflowed the right margin). All three use the visual columns now.
+
+   Version 6.08 (tab expansion, hex ruler with frozen columns):
+   - NEW: TAB EXPANSION. A tab used to take one cell like any character and drew as
+     a blank, so source code, logs and TSV files lost their alignment. With word
+     wrap off, a tab now advances to the next tab stop (INI [4More] TabWidth, 1-16,
+     default 8). The text is untouched: Copy, Find, offsets and bookmarks still see
+     the tab. Caret, mouse, selection, horizontal scroll range, column ruler, frozen
+     columns and the Up/Down column memory all work in visual columns. Files without
+     a tab pay nothing (one scan per load); lines with tabs expand only the visible
+     columns. Word wrap keeps one cell per tab (its arithmetic is character based).
+   - FIX: the hex view's byte-position ruler ignored frozen columns (see 6.07).
 
    Version 6.07 (Find Bytes continues, ruler with frozen columns):
    - FIX: Find Bytes always restarted at byte 0, so repeating the search found
@@ -197,7 +214,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.07"
+#define APP_VERSION L"6.09"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -268,6 +285,7 @@ bool g_bRuler = true;                           // V4: View > Ruler — column r
 bool g_bHiliteLine = true;                      // 5.8: View > Highlight Current Line — full-width band on the caret line (5.9.7: ON by default)
 bool g_bEscExit = true;                         // 5.8: View > ESC to Exit (default ON): ESC closes 4More when idle
 int g_iWrapWidth = 0;                            // V4: 0 = wrap to window; >0 = wrap to N chars (View > Wrap to Fixed Width)
+int g_iTabWidth = 8;                            // 6.08: tab stop distance in columns (INI TabWidth, 1..16)
 int g_iFreezeCols = 0;                          // 6.00: columns kept fixed while scrolling horizontally (0 = off)
 bool g_bRegexFind = false;                      // 6.00: Find / Find Next use std::wregex
 int g_cchLastRegexMatch = 0;                    // 6.00: length of last regex hit (for selection)
@@ -325,6 +343,8 @@ struct TextViewState
     int    iWrapWidth;      // 0 = wrap to window; >0 = wrap to N chars
     bool   bGreenbar;       // alternating line background
     int    iMaxLineChars;   // 5.2: longest logical line, in characters (SB_HORZ range)
+    bool   bTabs;           // 6.08: the text holds at least one TAB: columns are expanded to tab stops (no-wrap only)
+    int    iMaxVisCols;     // 6.08: longest line in VISUAL columns when bTabs (SB_HORZ range)
     HWND   hWnd;            // the control's own window handle
     HBRUSH hbrGreen;        // V5: cached greenbar brush (created once, reused)
     int    iPaintedSelLo;   // 5.5: selection range the last paint left on screen
@@ -4214,6 +4234,7 @@ void TV_ClearText(void)
     g_iLineMemo0Char = -1; g_iLineMemo0Line = -1;   // 5.6: the memos died with the old index
     g_iLineMemo1Char = -1; g_iLineMemo1Line = -1;
     g_tv.iMaxLineChars = 0;   // 5.2: horizontal range dies with the text
+    g_tv.bTabs = false; g_tv.iMaxVisCols = 0;   // 6.08
     // 5.9.8: the SCROLLBAR RANGES die with the text too. TV_ClearText used
     // to leave the previous file's SB_VERT/SB_HORZ ranges in place until the
     // next delivery with content: after ResetViewer (a failed open) or an
@@ -4540,6 +4561,131 @@ static bool TV_BuildLineIndex(WCHAR* pText, int cch, int** ppStarts, int* pcLine
 // (after every delivery) and ApplyEditorFont (after a metric change) kept
 // two near-twin blocks of this; the only difference was which fields each
 // guarded, and both guards are covered by the early-out here.
+// 6.08: TAB EXPANSION. A TAB used to occupy ONE cell like any character (and drew as a blank), so
+// source code, logs and TSV files lost their alignment. Now, when the text holds a tab and word wrap is
+// off, a tab advances to the next multiple of g_iTabWidth. The text itself (and so Copy, Find,
+// offsets, bookmarks) is untouched: only the places that turn a character index into a column and
+// back know about it. When the text has no tab (the common case) nothing changes and nothing costs.
+//   TV_VisCol    character index -> visual column (caret, scroll-into-view, selection)
+//   TV_CharOfCol visual column -> character index (mouse, Up/Down column memory)
+// Wrap mode keeps one cell per tab (the wrap arithmetic is character based).
+static inline bool TV_TabsOn(void)
+{
+    return g_tv.bTabs && !g_tv.bWrap && g_iTabWidth > 0;
+}
+
+static int TV_VisCol(int iLS, int iChar)
+{
+    if (!TV_TabsOn())
+    {
+        return iChar - iLS;
+    }
+    if (iChar <= iLS)
+    {
+        return 0;
+    }
+    const WCHAR* p = g_tv.pText;
+    int iCol = 0;
+    int i = iLS;
+    while (i < iChar)
+    {
+        const WCHAR* pTab = (const WCHAR*)wmemchr(p + i, L'\t', (size_t)(iChar - i));
+        if (pTab == nullptr)
+        {
+            iCol += iChar - i;
+            break;
+        }
+        const int n = (int)(pTab - (p + i));
+        iCol += n;
+        iCol += g_iTabWidth - (iCol % g_iTabWidth);
+        i += n + 1;
+    }
+    return iCol;
+}
+
+static int TV_CharOfCol(int iLS, int iDE, int iCol, bool bNearest = true)
+{
+    if (!TV_TabsOn())
+    {
+        const int iPos = iLS + iCol;
+        return (iPos > iDE) ? iDE : iPos;
+    }
+    const WCHAR* p = g_tv.pText;
+    int iAt = 0;
+    int i = iLS;
+    while (i < iDE)
+    {
+        const WCHAR* pTab = (const WCHAR*)wmemchr(p + i, L'\t', (size_t)(iDE - i));
+        const int n = (pTab != nullptr) ? (int)(pTab - (p + i)) : (iDE - i);
+        if (iAt + n > iCol)
+        {
+            return i + (iCol - iAt);              // inside a run of ordinary characters
+        }
+        iAt += n;
+        i += n;
+        if (pTab == nullptr)
+        {
+            break;
+        }
+        const int iNext = iAt + g_iTabWidth - (iAt % g_iTabWidth);
+        if (iCol < iNext)
+        {
+            return (!bNearest || iCol - iAt < (iNext - iAt + 1) / 2) ? i : i + 1;   // inside a tab: the nearer edge (bNearest) or the tab itself
+        }
+        iAt = iNext;
+        i++;
+    }
+    return iDE;
+}
+
+static int TV_DispEnd(const WCHAR* pText, int iLS, int iLE);
+
+// 6.08: called once per delivered text: does it hold a tab, and how wide is its widest line in
+// visual columns (the horizontal scroll range). A line of L characters is at most L * tab-width
+// columns wide, so the lines that cannot beat the best so far are skipped without being read.
+static void TV_ScanTabs(void)
+{
+    g_tv.bTabs = false;
+    g_tv.iMaxVisCols = g_tv.iMaxLineChars;
+    if (g_tv.pText == nullptr || g_tv.cch <= 0 || g_tv.pLineStarts == nullptr ||
+        wmemchr(g_tv.pText, L'\t', (size_t)g_tv.cch) == nullptr)
+    {
+        return;
+    }
+    g_tv.bTabs = true;
+    int iBest = 0;
+    for (int l = 0; l < g_tv.cLines; l++)
+    {
+        const int iLS = g_tv.pLineStarts[l];
+        const int iLE = (l + 1 < g_tv.cLines) ? g_tv.pLineStarts[l + 1] : g_tv.cch;
+        if ((LONGLONG)(iLE - iLS) * g_iTabWidth <= iBest)
+        {
+            continue;
+        }
+        const int iDE = TV_DispEnd(g_tv.pText, iLS, iLE);
+        int iCol = 0;
+        int i = iLS;
+        while (i < iDE)
+        {
+            const WCHAR* pTab = (const WCHAR*)wmemchr(g_tv.pText + i, L'\t', (size_t)(iDE - i));
+            if (pTab == nullptr)
+            {
+                iCol += iDE - i;
+                break;
+            }
+            const int n = (int)(pTab - (g_tv.pText + i));
+            iCol += n;
+            iCol += g_iTabWidth - (iCol % g_iTabWidth);
+            i += n + 1;
+        }
+        if (iCol > iBest)
+        {
+            iBest = iCol;
+        }
+    }
+    g_tv.iMaxVisCols = iBest;
+}
+
 static void TV_UpdateScrollRanges(void)
 {
     if (g_tv.hWnd == nullptr || iHexLineH <= 0 || iHexCharW <= 0) return;
@@ -4556,7 +4702,7 @@ static void TV_UpdateScrollRanges(void)
     // bar: SB_PAGEUP/PAGEDOWN subtracted a zero page and long lines could
     // not be reached.
     {
-        const LONGLONG llMax = ((LONGLONG)g_tv.iMaxLineChars + 1) * iHexCharW;   // 6.01: int overflow on a 100 MB line
+        const LONGLONG llMax = ((LONGLONG)(TV_TabsOn() ? g_tv.iMaxVisCols : g_tv.iMaxLineChars) + 1) * iHexCharW;   // 6.01: int overflow on a 100 MB line
         si.nMax = (llMax > 0x3FFFFFFF) ? 0x3FFFFFFF : (int)llMax;
     }
     si.nPage = (UINT)rc.right;
@@ -4591,6 +4737,7 @@ void TV_SetText(WCHAR* pText, int cch, int* pLineStarts, int cLines, int iMaxLin
         g_tv.cLines = cLines;
         g_tv.iMaxLineChars = iMaxLine;
     }
+    TV_ScanTabs();             // 6.08: tab stops / visual width (before the ranges are refreshed)
     TV_SyncState();            // wrap/style/brush in step with the new view;
                                // 5.9.10: its tail already refreshes the scroll
                                // ranges (the 5.9.9 fix), so the explicit
@@ -4811,12 +4958,13 @@ static void TV_PositionCaret(void)
                 int iDE = TV_DispEnd(g_tv.pText, iLineStart, iLE);   // 5.9.10: one helper
                 if (iCaret <= iDE)
                 {
-                    int xCaret = (iCaret - iLineStart) * iHexCharW;
+                    const int iVisCol = TV_VisCol(iLineStart, iCaret);   // 6.08: tab stops
+                    int xCaret = iVisCol * iHexCharW;
                     if (g_iFreezeCols <= 0)
                     {
                         xCaret -= g_tv.iScrollX;
                     }
-                    else if (iCaret - iLineStart >= g_iFreezeCols)
+                    else if (iVisCol >= g_iFreezeCols)
                     {
                         xCaret -= g_tv.iScrollX;                        // 6.01: scrolled columns only
                         if (xCaret < g_iFreezeCols * iHexCharW)
@@ -4992,7 +5140,7 @@ void TV_ScrollCaret(void)
     {
         int iLS = TV_LineIndex(TV_LineFromChar(g_tv.iSelEnd));
         if (iLS < 0) iLS = 0;
-        int x = (g_tv.iSelEnd - iLS) * iHexCharW;
+        int x = TV_VisCol(iLS, g_tv.iSelEnd) * iHexCharW;   // 6.08: tab stops
         const int iFreezePx = (g_iFreezeCols > 0) ? g_iFreezeCols * iHexCharW : 0;   // 6.01
         if (iFreezePx > 0 && x < iFreezePx)
         {
@@ -5097,7 +5245,7 @@ void TV_CopyColumn(void)
     int iCaretLine = TV_LineFromChar(g_tv.iSelEnd);
     int iLSCaret = TV_LineIndex(iCaretLine);
     if (iLSCaret < 0) iLSCaret = 0;
-    int iCol = g_tv.iSelEnd - iLSCaret;
+    int iCol = TV_VisCol(iLSCaret, g_tv.iSelEnd);      // 6.09: the VISUAL column (tab stops)
     if (iCol < 0) iCol = 0;
     std::wstring col;
     for (int ln = iLine0; ln <= iLine1; ln++)
@@ -5107,9 +5255,9 @@ void TV_CopyColumn(void)
         if (ls < 0) continue;
         if (le < 0) le = g_tv.cch;
         int de = TV_DispEnd(g_tv.pText, ls, le);
-        int cchLine = de - ls;
-        if (iCol < cchLine)
-            col += g_tv.pText[ls + iCol];
+        const int iAt = TV_CharOfCol(ls, de, iCol, false);   // 6.09: the character covering that column
+        if (iAt < de)
+            col += g_tv.pText[iAt];
         if (ln < iLine1) col += L"\r\n";
     }
     if (col.empty())
@@ -5312,8 +5460,7 @@ static int TV_HitTest(TextViewState* pState, int x, int y)
         int iLS = pState->pLineStarts[iLine];
         int iLE = (iLine + 1 < pState->cLines) ? pState->pLineStarts[iLine + 1] : pState->cch;
         int iDE = TV_DispEnd(pState->pText, iLS, iLE);   // 5.9.10: one helper
-        int iPos = iLS + iCol;
-        return (iPos > iDE) ? iDE : iPos;
+        return TV_CharOfCol(iLS, iDE, iCol);   // 6.08: visual column -> character (tab stops)
     }
     // wrap: walk the visible lines counting their visual rows
     RECT rc;
@@ -5385,7 +5532,7 @@ static void TV_DrawRun(HDC hdc, int x, int y, UINT uOptions, const RECT* prc, co
 // 6.01: paints ONE visual row chunk [iPos, iChunkEnd) with its first column at pixel xBase. The
 // body is the old inline code of WM_PAINT (one-call plain row / three-part selection row); it
 // lives here so Freeze Columns can paint the same row twice under two clip rectangles.
-static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y, int iPos, int iChunkEnd,
+static void TV_PaintChunkText(HDC hdc, const WCHAR* pText, int xBase, int y, int iPos, int iChunkEnd,
     int iSelLo, int iSelHi, HBRUSH hbrBg, COLORREF clrBg, COLORREF clrText, COLORREF clrSelBg, COLORREF clrSelTx, int cxClient)
 {
     int x = xBase;
@@ -5396,7 +5543,7 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
         // Selection overlaps this chunk - draw in parts
         if (iPos < iSelLo)
         {
-            TV_DrawRun(hdc, x, y, 0, nullptr, pState->pText + iPos, iSelLo - iPos, cxClient);
+            TV_DrawRun(hdc, x, y, 0, nullptr, pText + iPos, iSelLo - iPos, cxClient);
             x += (iSelLo - iPos) * iHexCharW;
         }
         const int iSelCS = (iPos > iSelLo) ? iPos : iSelLo;
@@ -5408,14 +5555,14 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
             SetTextColor(hdc, clrSelTx);
             // V5: tight rect for selection - only fill behind selected text
             RECT rcSel = { x, y, x + cchSel * iHexCharW, y + iHexLineH };
-            TV_DrawRun(hdc, x, y, ETO_OPAQUE, &rcSel, pState->pText + iSelCS, cchSel, cxClient);
+            TV_DrawRun(hdc, x, y, ETO_OPAQUE, &rcSel, pText + iSelCS, cchSel, cxClient);
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, clrText);
             x += cchSel * iHexCharW;
         }
         if (iChunkEnd > iSelHi)
         {
-            TV_DrawRun(hdc, x, y, 0, nullptr, pState->pText + iSelHi, iChunkEnd - iSelHi, cxClient);
+            TV_DrawRun(hdc, x, y, 0, nullptr, pText + iSelHi, iChunkEnd - iSelHi, cxClient);
         }
     }
     else
@@ -5425,10 +5572,60 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
         // visually identical to a FillRect.
         RECT rcRow = { x < 0 ? 0 : x, y, cxClient, y + iHexLineH };
         SetBkColor(hdc, clrBg);
-        TV_DrawRun(hdc, x, y, ETO_OPAQUE, &rcRow, pState->pText + iPos, iChunkEnd - iPos, cxClient);
+        TV_DrawRun(hdc, x, y, ETO_OPAQUE, &rcRow, pText + iPos, iChunkEnd - iPos, cxClient);
     }
 }
 
+
+// 6.08: the tab-aware front of TV_PaintChunk. A row without a tab (or any row when the text has none,
+// or in wrap mode) goes straight to the text painter. A row with tabs is expanded into a small buffer
+// holding ONLY the visible columns (a minified 100 MB line stays cheap), the selection endpoints are
+// translated to visual columns, and the same painter draws that buffer.
+static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y, int iPos, int iChunkEnd,
+    int iSelLo, int iSelHi, HBRUSH hbrBg, COLORREF clrBg, COLORREF clrText, COLORREF clrSelBg, COLORREF clrSelTx, int cxClient)
+{
+    if (!pState->bTabs || pState->bWrap || g_iTabWidth <= 0 || iHexCharW <= 0 || iChunkEnd <= iPos ||
+        wmemchr(pState->pText + iPos, L'\t', (size_t)(iChunkEnd - iPos)) == nullptr)
+    {
+        TV_PaintChunkText(hdc, pState->pText, xBase, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);
+        return;
+    }
+    enum { EX_MAX = 4096 };
+    WCHAR ex[EX_MAX];
+    const WCHAR* pText = pState->pText;
+    const int colA = (xBase < 0) ? (-xBase) / iHexCharW : 0;                 // first visible column
+    int colB = colA + cxClient / iHexCharW + 3;                              // exclusive, a little past the edge
+    if (colB - colA > EX_MAX) colB = colA + EX_MAX;
+    int nEx = 0;
+    int col = 0;
+    for (int i = iPos; i < iChunkEnd && col < colB; i++)
+    {
+        if (pText[i] == L'\t')
+        {
+            const int iNext = col + g_iTabWidth - (col % g_iTabWidth);
+            for (; col < iNext && col < colB; col++)
+            {
+                if (col >= colA) ex[nEx++] = L' ';
+            }
+        }
+        else
+        {
+            if (col >= colA) ex[nEx++] = pText[i];
+            col++;
+        }
+    }
+    int iExLo = 0, iExHi = 0;
+    if (iSelLo < iSelHi && iChunkEnd > iSelLo && iPos < iSelHi)
+    {
+        iExLo = TV_VisCol(iPos, (iSelLo > iPos) ? iSelLo : iPos) - colA;
+        iExHi = TV_VisCol(iPos, (iSelHi < iChunkEnd) ? iSelHi : iChunkEnd) - colA;
+        if (iExLo < 0) iExLo = 0;
+        if (iExLo > nEx) iExLo = nEx;
+        if (iExHi < 0) iExHi = 0;
+        if (iExHi > nEx) iExHi = nEx;
+    }
+    TV_PaintChunkText(hdc, ex, xBase + colA * iHexCharW, y, 0, nEx, iExLo, iExHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);
+}
 
 #ifndef WM_MOUSEHWHEEL
 #define WM_MOUSEHWHEEL 0x020E
@@ -5810,14 +6007,14 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
                 if (iCol < 0) iCol = 0;
                 if (iLS0 >= 0 && iCol > iDE0 - iLS0) iCol = iDE0 - iLS0;
                 if (iCol < 0) iCol = 0;
+                if (iLS0 >= 0) iCol = TV_VisCol(iLS0, iLS0 + iCol);   // 6.08: the remembered column is VISUAL
                 g_iCaretCol = iCol;
             }
             int iLS2 = TV_LineIndex(iT);
             int iN2 = TV_LineIndex(iT + 1);
             int iLE2 = (iN2 < 0) ? pState->cch : iN2;
             int iDE2 = TV_DispEnd(pState->pText, iLS2, iLE2);   // 5.9.11: one helper (was inline CR/LF strip)
-            int iPos = iLS2 + g_iCaretCol;
-            if (iPos > iDE2) iPos = iDE2;
+            int iPos = TV_CharOfCol(iLS2, iDE2, g_iCaretCol);
             pState->iSelEnd = iPos;
             if (!bShift) pState->iSelStart = pState->iSelEnd;
             TV_ScrollCaret();
@@ -6757,7 +6954,9 @@ void UpdateStatusBar(bool bForce)
     }
     WCHAR szLine[32], szCol[32];
     FormatU64Locale(szLine, _countof(szLine), (ULONGLONG)iLine + 1);
-    FormatU64Locale(szCol, _countof(szCol), (ULONGLONG)(dwSelEnd - dwLineStart) + 1);
+    int iVisCol = TV_VisCol((int)dwLineStart, (int)dwSelEnd);      // 6.09: tab stops count as columns
+    if (iVisCol < 0) iVisCol = 0;
+    FormatU64Locale(szCol, _countof(szCol), (ULONGLONG)iVisCol + 1);
     WCHAR szPos[96];
     wsprintfW(szPos, L"Line %s, Column %s", szLine, szCol);
     SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)szPos);
@@ -7192,11 +7391,29 @@ void PrintCurrentView(void)
                         y += cyLine + 8;
                     }
                 }
-                int n = iDE - iPos;
-                if (n > cCols) n = cCols;
+                // 6.09: tabs print on the same stops as the view (g_iTabWidth cells, not GDI's
+                // default 8 average widths) and count as the columns they occupy, so a row
+                // with tabs no longer runs past the right margin.
+                int n = 0;
+                int iColP = 0;
+                while (iPos + n < iDE && iColP < cCols)
+                {
+                    if (g_tv.pText[iPos + n] == L'\t')
+                    {
+                        const int iNextP = iColP + g_iTabWidth - (iColP % g_iTabWidth);
+                        if (iNextP > cCols && n > 0) break;
+                        iColP = iNextP;
+                    }
+                    else
+                    {
+                        iColP++;
+                    }
+                    n++;
+                }
                 if (n > 0)
                 {
-                    TabbedTextOutW(pd.hDC, xLeft, y, g_tv.pText + iPos, n, 0, nullptr, xLeft);
+                    INT iTabStop = g_iTabWidth * cxChar;
+                    TabbedTextOutW(pd.hDC, xLeft, y, g_tv.pText + iPos, n, 1, &iTabStop, xLeft);
                 }
                 y += cyLine;
                 iPos += n;
@@ -9687,10 +9904,19 @@ void PaintHexRuler(HDC hdc, RECT rcRuler, int xOrigin)
     }
     HGDIOBJ hOld = RulerStripBegin(hdc, rcRuler, (hFontHexBold != nullptr) ? hFontHexBold : hFont);
     int iScrollX = g_tv.iScrollX;
+    // 6.08: frozen columns stay put while the rest scrolls (same rule as PaintRuler): a label of a
+    // fixed column is drawn where the view draws it, the scrolled ones hide under the frozen block.
+    const int iFreeze = (!g_tv.bWrap && g_iFreezeCols > 0) ? g_iFreezeCols : 0;
+    const int xFreezeEnd = xOrigin + iFreeze * iHexCharW;
     for (int i = 0; i < 16; i += 4)
     {
         int iCol = (i < 8) ? (i * 3) : (i * 3 + 1);   // first digit's column (the mid-gap shifts the second half)
-        int x = xOrigin + iCol * iHexCharW - iScrollX;
+        const bool bFixed = (iCol < iFreeze);
+        int x = xOrigin + iCol * iHexCharW - (bFixed ? 0 : iScrollX);
+        if (iFreeze > 0 && !bFixed && x < xFreezeEnd)
+        {
+            continue;                                  // under the frozen block
+        }
         if (x + 2 * iHexCharW < rcRuler.left || x > rcRuler.right)
         {
             continue;
@@ -9700,13 +9926,16 @@ void PaintHexRuler(HDC hdc, RECT rcRuler, int xOrigin)
         szLabel[1] = s_szHexDigits[i & 0x0F];
         szLabel[2] = L'\0';
         RECT rcCell = { x, rcRuler.top, x + 2 * iHexCharW, rcRuler.bottom };
+        if (bFixed && iScrollX > 0 && rcCell.right > xFreezeEnd) rcCell.right = xFreezeEnd;
         DrawTextW(hdc, szLabel, 2, &rcCell, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
     // The ASCII block's name, on its first column.
-    int xAscii = xOrigin + 50 * iHexCharW - iScrollX;
-    if (xAscii < rcRuler.right && xAscii + 5 * iHexCharW >= rcRuler.left)
+    const bool bAsciiFixed = (50 < iFreeze);
+    int xAscii = xOrigin + 50 * iHexCharW - (bAsciiFixed ? 0 : iScrollX);
+    if (xAscii < rcRuler.right && xAscii + 5 * iHexCharW >= rcRuler.left && !(iFreeze > 0 && !bAsciiFixed && xAscii < xFreezeEnd))
     {
         RECT rcCell = { xAscii, rcRuler.top, xAscii + 5 * iHexCharW, rcRuler.bottom };
+        if (bAsciiFixed && iScrollX > 0 && rcCell.right > xFreezeEnd) rcCell.right = xFreezeEnd;
         DrawTextW(hdc, L"ASCII", 5, &rcCell, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
     RulerStripEnd(hdc, rcRuler, hOld);
@@ -10031,6 +10260,8 @@ void LoadSettings(void)
     g_iFreezeCols = (int)ProfileLong(L"FreezeCols", 0);
     if (g_iFreezeCols < 0) g_iFreezeCols = 0;
     if (g_iFreezeCols > 200) g_iFreezeCols = 200;
+    g_iTabWidth = (int)ProfileLong(L"TabWidth", 8);
+    if (g_iTabWidth < 1 || g_iTabWidth > 16) g_iTabWidth = 8;
     g_bRegexFind = (ProfileLong(L"RegexFind", 0) != 0);
     // Colors: -1 in INI means default (stored as signed long); absent = default
     {
@@ -10107,6 +10338,7 @@ void SaveSettings(void)
     p += wsprintfW(p, L"EscExit=%d", g_bEscExit ? 1 : 0) + 1;            // 5.8
     p += wsprintfW(p, L"WrapWidth=%d", g_iWrapWidth) + 1;
     p += wsprintfW(p, L"FreezeCols=%d", g_iFreezeCols) + 1;
+    p += wsprintfW(p, L"TabWidth=%d", g_iTabWidth) + 1;                   // 6.08
     p += wsprintfW(p, L"RegexFind=%d", g_bRegexFind ? 1 : 0) + 1;
     if (g_clrWindow != 0xFFFFFFFF) p += wsprintfW(p, L"ColorWindow=%d", (int)g_clrWindow) + 1;
     if (g_clrText != 0xFFFFFFFF) p += wsprintfW(p, L"ColorText=%d", (int)g_clrText) + 1;

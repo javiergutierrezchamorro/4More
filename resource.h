@@ -2,7 +2,6 @@
 // Microsoft Visual C++ generated include file.
 // Used by 4More.rc
 //
-#define IDC_MYICON                      2
 #define IDD_MY4MORE_DIALOG              102
 #define IDS_APP_TITLE                   103
 #define IDD_ABOUTBOX                    103
@@ -24,7 +23,7 @@
 #define ID_VIEW_ANSI                    32785
 #define ID_VIEW_UTF8                    32786
 #define ID_VIEW_UNICODE                 32787
-#define ID_VIEW_HEX                    32788
+#define ID_VIEW_HEX                     32788
 #define ID_VIEW_UTF16BE                 32789
 #define ID_VIEW_EBCDIC                  32790
 #define ID_FILE_OPEN                    32791

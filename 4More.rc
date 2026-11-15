@@ -1,4 +1,15 @@
-﻿// 4More.rc — recursos del visor (Build 6.00)
+﻿// 4More.rc — recursos del visor (Build 6.02)
+//
+// 6.02: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Revisión del .cpp
+// (double-buffer del TextView para suavidad percibida al hacer scroll /
+// selección / freeze). Manifest 6.02.0.0. Compilar junto al 4More.cpp 6.02
+// (APP_VERSION ya dice "6.02").
+//
+// 6.01: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Revisión del .cpp
+// (Freeze Columns de verdad, regex con excepciones capturadas, impresión
+// paginada, líneas muy largas más rápidas) y del manifest (GUID de Windows 7
+// corregido; versión 6.01.0.0). Compilar junto al 4More.cpp 6.01
+// (APP_VERSION ya dice "6.01").
 //
 // 6.00: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Revisión del .cpp
 // (OffsetOfLine UTF-16 con memchr, consolidación). Manifest 6.00.0.0.

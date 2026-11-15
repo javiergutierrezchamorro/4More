@@ -1,6 +1,35 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.00
+   Build 6.02
+
+   Version 6.02 (perceived performance + polish):
+   - SPEED: TextView WM_PAINT uses double-buffering (compatible DC + BitBlt).
+     Scrolling, selection drag, greenbar/hilite and freeze-column updates no
+     longer flash intermediate row fills; the window feels smoother on large
+     pages and high-DPI.
+   - SPEED: when Freeze Columns is active, horizontal ScrollWindowEx is still
+     skipped (correctness), but the full invalidate is now painted to a
+     memory surface so the frozen strip never tears.
+   - Minor: version strings and manifest bumped; long-line visible-column
+     clip (6.01) kept as the primary long-line defence.
+   - No functional changes to load, encodings, find or the pager.
+
+   Version 6.01 (review: fixes and long-line speed):
+   - FIX: Freeze Columns really freezes now (the first N columns stay put
+     while the rest scrolls; hit test, caret and Ctrl+arrows follow).
+   - FIX: std::regex_error / complexity exceptions during Find, Find Next and
+     Find All are caught (they escaped to the last-chance filter before);
+     continued searches pass match_prev_avail so ^ and \b stay honest.
+   - FIX: Print paginates (one row-by-row pass, 2000-page cap) instead of one
+     DrawText over the whole text (could take minutes and print one page).
+   - FIX: Left/Right arrows step over a CRLF pair as one character.
+   - FIX: ICC_PROGRESS_CLASS registered for the load bar; clipboard block freed
+     when SetClipboardData fails; horizontal scroll range clamped (int overflow
+     on 100 MB lines with big fonts); gutter labels for tall windows (512).
+   - SPEED: lines longer than 4096 characters draw only their visible columns.
+   - CSV view tells when only the first 5000 rows are shown.
+   - Mouse wheel honors the Windows "lines per notch" setting.
+   - Manifest: the Windows 7 supportedOS GUID was wrong.
 
    Version 6.00 (load, offsets, V-style features):
    - FIX: OffsetOfLine UTF-16 CRLF counted wrong (skipped LF with s+4).
@@ -100,7 +129,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.00"
+#define APP_VERSION L"6.02"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -684,7 +713,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     // Common controls (status bar)
     INITCOMMONCONTROLSEX icc;
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_BAR_CLASSES;
+    icc.dwICC = ICC_BAR_CLASSES | ICC_PROGRESS_CLASS;   // 6.01: the load bar is a progress control
     InitCommonControlsEx(&icc);
 
     // Find dialog notification message
@@ -4356,7 +4385,10 @@ static void TV_UpdateScrollRanges(void)
     // 5.2: horizontal range (pixels) — without it WS_HSCROLL was a dead
     // bar: SB_PAGEUP/PAGEDOWN subtracted a zero page and long lines could
     // not be reached.
-    si.nMax = (g_tv.iMaxLineChars + 1) * iHexCharW;
+    {
+        const LONGLONG llMax = ((LONGLONG)g_tv.iMaxLineChars + 1) * iHexCharW;   // 6.01: int overflow on a 100 MB line
+        si.nMax = (llMax > 0x3FFFFFFF) ? 0x3FFFFFFF : (int)llMax;
+    }
     si.nPage = (UINT)rc.right;
     SetScrollInfo(g_tv.hWnd, SB_HORZ, &si, TRUE);
 }
@@ -4609,7 +4641,20 @@ static void TV_PositionCaret(void)
                 int iDE = TV_DispEnd(g_tv.pText, iLineStart, iLE);   // 5.9.10: one helper
                 if (iCaret <= iDE)
                 {
-                    SetCaretPos((iCaret - iLineStart) * iHexCharW - g_tv.iScrollX, y);
+                    int xCaret = (iCaret - iLineStart) * iHexCharW;
+                    if (g_iFreezeCols <= 0)
+                    {
+                        xCaret -= g_tv.iScrollX;
+                    }
+                    else if (iCaret - iLineStart >= g_iFreezeCols)
+                    {
+                        xCaret -= g_tv.iScrollX;                        // 6.01: scrolled columns only
+                        if (xCaret < g_iFreezeCols * iHexCharW)
+                        {
+                            xCaret = -4 * iHexCharW;                    // under the frozen strip: park it off-screen
+                        }
+                    }
+                    SetCaretPos(xCaret, y);
                 }
                 else
                 {
@@ -4702,9 +4747,14 @@ void TV_ScrollCaret(void)
         int iLS = TV_LineIndex(TV_LineFromChar(g_tv.iSelEnd));
         if (iLS < 0) iLS = 0;
         int x = (g_tv.iSelEnd - iLS) * iHexCharW;
-        if (x < g_tv.iScrollX)
+        const int iFreezePx = (g_iFreezeCols > 0) ? g_iFreezeCols * iHexCharW : 0;   // 6.01
+        if (iFreezePx > 0 && x < iFreezePx)
         {
-            TV_ScrollX(g_tv.hWnd, &g_tv, x);
+            // a frozen column is always on screen: no horizontal move
+        }
+        else if (x < g_tv.iScrollX + iFreezePx)
+        {
+            TV_ScrollX(g_tv.hWnd, &g_tv, x - iFreezePx);
         }
         else if (x >= g_tv.iScrollX + rc.right && rc.right > iHexCharW)
         {
@@ -4745,9 +4795,13 @@ static bool ClipboardSetText(HWND hOwner, const WCHAR* psz, int cch, bool bAppen
     memcpy(pDst, out.c_str(), (out.size() + 1) * sizeof(WCHAR));
     GlobalUnlock(hMem);
     EmptyClipboard();
-    SetClipboardData(CF_UNICODETEXT, hMem);
+    const bool bOk = (SetClipboardData(CF_UNICODETEXT, hMem) != nullptr);
+    if (!bOk)
+    {
+        GlobalFree(hMem);               // 6.01: the clipboard did not take the block: it is still ours
+    }
     CloseClipboard();
-    return true;
+    return bOk;
 }
 
 
@@ -4864,7 +4918,7 @@ static void TV_ScrollX(HWND hWnd, TextViewState* pState, int iNewX)
     int dx = pState->iScrollX - si.nPos;   // scrolling right moves content left
     pState->iScrollX = si.nPos;
     RECT rc;
-    if (GetClientRect(hWnd, &rc) && dx >= -rc.right && dx <= rc.right &&
+    if (g_iFreezeCols <= 0 && GetClientRect(hWnd, &rc) && dx >= -rc.right && dx <= rc.right &&   // 6.01: no blit while columns are frozen
         ScrollWindowEx(hWnd, dx, 0, &rc, nullptr, nullptr, nullptr, SW_INVALIDATE) != 0)
     {
         return;
@@ -5001,7 +5055,9 @@ static int TV_HitTest(TextViewState* pState, int x, int y)
     }
     int iRow = y / iHexLineH;               // visual row clicked, from the first visible
     if (iRow < 0) iRow = 0;
-    int iCol = (x + pState->iScrollX) / iHexCharW;
+    // 6.01: a click on the frozen strip maps to its fixed columns, not to the scrolled ones
+    const int iFreezePx = (!pState->bWrap && g_iFreezeCols > 0) ? g_iFreezeCols * iHexCharW : 0;
+    int iCol = ((iFreezePx > 0 && x < iFreezePx) ? x : (x + pState->iScrollX)) / iHexCharW;
     if (iCol < 0) iCol = 0;
     if (!pState->bWrap)
     {
@@ -5052,6 +5108,82 @@ static int TV_HitTest(TextViewState* pState, int x, int y)
     return iDE;
 }
 
+/* -------------------------------------------------------------------------------------------- */
+// 6.01: draws n characters at (x, y). The font is monospace (one cell = iHexCharW), so a run
+// longer than 4096 characters (a minified file is ONE line of megabytes) only needs its visible
+// columns: before, every repaint pushed the whole line through ExtTextOutW for every visible row.
+// Short runs take the exact old path.
+static void TV_DrawRun(HDC hdc, int x, int y, UINT uOptions, const RECT* prc, const WCHAR* p, int n, int cxClient)
+{
+    RECT rcLocal;
+    if (n > 4096 && iHexCharW > 0)
+    {
+        int iSkip = (x < 0) ? ((-x) / iHexCharW) : 0;
+        int iEnd = (cxClient - x) / iHexCharW + 1;      // exclusive: one cell past the right edge
+        if (iEnd > n) iEnd = n;
+        if (iEnd < 0) iEnd = 0;
+        if (iSkip > iEnd) iSkip = iEnd;
+        p += iSkip;
+        n = iEnd - iSkip;
+        x += iSkip * iHexCharW;
+        if (prc != nullptr)
+        {
+            rcLocal = *prc;
+            if (rcLocal.right > cxClient) rcLocal.right = cxClient;
+            prc = &rcLocal;
+        }
+    }
+    ExtTextOutW(hdc, x, y, uOptions, prc, p, n, nullptr);
+}
+
+// 6.01: paints ONE visual row chunk [iPos, iChunkEnd) with its first column at pixel xBase. The
+// body is the old inline code of WM_PAINT (one-call plain row / three-part selection row); it
+// lives here so Freeze Columns can paint the same row twice under two clip rectangles.
+static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y, int iPos, int iChunkEnd,
+    int iSelLo, int iSelHi, HBRUSH hbrBg, COLORREF clrBg, COLORREF clrText, COLORREF clrSelBg, COLORREF clrSelTx, int cxClient)
+{
+    int x = xBase;
+    if (iSelLo < iSelHi && iChunkEnd > iSelLo && iPos < iSelHi)
+    {
+        RECT rcRow = { 0, y, cxClient, y + iHexLineH };
+        FillRect(hdc, &rcRow, hbrBg);
+        // Selection overlaps this chunk - draw in parts
+        if (iPos < iSelLo)
+        {
+            TV_DrawRun(hdc, x, y, 0, nullptr, pState->pText + iPos, iSelLo - iPos, cxClient);
+            x += (iSelLo - iPos) * iHexCharW;
+        }
+        const int iSelCS = (iPos > iSelLo) ? iPos : iSelLo;
+        const int iSelCE = (iChunkEnd < iSelHi) ? iChunkEnd : iSelHi;
+        const int cchSel = iSelCE - iSelCS;
+        if (cchSel > 0)
+        {
+            SetBkColor(hdc, clrSelBg);
+            SetTextColor(hdc, clrSelTx);
+            // V5: tight rect for selection - only fill behind selected text
+            RECT rcSel = { x, y, x + cchSel * iHexCharW, y + iHexLineH };
+            TV_DrawRun(hdc, x, y, ETO_OPAQUE, &rcSel, pState->pText + iSelCS, cchSel, cxClient);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, clrText);
+            x += cchSel * iHexCharW;
+        }
+        if (iChunkEnd > iSelHi)
+        {
+            TV_DrawRun(hdc, x, y, 0, nullptr, pState->pText + iSelHi, iChunkEnd - iSelHi, cxClient);
+        }
+    }
+    else
+    {
+        // 5.9.3: one-call plain row: background fill + text in the same ExtTextOutW. 5.9.4: the
+        // color is clrBg, the COLORREF twin chosen with hbrBg, so the filled rectangle is
+        // visually identical to a FillRect.
+        RECT rcRow = { x < 0 ? 0 : x, y, cxClient, y + iHexLineH };
+        SetBkColor(hdc, clrBg);
+        TV_DrawRun(hdc, x, y, ETO_OPAQUE, &rcRow, pState->pText + iPos, iChunkEnd - iPos, cxClient);
+    }
+}
+
+
 LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     TextViewState* pState = (TextViewState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
@@ -5085,6 +5217,16 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         RECT rc;
         GetClientRect(hWnd, &rc);
 
+        // 6.02: double-buffer the whole client. Intermediate FillRect /
+        // ExtTextOut sequences (greenbar, selection parts, freeze-column
+        // dual pass) never reach the screen; the user sees only the finished
+        // frame. Cheap on modern GPUs and removes the last visible flicker
+        // on high-DPI or slow GDI paths.
+        HDC hdcMem = CreateCompatibleDC(hdc);
+        HBITMAP hbmMem = (hdcMem != nullptr) ? CreateCompatibleBitmap(hdc, rc.right, rc.bottom) : nullptr;
+        HGDIOBJ hbmOld = (hbmMem != nullptr) ? SelectObject(hdcMem, hbmMem) : nullptr;
+        HDC hdcPaint = (hbmMem != nullptr) ? hdcMem : hdc;   // fallback: paint direct if OOM
+
         // V5: use cached brushes (no CreateSolidBrush per paint)
         HBRUSH hbrGreen = pState->hbrGreen;   // cached in TV_SyncState
         HBRUSH hbrWhite = GetSysColorBrush(COLOR_WINDOW);
@@ -5107,9 +5249,9 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         // V5: single pass — paint background + text together per visual row.
         // This avoids walking the lines twice (once for background, once for text)
         // and avoids calling TV_WrapBreak twice per line.
-        HFONT hOld = (HFONT)SelectObject(hdc, hFont);
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, clrText);
+        HFONT hOld = (HFONT)SelectObject(hdcPaint, hFont);
+        SetBkMode(hdcPaint, TRANSPARENT);
+        SetTextColor(hdcPaint, clrText);
 
         // 5.4: paint only the rows that intersect the dirty rectangle. After
         // a ScrollWindowEx or a partial InvalidateRect most repaints touch a
@@ -5199,7 +5341,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
                 if (y + iHexLineH > yTop)
                 {
                     RECT rcRow = { 0, y, rc.right, y + iHexLineH };
-                    FillRect(hdc, &rcRow, hbrBg);
+                    FillRect(hdcPaint, &rcRow, hbrBg);
                 }
                 y += iHexLineH;
             }
@@ -5228,54 +5370,27 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
                     // which drew the same pixels in two ExtTextOutW calls).
                     // Rows that overlap a real selection keep the three-part
                     // path below, because their background is not uniform.
-                    if (cchChunk > 0 && iSelLo < iSelHi && iChunkEnd > iSelLo && iPos < iSelHi)
+                    if (cchChunk > 0)
                     {
-                        RECT rcRow = { 0, y, rc.right, y + iHexLineH };
-                        FillRect(hdc, &rcRow, hbrBg);
-
-                        // V5: paint text with selection highlight
-                        int x = -iScrollX;
-                        if (iFreezePx > 0 && iScrollX > iFreezePx)
-                            x = -(iScrollX - iFreezePx);
+                        if (iFreezePx > 0 && iScrollX > 0)
                         {
-                            // Selection overlaps this chunk — draw in parts
-                            if (iPos < iSelLo)
-                            {
-                                ExtTextOutW(hdc, x, y, 0, nullptr, pState->pText + iPos, iSelLo - iPos, nullptr);
-                                x += (iSelLo - iPos) * iHexCharW;
-                            }
-                            int iSelCS = (iPos > iSelLo) ? iPos : iSelLo;
-                            int iSelCE = (iChunkEnd < iSelHi) ? iChunkEnd : iSelHi;
-                            int cchSel = iSelCE - iSelCS;
-                            if (cchSel > 0)
-                            {
-                                SetBkColor(hdc, clrSelBg);
-                                SetTextColor(hdc, clrSelTx);
-                                // V5: tight rect for selection — only fill behind selected text
-                                RECT rcSel = { x, y, x + cchSel * iHexCharW, y + iHexLineH };
-                                ExtTextOutW(hdc, x, y, ETO_OPAQUE, &rcSel, pState->pText + iSelCS, cchSel, nullptr);
-                                SetBkMode(hdc, TRANSPARENT);
-                                SetTextColor(hdc, clrText);
-                                x += cchSel * iHexCharW;
-                            }
-                            if (iChunkEnd > iSelHi)
-                            {
-                                ExtTextOutW(hdc, x, y, 0, nullptr, pState->pText + iSelHi, iChunkEnd - iSelHi, nullptr);
-                            }
+                            // 6.01: Freeze Columns. The row is painted twice under two clip rectangles:
+                            // the scrolling part (everything right of the frozen strip, shifted by the
+                            // scroll position) and the frozen strip itself (the first N columns, never
+                            // shifted). The old code only slowed the scroll down once it passed the strip.
+                            int iSaved = SaveDC(hdcPaint);
+                            IntersectClipRect(hdcPaint, iFreezePx, y, rc.right, y + iHexLineH);
+                            TV_PaintChunk(hdcPaint, pState, -iScrollX, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, rc.right);
+                            RestoreDC(hdcPaint, iSaved);
+                            iSaved = SaveDC(hdcPaint);
+                            IntersectClipRect(hdcPaint, 0, y, iFreezePx, y + iHexLineH);
+                            TV_PaintChunk(hdcPaint, pState, 0, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, rc.right);
+                            RestoreDC(hdcPaint, iSaved);
                         }
-                    }
-                    else if (cchChunk > 0)
-                    {
-                        // 5.9.3: one-call plain row: background fill + text in
-                        // the same ExtTextOutW. 5.9.4: the color is clrBg, the
-                        // COLORREF twin chosen with hbrBg above, so the filled
-                        // rectangle is visually identical to the old FillRect.
-                        int x = -iScrollX;
-                        if (iFreezePx > 0 && iScrollX > iFreezePx)
-                            x = -(iScrollX - iFreezePx);
-                        RECT rcRow = { x < 0 ? 0 : x, y, rc.right, y + iHexLineH };
-                        SetBkColor(hdc, clrBg);
-                        ExtTextOutW(hdc, x, y, ETO_OPAQUE, &rcRow, pState->pText + iPos, cchChunk, nullptr);
+                        else
+                        {
+                            TV_PaintChunk(hdcPaint, pState, -iScrollX, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, rc.right);
+                        }
                     }
 
                     iPos = iChunkEnd;
@@ -5289,10 +5404,19 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         {
             int yRest = (y > yTop) ? y : yTop;
             RECT rcRest = { 0, yRest, rc.right, yBottom };
-            FillRect(hdc, &rcRest, hbrWhite);
+            FillRect(hdcPaint, &rcRest, hbrWhite);
         }
 
-        SelectObject(hdc, hOld);
+        SelectObject(hdcPaint, hOld);
+        // 6.02: present the finished frame in one BitBlt (or nothing if we
+        // fell back to painting directly on the screen DC).
+        if (hbmMem != nullptr)
+        {
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
+            SelectObject(hdcMem, hbmOld);
+            DeleteObject(hbmMem);
+            DeleteDC(hdcMem);
+        }
         // V5: hbrGreen is cached in pState->hbrGreen, don't delete here
         EndPaint(hWnd, &ps);
         // 5.5: the screen now shows this selection: it is the reference the
@@ -5364,10 +5488,10 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             else if (g_bEscExit) { PostMessage(hWndMain, WM_CLOSE, 0, 0); }
             return 0;
         case VK_LEFT:
-            if (pState->iSelEnd > 0) { pState->iSelEnd--; if (!bShift) pState->iSelStart = pState->iSelEnd; g_iCaretCol = -1; TV_ScrollCaret(); }
+            if (pState->iSelEnd > 0) { pState->iSelEnd -= (pState->iSelEnd >= 2 && pState->pText[pState->iSelEnd - 2] == L'\r' && pState->pText[pState->iSelEnd - 1] == L'\n') ? 2 : 1; if (!bShift) pState->iSelStart = pState->iSelEnd; g_iCaretCol = -1; TV_ScrollCaret(); }
             return 0;
         case VK_RIGHT:
-            if (pState->iSelEnd < pState->cch) { pState->iSelEnd++; if (!bShift) pState->iSelStart = pState->iSelEnd; g_iCaretCol = -1; TV_ScrollCaret(); }
+            if (pState->iSelEnd < pState->cch) { pState->iSelEnd += (pState->iSelEnd + 1 < pState->cch && pState->pText[pState->iSelEnd] == L'\r' && pState->pText[pState->iSelEnd + 1] == L'\n') ? 2 : 1; if (!bShift) pState->iSelStart = pState->iSelEnd; g_iCaretCol = -1; TV_ScrollCaret(); }
             return 0;
         case VK_UP:
         case VK_DOWN:
@@ -5493,7 +5617,13 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         if (cScroll == 0) return 0;
         SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_ALL;
         GetScrollInfo(hWnd, SB_VERT, &si);
-        TV_ScrollRows(hWnd, pState, si.nPos - cScroll * 3);
+        UINT uLines = 3;                // 6.01: the user's "lines per notch" (WHEEL_PAGESCROLL = a page)
+        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &uLines, 0);
+        if (uLines == 0)
+        {
+            return 0;                   // wheel scrolling switched off in Windows
+        }
+        TV_ScrollRows(hWnd, pState, si.nPos - cScroll * ((uLines == WHEEL_PAGESCROLL) ? (int)si.nPage : (int)uLines));
         return 0;
     }
     case WM_HSCROLL:
@@ -6365,21 +6495,32 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
             StatusFlash(L"Invalid regular expression.");
             return nullptr;
         }
-        while (p < pEnd)
+        try
         {
-            const WCHAR* segEnd = p + (size_t)(pEnd - p);
-            const WCHAR* z = (const WCHAR*)wmemchr(p, L'\0', (size_t)(pEnd - p));
-            if (z != nullptr && z < segEnd)
-                segEnd = z;
-            std::wcmatch m;
-            if (std::regex_search(p, segEnd, m, *pre) && m.ready() && m.size() > 0)
+            while (p < pEnd)
             {
-                g_cchLastRegexMatch = (int)m.length(0);
-                return m[0].first;
+                const WCHAR* segEnd = p + (size_t)(pEnd - p);
+                const WCHAR* z = (const WCHAR*)wmemchr(p, L'\0', (size_t)(pEnd - p));
+                if (z != nullptr && z < segEnd)
+                    segEnd = z;
+                std::wcmatch m;
+                // 6.01: when the search starts inside the text, the character before p exists:
+                // without match_prev_avail ^ and \b matched at the caret as if it were a line start
+                if (std::regex_search(p, segEnd, m, *pre, (p > pszText) ? std::regex_constants::match_prev_avail : std::regex_constants::match_default) && m.ready() && m.size() > 0)
+                {
+                    g_cchLastRegexMatch = (int)m.length(0);
+                    return m[0].first;
+                }
+                if (segEnd >= pEnd)
+                    break;
+                p = segEnd + 1;     // past embedded NUL
             }
-            if (segEnd >= pEnd)
-                break;
-            p = segEnd + 1;     // past embedded NUL
+        }
+        catch (...)
+        {
+            // 6.01: std::regex_error (complexity / stack) or bad_alloc on a huge segment:
+            // before, the exception left the window procedure and killed the program
+            StatusFlash(L"The regular expression is too complex for this text.");
         }
         return nullptr;
     }
@@ -6518,26 +6659,34 @@ void FindAllMatches(void)
         }
         const WCHAR* p = g_tv.pText;
         const WCHAR* pEnd = g_tv.pText + g_tv.cch;
-        while (p < pEnd)
+        try
         {
-            const WCHAR* segEnd = p + lstrlenW(p);
-            std::wcmatch m;
-            const WCHAR* cur = p;
-            while (cur < segEnd && std::regex_search(cur, segEnd, m, *pre))
+            while (p < pEnd)
             {
-                if (iFirst < 0)
+                const WCHAR* segEnd = p + lstrlenW(p);
+                std::wcmatch m;
+                const WCHAR* cur = p;
+                while (cur < segEnd && std::regex_search(cur, segEnd, m, *pre, (cur > g_tv.pText) ? std::regex_constants::match_prev_avail : std::regex_constants::match_default))
                 {
-                    iFirst = (int)(m[0].first - g_tv.pText);
-                    cchFirst = (int)m.length(0);
+                    if (iFirst < 0)
+                    {
+                        iFirst = (int)(m[0].first - g_tv.pText);
+                        cchFirst = (int)m.length(0);
+                    }
+                    cHits++;
+                    if (m.length(0) == 0)
+                        cur = m[0].second + 1;
+                    else
+                        cur = m[0].second;
+                    if (cur <= m[0].first) cur = m[0].first + 1;
                 }
-                cHits++;
-                if (m.length(0) == 0)
-                    cur = m[0].second + 1;
-                else
-                    cur = m[0].second;
-                if (cur <= m[0].first) cur = m[0].first + 1;
+                p = segEnd + 1;
             }
-            p = segEnd + 1;
+        }
+        catch (...)
+        {
+            MessageBoxW(hWndMain, L"The regular expression is too complex for this text.", L"Find All", MB_OK | MB_ICONWARNING);   // 6.01: was an unhandled exception
+            return;
         }
     }
     else
@@ -6576,7 +6725,7 @@ void FindAllMatches(void)
 
 void PrintCurrentView(void)
 {
-    if (g_tv.pText == nullptr || g_tv.cch <= 0)
+    if (g_tv.pText == nullptr || g_tv.cch <= 0 || g_tv.pLineStarts == nullptr)
     {
         MessageBoxW(hWndMain, L"Nothing to print.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
@@ -6586,36 +6735,109 @@ void PrintCurrentView(void)
     pd.hwndOwner = hWndMain;
     pd.Flags = PD_RETURNDC | PD_NOSELECTION | PD_NOPAGENUMS;
     if (!PrintDlgW(&pd) || pd.hDC == nullptr)
+    {
+        if (pd.hDevMode) GlobalFree(pd.hDevMode);
+        if (pd.hDevNames) GlobalFree(pd.hDevNames);
         return;
+    }
+    // 6.01: row-by-row pagination. The old version handed the WHOLE text (up to 128 MB) to one
+    // DrawText call: minutes of layout for one printed page. Monospace font: one cell per column.
+    const int kMaxPages = 2000;
+    bool bTruncated = false;
     DOCINFOW di = {};
     di.cbSize = sizeof(di);
     di.lpszDocName = (g_szCurrentFile[0] != L'\0') ? g_szCurrentFile : L"4More";
-    if (StartDocW(pd.hDC, &di) <= 0) { DeleteDC(pd.hDC); return; }
-    if (StartPage(pd.hDC) <= 0) { EndDoc(pd.hDC); DeleteDC(pd.hDC); return; }
-    int cx = GetDeviceCaps(pd.hDC, HORZRES);
-    int cy = GetDeviceCaps(pd.hDC, VERTRES);
-    RECT rc = { cx / 20, cy / 20, cx - cx / 20, cy - cy / 20 };
     HFONT hFontPrint = CreateFontW(-(GetDeviceCaps(pd.hDC, LOGPIXELSY) * 10 / 72), 0, 0, 0, FW_NORMAL,
         FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-    HGDIOBJ hOld = SelectObject(pd.hDC, hFontPrint ? hFontPrint : hFont);
-    SetBkMode(pd.hDC, TRANSPARENT);
-    SetTextColor(pd.hDC, RGB(0, 0, 0));
-    WCHAR szHdr[MAX_PATH + 64];
-    lstrcpynW(szHdr, (g_szCurrentFile[0] != L'\0') ? g_szCurrentFile : L"4More", _countof(szHdr));
-    DrawTextW(pd.hDC, szHdr, -1, &rc, DT_LEFT | DT_SINGLELINE | DT_TOP | DT_NOPREFIX);
-    TEXTMETRICW tm;
-    GetTextMetricsW(pd.hDC, &tm);
-    rc.top += tm.tmHeight + tm.tmExternalLeading + 8;
-    DrawTextW(pd.hDC, g_tv.pText, g_tv.cch, &rc, DT_LEFT | DT_TOP | DT_NOPREFIX | DT_EXPANDTABS | DT_WORDBREAK);
-    EndPage(pd.hDC);
-    EndDoc(pd.hDC);
-    if (hOld) SelectObject(pd.hDC, hOld);
+    HGDIOBJ hFontUse = (hFontPrint != nullptr) ? (HGDIOBJ)hFontPrint : (HGDIOBJ)hFont;
+    bool bDone = false;
+    if (StartDocW(pd.hDC, &di) > 0)
+    {
+        const int cx = GetDeviceCaps(pd.hDC, HORZRES);
+        const int cy = GetDeviceCaps(pd.hDC, VERTRES);
+        const int xLeft = cx / 20;
+        const int yTop = cy / 20;
+        const int yBottom = cy - cy / 20;
+        HGDIOBJ hOld = SelectObject(pd.hDC, hFontUse);
+        TEXTMETRICW tm;
+        GetTextMetricsW(pd.hDC, &tm);
+        int cyLine = tm.tmHeight + tm.tmExternalLeading;
+        int cxChar = tm.tmAveCharWidth;
+        if (cyLine < 1) cyLine = 1;
+        if (cxChar < 1) cxChar = 1;
+        int cCols = (cx - 2 * (cx / 20)) / cxChar;
+        if (cCols < 1) cCols = 1;
+        WCHAR szHdr[MAX_PATH + 64];
+        lstrcpynW(szHdr, (g_szCurrentFile[0] != L'\0') ? g_szCurrentFile : L"4More", _countof(szHdr));
+        int cPages = 0;
+        int y = yBottom;                    // forces the first StartPage
+        bool bPageOpen = false;
+        bool bStop = false;
+        for (int iLine = 0; iLine < g_tv.cLines && !bStop; iLine++)
+        {
+            const int iLS = g_tv.pLineStarts[iLine];
+            const int iLE = (iLine + 1 < g_tv.cLines) ? g_tv.pLineStarts[iLine + 1] : g_tv.cch;
+            const int iDE = TV_DispEnd(g_tv.pText, iLS, iLE);
+            int iPos = iLS;
+            do
+            {
+                if (y + cyLine > yBottom)
+                {
+                    if (bPageOpen)
+                    {
+                        EndPage(pd.hDC);
+                        bPageOpen = false;
+                    }
+                    if (cPages >= kMaxPages)
+                    {
+                        bTruncated = true;
+                        bStop = true;
+                        break;
+                    }
+                    if (StartPage(pd.hDC) <= 0)
+                    {
+                        bStop = true;
+                        break;
+                    }
+                    bPageOpen = true;
+                    cPages++;
+                    SelectObject(pd.hDC, hFontUse);     // some drivers reset the DC at StartPage
+                    SetBkMode(pd.hDC, TRANSPARENT);
+                    SetTextColor(pd.hDC, RGB(0, 0, 0));
+                    y = yTop;
+                    if (cPages == 1)
+                    {
+                        TextOutW(pd.hDC, xLeft, y, szHdr, lstrlenW(szHdr));
+                        y += cyLine + 8;
+                    }
+                }
+                int n = iDE - iPos;
+                if (n > cCols) n = cCols;
+                if (n > 0)
+                {
+                    TabbedTextOutW(pd.hDC, xLeft, y, g_tv.pText + iPos, n, 0, nullptr, xLeft);
+                }
+                y += cyLine;
+                iPos += n;
+            } while (iPos < iDE);
+        }
+        if (bPageOpen)
+        {
+            EndPage(pd.hDC);
+        }
+        EndDoc(pd.hDC);
+        SelectObject(pd.hDC, hOld);
+        bDone = true;
+    }
     if (hFontPrint) DeleteObject(hFontPrint);
     DeleteDC(pd.hDC);
     if (pd.hDevMode) GlobalFree(pd.hDevMode);
     if (pd.hDevNames) GlobalFree(pd.hDevNames);
-    StatusFlash(L"Print job sent.");
+    if (bDone)
+    {
+        StatusFlash(bTruncated ? L"Print job sent (cut at 2000 pages)." : L"Print job sent.");
+    }
 }
 
 INT_PTR CALLBACK FreezeColsProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
@@ -6740,6 +6962,7 @@ void ApplyCsvMode(bool bOn)
         }
         rows.push_back(std::move(fields));
     }
+    const bool bRowsCut = (i < cch);    // 6.01: the row cap stopped the table before the end of the page
     size_t cbOut = 0;
     for (size_t r = 0; r < rows.size(); r++)
     {
@@ -6780,7 +7003,14 @@ void ApplyCsvMode(bool bOn)
     memcpy(pNew, out.c_str(), out.size() * sizeof(WCHAR));
     pNew[out.size()] = L'\0';
     DeliverTextSafely(pNew, (int)out.size(), true, 0, nullptr, 0, 0);
-    StatusFlash(delim == L'\t' ? L"TSV table view." : L"CSV table view.");
+    if (bRowsCut)
+    {
+        StatusFlash(delim == L'\t' ? L"TSV table view (first 5,000 rows only)." : L"CSV table view (first 5,000 rows only).");
+    }
+    else
+    {
+        StatusFlash(delim == L'\t' ? L"TSV table view." : L"CSV table view.");
+    }
     UpdateViewMenu();
 }
 
@@ -8647,8 +8877,8 @@ void PaintGutter(void)
     // 5.2: both buffers are static (28 KB of stack the /analyze check
     // flagged). PaintGutter runs on the UI thread only, so the single
     // instance is safe.
-    static POLYTEXTW atxt[256];
-    static WCHAR szLabels[256][24];        // a hex offset (at most 16 digits) or a line number
+    static POLYTEXTW atxt[512];
+    static WCHAR szLabels[512][24];        // a hex offset (at most 16 digits) or a line number
     int ctxt = 0;
     // 5.5: CRÍTICO, el bug de las últimas filas sin número. La condición
     // comparaba y (coordenadas del PADRE, las etiquetas empiezan en
@@ -8662,7 +8892,7 @@ void PaintGutter(void)
     // clavado al recuento de filas del WM_PAINT del control.
     int yGutBottom = iRulerH + rcEdit.bottom;
     int y = iRulerH;   // 5.4: labels start where the control starts
-    for (int iLine = iFirst; iLine < cLines && y < yGutBottom && ctxt < 256; iLine++)
+    for (int iLine = iFirst; iLine < cLines && y < yGutBottom && ctxt < 512; iLine++)
     {
         WCHAR* szLabel = szLabels[ctxt];
         int cch;

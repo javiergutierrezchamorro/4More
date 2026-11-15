@@ -1,4 +1,23 @@
-﻿// 4More.rc — recursos del visor (Build 6.02)
+﻿// 4More.rc — recursos del visor (Build 6.07)
+//
+// 6.07: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Find Bytes continúa tras el
+// último acierto (y da la vuelta); regla con columnas congeladas. Manifest 6.07.0.0.
+// Compilar junto al 4More.cpp 6.07.
+//
+// 6.06: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Regex con anclas ^ $ por
+// línea, rueda horizontal y Ctrl+rueda. Manifest 6.06.0.0. Compilar junto al
+// 4More.cpp 6.06.
+//
+// 6.05: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Revisión de repintado y carga
+// del .cpp. Manifest 6.05.0.0. Compilar junto al 4More.cpp 6.05.
+//
+// 6.04: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Revisión del .cpp (fuente
+// escalada por DPI, doble clic selecciona palabra). Manifest 6.04.0.0. Compilar
+// junto al 4More.cpp 6.04.
+//
+// 6.03: NI MENÚ NI ACELERADORES CAMBIAN; SOLO UN TEXTO DE AYUDA. En el cuadro
+// Find Bytes la línea del modo texto ahora dice que se codifica como la vista
+// activa. Manifest 6.03.0.0. Compilar junto al 4More.cpp 6.03.
 //
 // 6.02: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Revisión del .cpp
 // (double-buffer del TextView para suavidad percibida al hacer scroll /
@@ -391,7 +410,7 @@ BEGIN
     LTEXT           "&Pattern:", IDC_STATIC, 12, 12, 40, 8
     EDITTEXT         IDC_BYTES_EDIT, 60, 10, 192, 14, ES_AUTOHSCROLL
     CONTROL         "&Hex pairs (e.g. 4D 5A)", IDC_BYTES_HEX, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 60, 30, 192, 10
-    LTEXT           "Text mode: the bytes of the text as typed. Hex mode: pairs, spaces optional.", IDC_STATIC, 12, 48, 240, 16
+    LTEXT           "Text mode: encoded like the active view (ANSI, UTF-8, UTF-16). Hex mode: pairs.", IDC_STATIC, 12, 48, 240, 16
     LTEXT           "The WHOLE file on disk is scanned in a worker thread (ESC cancels).", IDC_STATIC, 12, 64, 240, 16
     DEFPUSHBUTTON   "&Find", IDOK, 152, 94, 50, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 206, 94, 50, 14

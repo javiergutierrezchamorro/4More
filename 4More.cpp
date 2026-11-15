@@ -1,6 +1,74 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.02
+   Build 6.07
+
+   Version 6.07 (Find Bytes continues, ruler with frozen columns):
+   - FIX: Find Bytes always restarted at byte 0, so repeating the search found
+     the same hit forever. It now continues AFTER the previous hit of the same
+     pattern in the same file and wraps to the start when nothing follows;
+     "Pattern not found" is only answered after the wrap. A different pattern
+     or file starts at 0 as before. Works in the mapped and the ReadFile scans.
+   - FIX: the column ruler scrolled ALL columns with the view while frozen
+     columns stay put: every label sat on the wrong column of a scrolled frozen
+     view. The frozen prefix is numbered where it is drawn now.
+
+   Version 6.06 (regex anchors, wheel):
+   - FIX: regular-expression Find / Find All: ^ and $ matched only at the start
+     and end of the WHOLE text (ECMAScript semantics on the whole range), so
+     "^#" or "ok$" found one line or none. A pattern with an anchor is searched
+     line by line now: ^ = line start, $ = line end. Patterns without anchors
+     keep the single whole-range search.
+   - Mouse: horizontal wheel / touchpad tilt scrolls sideways (no-wrap mode);
+     Ctrl+wheel zooms through the View > Font commands.
+
+   Version 6.05 (review of repaint and loading):
+   - FIX: word wrap: scroll-into-view counted ONE ROW PER LOGICAL LINE, so with
+     wrapped lines the caret, a Find hit, Ctrl+End or a bookmark jump could land
+     below the window with no scroll. It counts visual rows now.
+   - FIX: a failed open (mistyped path, locked file) entered the Recent list;
+     the entry is added when the load succeeds.
+   - SPEED/MEMORY: LF -> CRLF expansion happens IN PLACE (the decode buffers
+     carry ~6% slack): a 128 MB Unix file no longer needs a third buffer
+     (~650 MB peak -> ~390 MB) nor a full copy of the text (~2x faster pass).
+     Verified against the old copying code on edge cases (lone CR, LF, CRLF,
+     runs of breaks, trailing CR/LF).
+   - SPEED: the paint memory DC is clipped to the dirty rectangle (horizontal
+     scroll strips and single-row repaints no longer draw the whole client).
+   - SPEED: wrapped-row counting (caret position, gutter) stops once past the
+     window; a minified 100 MB single line no longer costs millions of steps per
+     keystroke / paint.
+
+   Version 6.04 (review: DPI, mouse, simplification):
+   - FIX: the editor font ignored the display scaling although the manifest
+     declares the process DPI-aware (tiny text at 125-200%). The size table is
+     now in pixels at 96 DPI and is scaled by the system DPI.
+   - FIX: a drag that started OUTSIDE the view (button pressed elsewhere and
+     moved in) changed the selection; the drag now needs the mouse capture.
+   - Mouse: double click selects a word; Shift+click extends the selection.
+   - Simplification: the seven one-line Edit* aliases of the TV_* API are gone
+     (every call site uses TV_* directly); the cached paint bitmap is released
+     with the control.
+
+   Version 6.03 (review: fixes and paint cost):
+   - FIX: SaveSettings built the INI section in a 320-character buffer with
+     unbounded wsprintf; worst-case placement values came within a few
+     characters of overflowing it. Now 640.
+   - FIX: Find Bytes in text mode searched UTF-8 bytes whatever the view: a
+     pattern with accents never matched in an ANSI view, and nothing matched in
+     UTF-16 views. It now encodes like the active view (ANSI / UTF-16 LE-BE /
+     UTF-8; UTF-8 when a character has no ANSI form).
+   - FIX: EBCDIC view: 0x70 was a space (it is o-slash) and the code page 37
+     brackets, braces, backslash, tilde, caret, grave and all accented letters
+     showed U+FFFD. The table is complete now.
+   - FIX: CSV/TSV view detects ';' as delimiter (semicolon CSVs) and keeps a
+     delimiter inside "quoted" text in its field.
+   - FIX: the WM_PAINT double buffer leaked its memory DC when the bitmap
+     could not be created.
+   - SPEED: the double-buffer bitmap is cached between paints and only the
+     dirty rectangle is blitted (it was a client-sized bitmap created and
+     destroyed per WM_PAINT, plus a full-client BitBlt).
+   - Minor: no layout work on WM_SIZE minimize; the argv block is freed when
+     WM_CREATE fails. Manifest 6.03.0.0.
 
    Version 6.02 (perceived performance + polish):
    - SPEED: TextView WM_PAINT uses double-buffering (compatible DC + BitBlt).
@@ -129,7 +197,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.02"
+#define APP_VERSION L"6.07"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -327,6 +395,14 @@ int g_cRecent = 0;
 HMENU g_hRecentMenu = nullptr;                  // the popup, built once at WM_CREATE
 
 // --- Raw-file search worker (one search at a time, gated by g_bInByteSearch) ---
+// 6.07: Find Bytes continues AFTER the previous hit of the same pattern in the same file
+// (it always restarted at byte 0, so a second search found the same hit again) and wraps
+// to the start of the file when nothing follows.
+ULONGLONG g_qwSearchStart = 0;                  // offset the scan begins at
+ULONGLONG g_qwLastHit = (ULONGLONG)-1;          // offset of the last successful hit, -1 = none
+BYTE g_abLastHitPat[128];
+DWORD g_cbLastHitPat = 0;
+WCHAR g_szLastHitFile[MAX_PATH] = {};
 BYTE g_abSearchPat[128];                        // pattern the worker scans for (copied before launch)
 DWORD g_cbSearchPat = 0;
 WCHAR g_szSearchFile[MAX_PATH] = {};            // 3.05: the worker's own copy of g_szCurrentFile (set at launch)
@@ -564,13 +640,6 @@ HWND CreateTextView(HWND hWndParent);           // create the custom control
 // 5.4: thin aliases of the TV_* API (every view uses the custom control).
 // Defined later (before UpdateStatusBar).
 static void EditGetSel(DWORD& rdwStart, DWORD& rdwEnd);
-static int  EditLineFromChar(int iChar);
-static int  EditLineIndex(int iLine);
-static int  EditGetLineCount(void);
-static int  EditGetFirstVisibleLine(void);
-static void EditSetSel(int iStart, int iEnd);
-static void EditScrollCaret(void);
-static int  EditGetTextLength(void);
 
 void GoToDialog(HWND hWnd);
 INT_PTR CALLBACK GoToProc(HWND, UINT, WPARAM, LPARAM);
@@ -1148,6 +1217,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         hEdit = CreateTextView(hWnd);
         if (hEdit == nullptr)
         {
+            if (pArgs != nullptr)
+            {
+                LocalFree(pArgs);       // 6.03: do not leak the argv block on the failure path
+            }
             return -1;                  // 3.20: fail WM_CREATE cleanly instead of a broken window
         }
         ApplyEditorFont();
@@ -1404,6 +1477,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             // a direct call would read it twice (parameter passing + callee),
             // and on Win32 a non-interlocked 64-bit load can tear.
             ULONGLONG qwFound = g_qwSearchResult;
+            g_qwLastHit = qwFound;                                   // 6.07: the next search continues after it
+            g_cbLastHitPat = g_cbSearchPat;
+            CopyMemory(g_abLastHitPat, g_abSearchPat, g_cbSearchPat);
+            (void)lstrcpynW(g_szLastHitFile, g_szSearchFile, MAX_PATH);
             GoToOffset(qwFound);        // loads its page if needed
         }
         else if (wParam == 0)
@@ -1412,6 +1489,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         else if (wParam == 0xFFFFFFFF)
         {
+            g_qwLastHit = (ULONGLONG)-1;        // 6.07: nothing at all (the scan wrapped): start over next time
             MessageBox(hWndMain, L"Pattern not found.", L"Find Bytes", MB_OK | MB_ICONINFORMATION);
         }
         else if (wParam == 2)
@@ -1465,6 +1543,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
     case WM_SIZE:
     {
+        if (wParam == SIZE_MINIMIZED)
+        {
+            break;                      // 6.03: nothing to lay out (the restore sends its own WM_SIZE)
+        }
         // Adjust the status bar to the bottom edge of the client area.
         SendMessage(hStatusBar, WM_SIZE, 0, 0);
         // Make the edit control fill the client area above the status
@@ -1776,6 +1858,68 @@ WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown
         *pcchOut = cch;         // already all CRLF: zero copies
         return(pacText);
     }
+    // 6.05: IN PLACE when the block has room (BuildViewText leaves ~6% slack
+    // in its decode buffers): no second buffer, no full copy. A Unix (LF only)
+    // file of 128 MB used to peak at raw + text + normalized copy (~650 MB) and
+    // pay one big allocation and one memcpy of the whole text; now it is raw +
+    // text. The pass runs BACKWARDS (reads stay ahead of writes because the
+    // write index is never below the read index), moving the runs between line
+    // breaks with memmove. A block without room (or one that is not a
+    // GlobalAlloc block, GlobalSize answers 0) takes the copy path below.
+    if (cExpand > 0 && GlobalSize((HGLOBAL)pacText) / sizeof(WCHAR) >= (size_t)cch + (size_t)cExpand + 1)
+    {
+        int i = cch;                      // read index (exclusive end of the unread part)
+        int j = cch + cExpand;            // write index (exclusive end of the written part)
+        bool bPrevLF = false;             // the char to the right (already moved) was a LF
+        pacText[j] = L'\0';
+        while (i > 0)
+        {
+            const int iRunEnd = i;
+            while (i > 0 && pacText[i - 1] != L'\r' && pacText[i - 1] != L'\n')
+            {
+                i--;
+            }
+            const int cchRun = iRunEnd - i;
+            if (cchRun > 0)
+            {
+                j -= cchRun;
+                if (j != i)
+                {
+                    memmove(pacText + j, pacText + i, (size_t)cchRun * sizeof(WCHAR));
+                }
+                bPrevLF = false;
+            }
+            if (i == 0)
+            {
+                break;
+            }
+            const WCHAR c = pacText[--i];
+            if (c == L'\n')
+            {
+                pacText[--j] = L'\n';
+                if (!(i > 0 && pacText[i - 1] == L'\r'))
+                {
+                    pacText[--j] = L'\r';             // lone LF: add its CR
+                }
+                bPrevLF = true;
+            }
+            else
+            {
+                if (bPrevLF)
+                {
+                    pacText[--j] = L'\r';             // the CR of a CRLF pair
+                }
+                else
+                {
+                    pacText[--j] = L'\n';             // lone CR: add its LF
+                    pacText[--j] = L'\r';
+                }
+                bPrevLF = false;
+            }
+        }
+        *pcchOut = cch + cExpand;
+        return(pacText);
+    }
     // 2) Build with the exact known size.
     WCHAR* pNorm = AllocViewText((DWORD)cch + (DWORD)cExpand + 1);
     if (pNorm == nullptr)
@@ -1958,8 +2102,7 @@ void StartAsyncLoad(const WCHAR* pacFilename)
         return;                         // out of memory: BeginLoadJob already said so
     }
     (void)lstrcpynW(pJob->szPath, pacFilename, MAX_PATH);
-    AddRecentEntry(pJob->szPath);           // MRU: remember what is being opened
-    LaunchLoadJob(pJob);
+    LaunchLoadJob(pJob);                    // 6.05: the MRU entry is added when the open SUCCEEDS (ApplyLoadResult)
 }
 
 
@@ -2930,6 +3073,10 @@ void ApplyLoadResult(LoadJob* pJob)
     // 5.2: the /hex /utf8... switch is consumed in RunLoadJob now, so iView
     // always arrives in pJob->iDetected — the old re-decode branch here (and
     // the second handling of g_iForcedView) are gone.
+    if (!pJob->bStdin && !pJob->bOpenFailed && !pJob->bKeepView && pJob->szPath[0] != L'\0')
+    {
+        AddRecentEntry(pJob->szPath);      // 6.05: a mistyped / unreadable path no longer enters the MRU list
+    }
     ClearBookmarks();                        // page-relative line bookmarks die with the old page
     EnsureEditControlType();                 // 5.4: only creates the control if it does not exist yet
     UpdateViewMenu();
@@ -3035,9 +3182,9 @@ void ApplyLoadResult(LoadJob* pJob)
         if (pJob->bTailJump && hEdit != nullptr)
         {
             // Tail: keep the new end of the file on screen, caret after it.
-            int iLen = EditGetTextLength();   // V5: works for custom control and EDIT
-            EditSetSel(iLen, iLen);
-            EditScrollCaret();
+            int iLen = TV_GetTextLength();   // V5: works for custom control and EDIT
+            TV_SetSel(iLen, iLen);
+            TV_ScrollCaret();
         }
         if (g_qwPendingGoto != (ULONGLONG)-1)
         {
@@ -3738,7 +3885,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
             *pdwSrcLen = (DWORD)cbSrc;
         }
-        pText = AllocViewText((DWORD)cbSrc + 1 + 160);       // + notice room
+        pText = AllocViewText((DWORD)cbSrc + 1 + 160 + ((DWORD)cbSrc >> 4));       // + notice room
         if (pText == nullptr)
         {
             return(false);                          // 3.05: OOM answers FALSE, not a null store
@@ -3807,7 +3954,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
             *pdwSrcLen = (DWORD)(cwch * 2);
         }
-        pText = AllocViewText((DWORD)cwch + 1 + 160);
+        pText = AllocViewText((DWORD)cwch + 1 + 160 + ((DWORD)cwch >> 4));
         if (pText == nullptr)
         {
             return(false);                          // 3.05: OOM answers FALSE, not a null store
@@ -3859,7 +4006,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                 w[0x5A] = L'!';  w[0x5B] = L'$';  w[0x5C] = L'*';  w[0x5D] = L')';
                 w[0x5E] = L';';  w[0x5F] = 0x00AC; w[0x60] = L'-'; w[0x61] = L'/';
                 w[0x6A] = 0x00A6; w[0x6B] = L',';  w[0x6C] = L'%'; w[0x6D] = L'_';
-                w[0x6E] = L'>';  w[0x6F] = L'?';  w[0x70] = L' ';  w[0x7A] = L':';
+                w[0x6E] = L'>';  w[0x6F] = L'?';   w[0x7A] = L':';
                 w[0x7B] = L'#';  w[0x7C] = L'@';  w[0x7D] = 0x0027; w[0x7E] = L'=';
                 w[0x7F] = L'"';
                 for (int i = 0; i < 9; i++)            // a-i
@@ -3889,6 +4036,29 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
                 for (int i = 0; i < 10; i++)           // 0-9
                 {
                     w[0xF0 + i] = (WCHAR)(L'0' + i);
+                }
+                // 6.03: the rest of the code page 37 graphic cells: the
+                // brackets/braces/backslash/tilde/caret/grave and the Latin-1
+                // accented letters (n with tilde, vowels with accents...).
+                static const struct { BYTE b; WORD u; } kCp037[] =
+                {
+                    {0x41,0x00A0},{0x42,0x00E2},{0x43,0x00E4},{0x44,0x00E0},{0x45,0x00E1},{0x46,0x00E3},{0x47,0x00E5},{0x48,0x00E7},{0x49,0x00F1},
+                    {0x51,0x00E9},{0x52,0x00EA},{0x53,0x00EB},{0x54,0x00E8},{0x55,0x00ED},{0x56,0x00EE},{0x57,0x00EF},{0x58,0x00EC},{0x59,0x00DF},
+                    {0x62,0x00C2},{0x63,0x00C4},{0x64,0x00C0},{0x65,0x00C1},{0x66,0x00C3},{0x67,0x00C5},{0x68,0x00C7},{0x69,0x00D1},
+                    {0x70,0x00F8},{0x71,0x00C9},{0x72,0x00CA},{0x73,0x00CB},{0x74,0x00C8},{0x75,0x00CD},{0x76,0x00CE},{0x77,0x00CF},{0x78,0x00CC},{0x79,0x0060},
+                    {0x80,0x00D8},{0x8A,0x00AB},{0x8B,0x00BB},{0x8C,0x00F0},{0x8D,0x00FD},{0x8E,0x00FE},{0x8F,0x00B1},
+                    {0x90,0x00B0},{0x9A,0x00AA},{0x9B,0x00BA},{0x9C,0x00E6},{0x9D,0x00B8},{0x9E,0x00C6},{0x9F,0x00A4},
+                    {0xA0,0x00B5},{0xA1,0x007E},{0xAA,0x00A1},{0xAB,0x00BF},{0xAC,0x00D0},{0xAD,0x00DD},{0xAE,0x00DE},{0xAF,0x00AE},
+                    {0xB0,0x005E},{0xB1,0x00A3},{0xB2,0x00A5},{0xB3,0x00B7},{0xB4,0x00A9},{0xB5,0x00A7},{0xB6,0x00B6},{0xB7,0x00BC},{0xB8,0x00BD},{0xB9,0x00BE},
+                    {0xBA,0x005B},{0xBB,0x005D},{0xBC,0x00AF},{0xBD,0x00A8},{0xBE,0x00B4},{0xBF,0x00D7},
+                    {0xC0,0x007B},{0xCA,0x00AD},{0xCB,0x00F4},{0xCC,0x00F6},{0xCD,0x00F2},{0xCE,0x00F3},{0xCF,0x00F5},
+                    {0xD0,0x007D},{0xDA,0x00B9},{0xDB,0x00FB},{0xDC,0x00FC},{0xDD,0x00F9},{0xDE,0x00FA},{0xDF,0x00FF},
+                    {0xE0,0x005C},{0xE1,0x00F7},{0xEA,0x00B2},{0xEB,0x00D4},{0xEC,0x00D6},{0xED,0x00D2},{0xEE,0x00D3},{0xEF,0x00D5},
+                    {0xFA,0x00B3},{0xFB,0x00DB},{0xFC,0x00DC},{0xFD,0x00D9},{0xFE,0x00DA}
+                };
+                for (size_t k = 0; k < sizeof(kCp037) / sizeof(kCp037[0]); k++)
+                {
+                    w[kCp037[k].b] = (WCHAR)kCp037[k].u;
                 }
             }
         };
@@ -3936,7 +4106,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
             *pdwSrcLen = cbShown;
         }
-        pText = AllocViewText((DWORD)cbSrc + 1 + 160);
+        pText = AllocViewText((DWORD)cbSrc + 1 + 160 + ((DWORD)cbSrc >> 4));  // 6.05: + ~6% room so NormalizeNewlines can expand LF -> CRLF in place
         if (pText == nullptr)
         {
             return(false);                          // 3.05: OOM answers FALSE, not a null store
@@ -4007,7 +4177,7 @@ ATOM RegisterTextViewClass(HINSTANCE hInstance)
 {
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
-    wc.style = 0;   // 5.2: no CS_HREDRAW/CS_VREDRAW — WM_SIZE already invalidates and WM_PAINT repaints everything
+    wc.style = CS_DBLCLKS;   // 6.04: double click selects a word (no CS_HREDRAW/CS_VREDRAW: WM_SIZE invalidates)
     wc.lpfnWndProc = TextViewProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_IBEAM);
@@ -4704,7 +4874,12 @@ static void TV_PositionCaret(void)
         {
             cRows = 0;
             int iPos = iLS;
-            while (iPos < iDE) { iPos = TV_WrapBreak(g_tv.pText, iPos, iDE, iMaxChars); cRows++; }
+            while (iPos < iDE)
+            {
+                iPos = TV_WrapBreak(g_tv.pText, iPos, iDE, iMaxChars);
+                cRows++;
+                if (y + cRows * iHexLineH >= rc.bottom) break;   // 6.05: past the window: the exact count is not needed
+            }
             if (cRows < 1) cRows = 1;
         }
         y += cRows * iHexLineH;
@@ -4714,6 +4889,73 @@ static void TV_PositionCaret(void)
     // Returning without SetCaretPos leaves the caret hidden, which is better
     // than jumping to (0,0) and misleading the user.
     return;
+}
+
+// 6.05: wrap-mode twins of the line-based scroll-into-view. A logical line
+// takes several rows when wrapped, so "caret line < first line + visible rows"
+// (one row per line) let the caret, a Find hit or Ctrl+End land BELOW the
+// window without scrolling. These count VISUAL rows; every count stops one
+// past iCap, so a 100 MB single line costs a few rows, not millions.
+static int TV_WrapRowsOfLine(int iLine, int iMaxChars, int iCap)
+{
+    const int iLS = g_tv.pLineStarts[iLine];
+    const int iLE = (iLine + 1 < g_tv.cLines) ? g_tv.pLineStarts[iLine + 1] : g_tv.cch;
+    const int iDE = TV_DispEnd(g_tv.pText, iLS, iLE);
+    int n = 0;
+    for (int iPos = iLS; iPos < iDE && n <= iCap; n++)
+    {
+        iPos = TV_WrapBreak(g_tv.pText, iPos, iDE, iMaxChars);
+    }
+    return (n < 1) ? 1 : n;
+}
+
+static int TV_WrapCaretRow(int iLine, int iCaret, int iMaxChars, int iCap)
+{
+    const int iLS = g_tv.pLineStarts[iLine];
+    const int iLE = (iLine + 1 < g_tv.cLines) ? g_tv.pLineStarts[iLine + 1] : g_tv.cch;
+    const int iDE = TV_DispEnd(g_tv.pText, iLS, iLE);
+    int iRow = 0;
+    int iPos = iLS;
+    while (iPos <= iDE && iRow <= iCap)
+    {
+        int iCE = TV_WrapBreak(g_tv.pText, iPos, iDE, iMaxChars);
+        if (iCE > iDE) iCE = iDE;
+        if (iCaret >= iPos && iCaret <= iCE) return iRow;
+        iPos = iCE;
+        if (iPos >= iDE) break;
+        iRow++;
+    }
+    return iRow;
+}
+
+static int TV_WrapFirstForCaret(int iCaretLine, int iClientW, int cVis)
+{
+    const int iMaxChars = TV_WrapChars(g_tv.iWrapWidth, iClientW);
+    const int iFirst = g_tv.iFirstVisible;
+    if (iCaretLine < iFirst)
+    {
+        return iCaretLine;
+    }
+    const int iCaretRow = TV_WrapCaretRow(iCaretLine, g_tv.iSelEnd, iMaxChars, cVis);
+    int cBefore = 0;                      // rows of the lines between the first one and the caret's
+    for (int l = iFirst; l < iCaretLine && cBefore + iCaretRow < cVis; l++)
+    {
+        cBefore += TV_WrapRowsOfLine(l, iMaxChars, cVis);
+    }
+    if (cBefore + iCaretRow < cVis)
+    {
+        return iFirst;                    // the caret's row is already painted
+    }
+    int iNew = iCaretLine;                // else: scroll so the caret's row is the last one
+    int iBudget = cVis - iCaretRow - 1;
+    while (iNew > 0 && iBudget > 0)
+    {
+        const int r = TV_WrapRowsOfLine(iNew - 1, iMaxChars, cVis);
+        if (r > iBudget) break;
+        iBudget -= r;
+        iNew--;
+    }
+    return iNew;
 }
 
 void TV_ScrollCaret(void)
@@ -4731,7 +4973,11 @@ void TV_ScrollCaret(void)
     int cVis = (rc.bottom + iHexLineH - 1) / iHexLineH;
     if (cVis < 1) cVis = 1;
     int iFirst = g_tv.iFirstVisible;
-    if (iCaretLine < iFirst) iFirst = iCaretLine;
+    if (g_tv.bWrap && g_tv.pLineStarts != nullptr && g_tv.pText != nullptr)
+    {
+        iFirst = TV_WrapFirstForCaret(iCaretLine, rc.right, cVis);      // 6.05: rows, not lines
+    }
+    else if (iCaretLine < iFirst) iFirst = iCaretLine;
     else if (iCaretLine >= iFirst + cVis) { iFirst = iCaretLine - cVis + 1; if (iFirst < 0) iFirst = 0; }
     // 5.4: TV_ScrollRows clamps, syncs the scrollbar and blits the rows that
     // can move; the selection delta below still repaints the rows the
@@ -5184,6 +5430,17 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
 }
 
 
+#ifndef WM_MOUSEHWHEEL
+#define WM_MOUSEHWHEEL 0x020E
+#endif
+
+// 6.03: the double-buffer bitmap is kept between paints (it grows, never
+// shrinks): every selection tick, caret move or scroll step used to create and
+// destroy a bitmap as big as the whole client area.
+static HBITMAP s_hbmPaintBuf = nullptr;
+static int s_cxPaintBuf = 0;
+static int s_cyPaintBuf = 0;
+
 LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     TextViewState* pState = (TextViewState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
@@ -5223,9 +5480,34 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         // frame. Cheap on modern GPUs and removes the last visible flicker
         // on high-DPI or slow GDI paths.
         HDC hdcMem = CreateCompatibleDC(hdc);
-        HBITMAP hbmMem = (hdcMem != nullptr) ? CreateCompatibleBitmap(hdc, rc.right, rc.bottom) : nullptr;
+        HBITMAP hbmMem = nullptr;
+        if (hdcMem != nullptr && rc.right > 0 && rc.bottom > 0)
+        {
+            if (s_hbmPaintBuf == nullptr || s_cxPaintBuf < rc.right || s_cyPaintBuf < rc.bottom)
+            {
+                if (s_hbmPaintBuf != nullptr)
+                {
+                    DeleteObject(s_hbmPaintBuf);
+                }
+                s_cxPaintBuf = (rc.right > s_cxPaintBuf) ? rc.right : s_cxPaintBuf;
+                s_cyPaintBuf = (rc.bottom > s_cyPaintBuf) ? rc.bottom : s_cyPaintBuf;
+                s_hbmPaintBuf = CreateCompatibleBitmap(hdc, s_cxPaintBuf, s_cyPaintBuf);
+                if (s_hbmPaintBuf == nullptr)
+                {
+                    s_cxPaintBuf = s_cyPaintBuf = 0;
+                }
+            }
+            hbmMem = s_hbmPaintBuf;
+        }
         HGDIOBJ hbmOld = (hbmMem != nullptr) ? SelectObject(hdcMem, hbmMem) : nullptr;
         HDC hdcPaint = (hbmMem != nullptr) ? hdcMem : hdc;   // fallback: paint direct if OOM
+        if (hbmMem != nullptr)
+        {
+            // 6.05: the screen DC is clipped to the update region, the memory DC
+            // was not: a horizontal-scroll strip or a one-row invalidation drew the
+            // whole client area for nothing. GDI now rejects the rest early.
+            IntersectClipRect(hdcMem, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right, ps.rcPaint.bottom);
+        }
 
         // V5: use cached brushes (no CreateSolidBrush per paint)
         HBRUSH hbrGreen = pState->hbrGreen;   // cached in TV_SyncState
@@ -5412,10 +5694,20 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         // fell back to painting directly on the screen DC).
         if (hbmMem != nullptr)
         {
-            BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
-            SelectObject(hdcMem, hbmOld);
-            DeleteObject(hbmMem);
-            DeleteDC(hdcMem);
+            // 6.03: only the dirty rectangle travels to the screen.
+            const int xB = (ps.rcPaint.left > 0) ? (int)ps.rcPaint.left : 0;
+            const int yB = (ps.rcPaint.top > 0) ? (int)ps.rcPaint.top : 0;
+            const int xE = (ps.rcPaint.right < rc.right) ? (int)ps.rcPaint.right : (int)rc.right;
+            const int yE = (ps.rcPaint.bottom < rc.bottom) ? (int)ps.rcPaint.bottom : (int)rc.bottom;
+            if (xE > xB && yE > yB)
+            {
+                BitBlt(hdc, xB, yB, xE - xB, yE - yB, hdcMem, xB, yB, SRCCOPY);
+            }
+            SelectObject(hdcMem, hbmOld);       // the cached bitmap is NOT deleted here
+        }
+        if (hdcMem != nullptr)
+        {
+            DeleteDC(hdcMem);                   // 6.03: also freed when the bitmap could not be created
         }
         // V5: hbrGreen is cached in pState->hbrGreen, don't delete here
         EndPaint(hWnd, &ps);
@@ -5615,6 +5907,16 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         int cScroll = s_iWheelAcc / WHEEL_DELTA;
         s_iWheelAcc -= cScroll * WHEEL_DELTA;
         if (cScroll == 0) return 0;
+        if (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL)
+        {
+            // 6.06: Ctrl+wheel zooms (the View > Font bigger / smaller commands)
+            const int cSteps = (cScroll > 0) ? ((cScroll > 3) ? 3 : cScroll) : ((cScroll < -3) ? 3 : -cScroll);
+            for (int k = 0; k < cSteps; k++)
+            {
+                SendMessage(hWndMain, WM_COMMAND, MAKEWPARAM((cScroll > 0) ? ID_VIEW_FONTPLUS : ID_VIEW_FONTMINUS, 0), 0);
+            }
+            return 0;
+        }
         SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_ALL;
         GetScrollInfo(hWnd, SB_VERT, &si);
         UINT uLines = 3;                // 6.01: the user's "lines per notch" (WHEEL_PAGESCROLL = a page)
@@ -5624,6 +5926,20 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             return 0;                   // wheel scrolling switched off in Windows
         }
         TV_ScrollRows(hWnd, pState, si.nPos - cScroll * ((uLines == WHEEL_PAGESCROLL) ? (int)si.nPage : (int)uLines));
+        return 0;
+    }
+    case WM_MOUSEHWHEEL:
+    {
+        // 6.06: tilt wheels and touchpads (positive delta = right), no-wrap mode only.
+        if (pState == nullptr || pState->bWrap) return 0;
+        static int s_iHWheelAcc = 0;
+        s_iHWheelAcc += GET_WHEEL_DELTA_WPARAM(wParam);
+        const int cH = s_iHWheelAcc / WHEEL_DELTA;
+        s_iHWheelAcc -= cH * WHEEL_DELTA;
+        if (cH != 0)
+        {
+            TV_ScrollX(hWnd, pState, pState->iScrollX + cH * 3 * iHexCharW);
+        }
         return 0;
     }
     case WM_HSCROLL:
@@ -5650,11 +5966,28 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         // 5.7: one wrap-aware hit test (was a 15-line inline block that
         // mis-mapped visual rows to logical lines in wrap mode).
         int iPos = TV_HitTest(pState, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-        pState->iSelStart = iPos; pState->iSelEnd = iPos;
+        pState->iSelEnd = iPos;
+        if (!(wParam & MK_SHIFT)) pState->iSelStart = iPos;     // 6.04: Shift+click extends the selection
         g_iCaretCol = -1;               // 5.7: a click is a horizontal move
         // 5.5: repaint only the rows the highlight or the caret left
         TV_InvalidateSelPainted(hWnd, pState);
         SetCapture(hWnd);   // V5: enable drag-select
+        SetFocus(hWnd);
+        UpdateStatusBar();
+        return 0;
+    }
+    case WM_LBUTTONDBLCLK:
+    {
+        // 6.04: select the word under the pointer (letters, digits, '_').
+        if (pState == nullptr || pState->pText == nullptr) return 0;
+        const int iPos = TV_HitTest(pState, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        int iL = iPos, iR = iPos;
+        while (iL > 0 && (pState->pText[iL - 1] == L'_' || IsCharAlphaNumericW(pState->pText[iL - 1]))) iL--;
+        while (iR < pState->cch && (pState->pText[iR] == L'_' || IsCharAlphaNumericW(pState->pText[iR]))) iR++;
+        pState->iSelStart = iL;
+        pState->iSelEnd = iR;
+        g_iCaretCol = -1;
+        TV_InvalidateSelPainted(hWnd, pState);
         SetFocus(hWnd);
         UpdateStatusBar();
         return 0;
@@ -5665,7 +5998,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         return 0;
     case WM_MOUSEMOVE:
         if (pState == nullptr) return 0;    // 5.2: same guard as WM_LBUTTONDOWN
-        if (wParam & MK_LBUTTON)
+        if ((wParam & MK_LBUTTON) && GetCapture() == hWnd)      // 6.04: only a drag that started in the view
         {
             // V5: extend selection during drag. 5.7: the same wrap-aware
             // hit test; dragging below the last row extends to the end.
@@ -5696,6 +6029,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         TV_ClearText();
         // V5: free the cached greenbar brush
         if (g_tv.hbrGreen != nullptr) { DeleteObject(g_tv.hbrGreen); g_tv.hbrGreen = nullptr; }
+        if (s_hbmPaintBuf != nullptr) { DeleteObject(s_hbmPaintBuf); s_hbmPaintBuf = nullptr; s_cxPaintBuf = s_cyPaintBuf = 0; }   // 6.04
         g_tv.hWnd = nullptr;   // V5: clear the dangling window handle
         return 0;
     }
@@ -5911,7 +6245,7 @@ void SetView(int iNewView)
     {
         DWORD dwStart = 0, dwEnd = 0;
         EditGetSel(dwStart, dwEnd);
-        int iLine = EditLineFromChar((int)dwEnd);
+        int iLine = TV_LineFromChar((int)dwEnd);
         ULONGLONG qwLine = 0;
         if (iLine >= 0 && OffsetOfLine((DWORD)iLine, qwLine))
         {
@@ -6200,9 +6534,24 @@ void HideLoadProgress(void)
 // changes with the font). The previous fonts are deleted only AFTER the
 // control has been told to use the new ones, so no repaint can touch a freed
 // font.
+// 6.04: the sizes of g_iFontSizes are pixels at 96 DPI; the manifest declares the
+// process DPI-aware, so on a 125-200% display the text came out tiny. The
+// height is scaled by the system DPI (metrics, gutter and ruler follow the font).
+static int ScaleFontPx(int iPx)
+{
+    int iDpi = 96;
+    HDC hdcScr = GetDC(nullptr);
+    if (hdcScr != nullptr)
+    {
+        iDpi = GetDeviceCaps(hdcScr, LOGPIXELSY);
+        ReleaseDC(nullptr, hdcScr);
+    }
+    return MulDiv(iPx, (iDpi > 0) ? iDpi : 96, 96);
+}
+
 void ApplyEditorFont(void)
 {
-    int iHeight = g_iFontSizes[g_iFontIndex];
+    int iHeight = ScaleFontPx(g_iFontSizes[g_iFontIndex]);
     HFONT hNew = CreateFontW(iHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
@@ -6374,13 +6723,6 @@ static bool s_bFlash = false;                           // StatusFlash owns part
 // EDIT and its EM_* branches are gone). Kept under the old names so the
 // ~40 call sites (status bar, Go To, bookmarks, search) stay untouched.
 static void EditGetSel(DWORD& rdwStart, DWORD& rdwEnd) { int iS, iE; TV_GetSel(iS, iE); rdwStart = (DWORD)iS; rdwEnd = (DWORD)iE; }
-static int  EditLineFromChar(int iChar) { return TV_LineFromChar(iChar); }
-static int  EditLineIndex(int iLine) { return TV_LineIndex(iLine); }
-static int  EditGetLineCount(void) { return TV_LineCount(); }
-static int  EditGetFirstVisibleLine(void) { return TV_FirstVisibleLine(); }
-static void EditSetSel(int iStart, int iEnd) { TV_SetSel(iStart, iEnd); }
-static void EditScrollCaret(void) { TV_ScrollCaret(); }
-static int  EditGetTextLength(void) { return TV_GetTextLength(); }
 
 void UpdateStatusBar(bool bForce)
 {
@@ -6407,8 +6749,8 @@ void UpdateStatusBar(bool bForce)
         SendMessage(hStatusBar, SB_SETTEXT, 1, (LPARAM)L"");
         return;
     }
-    int iLine = EditLineFromChar((int)dwSelEnd);   // V5: works for custom control and EDIT
-    DWORD dwLineStart = (DWORD)EditLineIndex(iLine);
+    int iLine = TV_LineFromChar((int)dwSelEnd);   // V5: works for custom control and EDIT
+    DWORD dwLineStart = (DWORD)TV_LineIndex(iLine);
     if (dwLineStart == (DWORD)-1)                  // defensive: -1 when the line does not exist
     {
         dwLineStart = 0;
@@ -6481,6 +6823,44 @@ static const std::wregex* GetCachedRegex(void)
     }
 }
 
+// 6.06: ECMAScript's ^ and $ only match at the start/end of the range handed to
+// regex_search, so on the whole text "^foo" matched only on line 1 and "bar$"
+// only at the very end: useless in a line viewer. A pattern with an anchor is
+// now searched LINE BY LINE (the CR of a CRLF is left out of the line), so ^ and
+// $ mean line start / line end. Patterns without anchors keep the single
+// whole-range search (one call, no per-line overhead on multi-million-line
+// files). A search that starts in the middle of a line (Find Next from the
+// caret) passes match_prev_avail for that first partial line, as before.
+static bool RegexSearchSeg(const std::wregex& re, const WCHAR* pFrom, const WCHAR* pLimit, const WCHAR* pszText, std::wcmatch& m)
+{
+    using std::regex_constants::match_default;
+    using std::regex_constants::match_prev_avail;
+    if (wcschr(szFind, L'^') == nullptr && wcschr(szFind, L'$') == nullptr)
+    {
+        return std::regex_search(pFrom, pLimit, m, re, (pFrom > pszText) ? match_prev_avail : match_default);
+    }
+    const WCHAR* pL = pFrom;
+    for (;;)
+    {
+        const WCHAR* pNl = (pL < pLimit) ? (const WCHAR*)wmemchr(pL, L'\n', (size_t)(pLimit - pL)) : nullptr;
+        const WCHAR* pLineEnd = (pNl != nullptr) ? pNl : pLimit;
+        if (pLineEnd > pL && pLineEnd[-1] == L'\r')
+        {
+            pLineEnd--;                               // the CR belongs to the line break
+        }
+        const bool bAtLineStart = (pL == pszText) || (pL[-1] == L'\n');
+        if (std::regex_search(pL, pLineEnd, m, re, bAtLineStart ? match_default : match_prev_avail))
+        {
+            return true;
+        }
+        if (pNl == nullptr || pNl + 1 >= pLimit)
+        {
+            return false;
+        }
+        pL = pNl + 1;
+    }
+}
+
 static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
 {
     // 5.9.14: text may hold embedded NULs. Plain and regex walks walk NUL-free
@@ -6506,7 +6886,7 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
                 std::wcmatch m;
                 // 6.01: when the search starts inside the text, the character before p exists:
                 // without match_prev_avail ^ and \b matched at the caret as if it were a line start
-                if (std::regex_search(p, segEnd, m, *pre, (p > pszText) ? std::regex_constants::match_prev_avail : std::regex_constants::match_default) && m.ready() && m.size() > 0)
+                if (RegexSearchSeg(*pre, p, segEnd, pszText, m) && m.ready() && m.size() > 0)
                 {
                     g_cchLastRegexMatch = (int)m.length(0);
                     return m[0].first;
@@ -6611,8 +6991,8 @@ void SearchNext(HWND hWnd, bool bShowError)
     if (iPos >= 0)
     {
         int cchHit = (g_bRegexFind && g_cchLastRegexMatch > 0) ? g_cchLastRegexMatch : lstrlenW(szFind);
-        EditSetSel(iPos, iPos + cchHit);
-        EditScrollCaret();
+        TV_SetSel(iPos, iPos + cchHit);
+        TV_ScrollCaret();
         // 5.8: the focus belongs to the DIALOG while it is open. The old
         // unconditional SetFocus(hEdit) stole it after every Find Next, so
         // the user was left "in the results" with the dialog still up and
@@ -6666,7 +7046,7 @@ void FindAllMatches(void)
                 const WCHAR* segEnd = p + lstrlenW(p);
                 std::wcmatch m;
                 const WCHAR* cur = p;
-                while (cur < segEnd && std::regex_search(cur, segEnd, m, *pre, (cur > g_tv.pText) ? std::regex_constants::match_prev_avail : std::regex_constants::match_default))
+                while (cur < segEnd && RegexSearchSeg(*pre, cur, segEnd, g_tv.pText, m))
                 {
                     if (iFirst < 0)
                     {
@@ -6717,8 +7097,8 @@ void FindAllMatches(void)
     if (iFirst >= 0)
     {
         int cchHit = g_bRegexFind ? ((cchFirst > 1) ? cchFirst : 1) : lstrlenW(szFind);
-        EditSetSel(iFirst, iFirst + cchHit);
-        EditScrollCaret();
+        TV_SetSel(iFirst, iFirst + cchHit);
+        TV_ScrollCaret();
         SetFocus(hEdit);
     }
 }
@@ -6910,10 +7290,20 @@ void ApplyCsvMode(bool bOn)
     }
     const WCHAR* pText = g_tv.pText;
     const int cch = g_tv.cch;
+    // 6.03: TAB wins when the first line has one; otherwise the more
+    // frequent of ',' and ';' (semicolon CSVs are the norm in es/de/fr locales).
     WCHAR delim = L',';
-    for (int i = 0; i < cch && pText[i] != L'\n' && pText[i] != L'\r'; i++)
     {
-        if (pText[i] == L'\t') { delim = L'\t'; break; }
+        int cComma = 0, cSemi = 0;
+        bool bTab = false;
+        for (int i = 0; i < cch && pText[i] != L'\n' && pText[i] != L'\r'; i++)
+        {
+            if (pText[i] == L'\t') { bTab = true; break; }
+            if (pText[i] == L',') cComma++;
+            else if (pText[i] == L';') cSemi++;
+        }
+        if (bTab) delim = L'\t';
+        else if (cSemi > cComma) delim = L';';
     }
     // 6.00: store field offsets into the source (no per-cell wstring allocs).
     const int kMaxRows = 5000;
@@ -6929,10 +7319,12 @@ void ApplyCsvMode(bool bOn)
         fields.reserve(8);
         int iField = i;
         bool bRowEnd = false;
+        bool bQuote = false;              // 6.03: a delimiter inside "..." does not split the field
         for (; i < cch; i++)
         {
             const WCHAR ch = pText[i];
             if (ch == L'\r') continue;
+            if (ch == L'"') { bQuote = !bQuote; continue; }
             if (ch == L'\n')
             {
                 fields.push_back(Field{ iField, i - iField });
@@ -6940,7 +7332,7 @@ void ApplyCsvMode(bool bOn)
                 bRowEnd = true;
                 break;
             }
-            if (ch == delim)
+            if (ch == delim && !bQuote)
             {
                 fields.push_back(Field{ iField, i - iField });
                 iField = i + 1;
@@ -7203,9 +7595,9 @@ void JumpFilePage(bool bLast)
         // the keys must not die either (the subclass already consumed
         // them): give them the classic EDIT meaning — the caret walks to
         // the top or the bottom of the text that IS on screen.
-        int cchText = EditGetTextLength();   // V5
-        EditSetSel(bLast ? cchText : 0, bLast ? cchText : 0);
-        EditScrollCaret();
+        int cchText = TV_GetTextLength();   // V5
+        TV_SetSel(bLast ? cchText : 0, bLast ? cchText : 0);
+        TV_ScrollCaret();
         return;
     }
     if (!bLast)
@@ -7215,8 +7607,8 @@ void JumpFilePage(bool bLast)
             // 3.01: already on the first page: walk the caret up, no
             // reload of the same bytes (the twin of the last-page case
             // below — a reload would redraw identical content).
-            EditSetSel(0, 0);   // V5
-            EditScrollCaret();   // V5
+            TV_SetSel(0, 0);   // V5
+            TV_ScrollCaret();   // V5
             return;
         }
         LoadPage(0, false);             // first page, top of file
@@ -7229,9 +7621,9 @@ void JumpFilePage(bool bLast)
     {
         // Already on the last page: just walk the caret to the very
         // end — a reload would redraw the same bytes for nothing.
-        int cchText = EditGetTextLength();   // V5
-        EditSetSel(cchText, cchText);
-        EditScrollCaret();
+        int cchText = TV_GetTextLength();   // V5
+        TV_SetSel(cchText, cchText);
+        TV_ScrollCaret();
         return;
     }
     LoadPage(qwBase, true);
@@ -7540,7 +7932,7 @@ void ToggleBookmark(void)
     }
     DWORD dwEnd = 0;
     DWORD dwDummy; EditGetSel(dwDummy, dwEnd);   // V5
-    int iLine = EditLineFromChar((int)dwEnd);   // V5
+    int iLine = TV_LineFromChar((int)dwEnd);   // V5
     if (iLine < 0)
     {
         return;
@@ -7624,7 +8016,7 @@ void NextBookmark(bool bForward)
     }
     DWORD dwEnd = 0;
     DWORD dwDummy; EditGetSel(dwDummy, dwEnd);   // V5
-    DWORD iLine = (DWORD)EditLineFromChar((int)dwEnd);   // V5
+    DWORD iLine = (DWORD)TV_LineFromChar((int)dwEnd);   // V5
     int iPick = -1;
     if (bForward)
     {
@@ -7656,11 +8048,11 @@ void NextBookmark(bool bForward)
             iPick = g_cBookmarks - 1; // wrap around to the last
         }
     }
-    int lrIdx = EditLineIndex((int)g_pBookmarks[iPick]);   // V5
+    int lrIdx = TV_LineIndex((int)g_pBookmarks[iPick]);   // V5
     if (lrIdx != -1)
     {
-        EditSetSel((int)lrIdx, (int)lrIdx);   // V5
-        EditScrollCaret();   // V5
+        TV_SetSel((int)lrIdx, (int)lrIdx);   // V5
+        TV_ScrollCaret();   // V5
         SetFocus(hEdit);
         UpdateStatusBar();
     }
@@ -7691,7 +8083,7 @@ INT_PTR CALLBACK GoToProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
             WCHAR szCur[24];
             DWORD dwStart = 0, dwEnd = 0;
             EditGetSel(dwStart, dwEnd);
-            int iLine = EditLineFromChar((int)dwEnd);
+            int iLine = TV_LineFromChar((int)dwEnd);
             U64ToWide(szCur, (ULONGLONG)((iLine > 0) ? iLine + 1 : 1));
             SetDlgItemTextW(hDlg, IDC_GOTO_EDIT, szCur);
         }
@@ -7740,7 +8132,7 @@ void GoToLine(ULONGLONG qwLine)
     {
         return;
     }
-    int cLines = EditGetLineCount();   // V5: works for custom control and EDIT
+    int cLines = TV_LineCount();   // V5: works for custom control and EDIT
     if (cLines <= 0)
     {
         return;                         // nothing on screen
@@ -7753,13 +8145,13 @@ void GoToLine(ULONGLONG qwLine)
     {
         qwLine = (ULONGLONG)cLines;
     }
-    int lrIdx = EditLineIndex((int)(qwLine - 1));   // V5
+    int lrIdx = TV_LineIndex((int)(qwLine - 1));   // V5
     if (lrIdx == -1)
     {
         return;
     }
-    EditSetSel((int)lrIdx, (int)lrIdx);   // V5
-    EditScrollCaret();   // V5
+    TV_SetSel((int)lrIdx, (int)lrIdx);   // V5
+    TV_ScrollCaret();   // V5
     SetFocus(hEdit);
     UpdateStatusBar();
 }
@@ -7966,21 +8358,21 @@ void PositionAtOffset(ULONGLONG qwOff)
         DWORD cchLine = 49 + 1 + 16 + 2;                // same arithmetic as BuildHexText
         DWORD iCol = iByte * 3 + ((iByte >= 8) ? 1 : 0);
         DWORD iPos = iLine * cchLine + iCol;
-        EditSetSel((int)iPos, (int)iPos);   // V5
-        EditScrollCaret();
+        TV_SetSel((int)iPos, (int)iPos);   // V5
+        TV_ScrollCaret();
     }
     else
     {
         int iLine = 0;
         if (LineAtOffset(qwOff, iLine))
         {
-            int lrIdx = EditLineIndex(iLine);   // V5
+            int lrIdx = TV_LineIndex(iLine);   // V5
             if (lrIdx == -1)
             {
                 lrIdx = 0;      // defensive: the line does not exist
             }
-            EditSetSel((int)lrIdx, (int)lrIdx);   // V5
-            EditScrollCaret();   // V5
+            TV_SetSel((int)lrIdx, (int)lrIdx);   // V5
+            TV_ScrollCaret();   // V5
         }
     }
     SetFocus(hEdit);
@@ -8085,21 +8477,57 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
             }
             else
             {
-                // Plain text: search its UTF-8 bytes (ASCII included
-                // verbatim); the ANSI code page is the fallback.
-                int cb = WideCharToMultiByte(CP_UTF8, 0, szPat, -1, (LPSTR)bPat, (int)sizeof(bPat) - 1, nullptr, nullptr);
-                if (cb <= 0)
+                // 6.03: plain text is encoded like the ACTIVE view, so what
+                // the user sees is what is searched: UTF-16 views search
+                // the 16-bit units, ANSI searches the ANSI code page (an
+                // "n with tilde" is one byte there, two in UTF-8), the
+                // rest search UTF-8 (the ANSI code page is the fallback).
+                int cb = 0;
+                if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
                 {
-                    // 3.02: a pattern that does not FIT is not a
-                    // conversion failure. Falling back to the ANSI code
-                    // page would silently search for DIFFERENT bytes
-                    // than the ones typed (accents/emoji): say so instead.
-                    if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+                    const int nUnits = lstrlenW(szPat);
+                    if ((size_t)nUnits * 2 > sizeof(bPat))
                     {
-                        MessageBoxW(hDlg, L"The pattern is too long (127 bytes maximum in UTF-8).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                        MessageBoxW(hDlg, L"The pattern is too long (64 characters maximum in UTF-16).", L"Find Bytes", MB_OK | MB_ICONWARNING);
                         return (INT_PTR)TRUE;
                     }
-                    cb = WideCharToMultiByte(CP_ACP, 0, szPat, -1, (LPSTR)bPat, (int)sizeof(bPat) - 1, nullptr, nullptr);
+                    for (int k = 0; k < nUnits; k++)
+                    {
+                        const BYTE bLo = (BYTE)(szPat[k] & 0xFF);
+                        const BYTE bHi = (BYTE)((szPat[k] >> 8) & 0xFF);
+                        bPat[cbPat++] = (iView == VIEW_UTF16BE) ? bHi : bLo;
+                        bPat[cbPat++] = (iView == VIEW_UTF16BE) ? bLo : bHi;
+                    }
+                    cb = (int)cbPat + 1;                 // same convention as the converters (terminator counted)
+                }
+                else
+                {
+                    if (iView == VIEW_ANSI)
+                    {
+                        BOOL bDefUsed = FALSE;
+                        cb = WideCharToMultiByte(CP_ACP, 0, szPat, -1, (LPSTR)bPat, (int)sizeof(bPat) - 1, nullptr, &bDefUsed);
+                        if (bDefUsed)
+                        {
+                            cb = 0;                      // a character has no ANSI form: UTF-8 below
+                        }
+                    }
+                    if (cb <= 0)
+                    {
+                        cb = WideCharToMultiByte(CP_UTF8, 0, szPat, -1, (LPSTR)bPat, (int)sizeof(bPat) - 1, nullptr, nullptr);
+                    }
+                    if (cb <= 0)
+                    {
+                        // 3.02: a pattern that does not FIT is not a
+                        // conversion failure. Falling back to the ANSI code
+                        // page would silently search for DIFFERENT bytes
+                        // than the ones typed (accents/emoji): say so instead.
+                        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+                        {
+                            MessageBoxW(hDlg, L"The pattern is too long (127 bytes maximum).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                            return (INT_PTR)TRUE;
+                        }
+                        cb = WideCharToMultiByte(CP_ACP, 0, szPat, -1, (LPSTR)bPat, (int)sizeof(bPat) - 1, nullptr, nullptr);
+                    }
                 }
                 cbPat = (cb > 0) ? (DWORD)(cb - 1) : 0;   // without the terminator
             }
@@ -8149,6 +8577,12 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
     // The dialog already bounds it, but a flat copy keeps the worker simple.
     g_cbSearchPat = cbPat;
     CopyMemory(g_abSearchPat, pPat, cbPat);
+    g_qwSearchStart = 0;                 // 6.07: same pattern, same file: continue after the previous hit
+    if (g_qwLastHit != (ULONGLONG)-1 && g_cbLastHitPat == cbPat && memcmp(g_abLastHitPat, pPat, cbPat) == 0 &&
+        lstrcmpiW(g_szLastHitFile, g_szCurrentFile) == 0)
+    {
+        g_qwSearchStart = g_qwLastHit + 1;
+    }
     // 3.05: the worker reads its OWN snapshot of the path. Nothing else
     // writes g_szCurrentFile while a scan runs, but the failure road of
     // SetView could, and the copy makes the race impossible to spell.
@@ -8288,18 +8722,30 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
     // died with the "4More must close" box. All locals here are POD, so
     // the MSVC no-unwinding rule is met; on the audit bench the statements
     // map to if (1) / else if (0) as always.
+    const ULONGLONG qwStart = g_qwSearchStart;   // 6.07: snapshot (the UI thread may start another search later)
     __try
     {
+    for (int pass = 0; pass < 2 && !bFound && !bCancel; pass++)
+    {
+    // 6.07: pass 0 scans from the start offset to the end; pass 1 (only when the start offset is
+    // not 0) wraps to the beginning and stops where pass 0 began (plus the pattern's straddle zone).
+    const ULONGLONG qwFrom = (pass == 0) ? qwStart : 0;
+    const ULONGLONG qwTo = (pass == 0) ? (ULONGLONG)-1 : (qwStart + cbPat - 1);
+    if (pass == 1 && qwStart == 0)
+    {
+        break;
+    }
     if (pView != nullptr)
     {
-        ULONGLONG qwPos = 0;                      // file offset of the slice being scanned
+        const ULONGLONG qwLim = (qwTo < cbSearch) ? qwTo : cbSearch;
+        ULONGLONG qwPos = qwFrom;                      // file offset of the slice being scanned
         while (!bFound && !bCancel)
         {
-            if (qwPos >= cbSearch)
+            if (qwPos >= qwLim)
             {
                 break;                            // EOF: the whole view is scanned
             }
-            ULONGLONG cbRest = cbSearch - qwPos;
+            ULONGLONG cbRest = qwLim - qwPos;
             DWORD cbWindow = (cbRest < (ULONGLONG)(CB_CHUNK + cbOverlap)) ? (DWORD)cbRest : (DWORD)(CB_CHUNK + cbOverlap);
             ULONGLONG qwHit = 0;
             if (ScanForPattern(pView + qwPos, cbWindow, qwPos, &qwHit))
@@ -8325,6 +8771,16 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
     }
     else
     {
+    {
+        LARGE_INTEGER liFrom;
+        liFrom.QuadPart = (LONGLONG)qwFrom;
+        if (!SetFilePointerEx(hFile, liFrom, nullptr, FILE_BEGIN))
+        {
+            break;                        // cannot position: the scan is over (not found)
+        }
+        cbKeep = 0;
+        qwBase = qwFrom;
+    }
     while (!bFound && !bCancel)
     {
         DWORD cbRead = 0;
@@ -8356,6 +8812,10 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
             MoveMemory(pBuf, pBuf + cbHave - cbKeep, cbKeep);
         }
         qwBase += (ULONGLONG)(cbHave - cbKeep);
+        if (qwBase >= qwTo)
+        {
+            break;                        // 6.07: the wrap pass reached where the first pass began
+        }
         // Progress at ~10 Hz: PostMessage is cheap and the UI thread
         // repaints at its own pace, decoupled from the scan speed.
         // 3.08: the position travels IN the message (low/high halves) —
@@ -8368,6 +8828,7 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
         }
         // The single cancel check per chunk (ESC handler or WM_DESTROY).
         bCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
+    }
     }
     }
     }
@@ -8702,7 +9163,7 @@ int GutterWidth(void)
     }
     if (g_bLineNums)
     {
-        int cLines = EditGetLineCount();   // V5: works for custom control and EDIT
+        int cLines = TV_LineCount();   // V5: works for custom control and EDIT
         int cDigits = 4;                        // minimum column: 4 digits
         while (cLines >= 10000)
         {
@@ -8817,9 +9278,9 @@ void PaintGutter(void)
     }
     else
     {
-        cLines = (int)EditGetLineCount();   // V5
+        cLines = (int)TV_LineCount();   // V5
     }
-    int iFirst = (int)EditGetFirstVisibleLine();   // V5
+    int iFirst = (int)TV_FirstVisibleLine();   // V5
     // 5.9.8: wrap mode, the alignment fix. The loop below painted ONE label
     // per LOGICAL line one row apart, but in wrap the control paints several
     // VISUAL rows per logical line: the first wrapped line above pushed every
@@ -8966,7 +9427,12 @@ void PaintGutter(void)
             {
                 cRows = 0;
                 int iPos = iLS;
-                while (iPos < iDE) { iPos = TV_WrapBreak(g_tv.pText, iPos, iDE, iMaxCharsGut); cRows++; }
+                while (iPos < iDE)
+                {
+                    iPos = TV_WrapBreak(g_tv.pText, iPos, iDE, iMaxCharsGut);
+                    cRows++;
+                    if (y + cRows * iHexLineH >= yGutBottom) break;   // 6.05: past the gutter: stop counting
+                }
                 if (cRows < 1) cRows = 1;
             }
             y += cRows * iHexLineH;
@@ -9161,28 +9627,38 @@ void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin)
     }
     int iScrollXPx = g_tv.iScrollX;   // V5: pixels, the control owns the scroll
     HGDIOBJ hOld = RulerStripBegin(hdc, rcRuler, hFont);
-    int iFirstCol = iScrollXPx / iHexCharW;
-    int xStart = rcRuler.left - (iScrollXPx % iHexCharW);
-    int iColsVisible = (rcRuler.right - xStart) / iHexCharW + 2;
-    int iRulerH = rcRuler.bottom - rcRuler.top;
-    int y = rcRuler.top;
-    for (int i = 0; i <= iColsVisible; i++)
+    // 6.07: with frozen columns the first g_iFreezeCols columns do not scroll: the ruler numbers
+    // them where the view draws them and shifts only the rest (it used to scroll all of them, so
+    // every label sat on the wrong column while a frozen view was scrolled sideways).
+    const int iFreeze = (!g_tv.bWrap && g_iFreezeCols > 0) ? g_iFreezeCols : 0;
+    const int xFreezeEnd = rcRuler.left + iFreeze * iHexCharW;
+    const int iFirstCol = iScrollXPx / iHexCharW;
+    const int iRulerH = rcRuler.bottom - rcRuler.top;
+    const int y = rcRuler.top;
+    for (int pass = 0; pass < 2; pass++)
     {
-        int iCol = iFirstCol + i;
-        if (iCol <= 0) continue;   // no label at column 0
-        int x = xStart + i * iHexCharW;
-        if (x > rcRuler.right) break;
-        if (iCol % 10 == 0)
+        // pass 0: the frozen prefix (fixed); pass 1: the scrolling part
+        int iCol = (pass == 0) ? 1 : ((iFirstCol > iFreeze) ? iFirstCol : iFreeze);
+        if (pass == 1 && iCol < 1) iCol = 1;
+        const int iColEnd = (pass == 0) ? iFreeze : 0x7FFFFFFF;
+        for (; iCol < iColEnd; iCol++)
         {
-            WCHAR szLabel[12];          // 5.9.14: was [8]: column 10,000,000 (8 digits + NUL) overflowed it
-            int cch = wsprintfW(szLabel, L"%d", iCol);
-            RECT rcCell = { x, y, x + 10 * iHexCharW, y + iRulerH };
-            DrawTextW(hdc, szLabel, cch, &rcCell, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        }
-        else
-        {
-            RECT rcTick = { x, y + iRulerH - 4, x + 1, y + iRulerH };
-            FillRect(hdc, &rcTick, GetSysColorBrush(COLOR_3DSHADOW));
+            const int x = rcRuler.left + iCol * iHexCharW - ((iCol >= iFreeze) ? iScrollXPx : 0);
+            if (x > rcRuler.right) break;
+            if (iFreeze > 0 && iCol >= iFreeze && x < xFreezeEnd) continue;   // hidden under the frozen block
+            if (iCol % 10 == 0)
+            {
+                WCHAR szLabel[12];
+                int cch = wsprintfW(szLabel, L"%d", iCol);
+                RECT rcCell = { x, y, x + 10 * iHexCharW, y + iRulerH };
+                if (iCol < iFreeze && iScrollXPx > 0 && rcCell.right > xFreezeEnd) rcCell.right = xFreezeEnd;
+                DrawTextW(hdc, szLabel, cch, &rcCell, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            else
+            {
+                RECT rcTick = { x, y + iRulerH - 4, x + 1, y + iRulerH };
+                FillRect(hdc, &rcTick, GetSysColorBrush(COLOR_3DSHADOW));
+            }
         }
     }
     RulerStripEnd(hdc, rcRuler, hOld);
@@ -9618,7 +10094,7 @@ void SaveSettings(void)
     // section block is "key=value" strings separated by NUL, ended by a double
     // NUL. Placement: GetWindowPlacement reports the RESTORED rect even while
     // maximized, which is exactly what the next start should restore.
-    WCHAR szSec[320];
+    WCHAR szSec[640];   // 6.03: was 320; worst-case (negative window coords + four colors) came within a few characters
     WCHAR* p = szSec;
     p += wsprintfW(p, L"FontSize=%d", 0 - g_iFontSizes[g_iFontIndex]) + 1;     // positive point size
     p += wsprintfW(p, L"LineNumbers=%d", g_bLineNums ? 1 : 0) + 1;

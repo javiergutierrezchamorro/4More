@@ -1,4 +1,28 @@
-﻿// 4More.rc — recursos del visor (Build 6.09)
+﻿// 4More.rc — recursos del visor (Build 6.16)
+//
+// 6.16: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Clic en la columna de línea/offset,
+// hex<->texto/CSV y colores hex/ASCII. Manifest 6.16.0.0. Compilar junto al 4More.cpp 6.16.
+//
+// 6.15: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. La coincidencia de Find/F3 queda en
+// una fila completa o centrada. Manifest 6.15.0.0. Compilar junto al 4More.cpp 6.15.
+//
+// 6.14: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Decodificación en paralelo, precarga de
+// páginas vecinas, lectura anticipada y búsqueda incremental. Manifest 6.14.0.0.
+// Compilar junto al 4More.cpp 6.14.
+//
+// 6.13: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Tail incremental, aceleración de
+// teclas repetidas y NUL suelto no binario. Manifest 6.13.0.0. Compilar junto al
+// 4More.cpp 6.13.
+//
+// 6.12: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. PgUp/PgDn mueven el cursor.
+// Manifest 6.12.0.0. Compilar junto al 4More.cpp 6.12.
+//
+// 6.11: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Hex sin fila vacía final y
+// desplazamiento limitado al máximo de la barra. Manifest 6.11.0.0. Compilar junto
+// al 4More.cpp 6.11.
+//
+// 6.10: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Escaneos SSE2 en x64 (solo
+// .cpp). Manifest 6.10.0.0. Compilar junto al 4More.cpp 6.10.
 //
 // 6.09: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Columna de la barra de estado,
 // Copy Column e impresión con tabuladores. Manifest 6.09.0.0. Compilar junto al

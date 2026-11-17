@@ -1,6 +1,87 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.09
+   Build 6.16
+
+   Version 6.16 (gutter click, hex <-> text / CSV, hex colours):
+   - NEW: click on the offset / line-number column to go to that line (hex and text, wrapped or not);
+     Shift+click extends the selection; the pointer turns into a hand over the column.
+   - FIX: hex -> CSV formatted the DUMP's text as a table (garbage). CSV now goes to the file's text
+     view first; a hex page loaded with CSV on turns CSV off instead of tabulating bytes.
+   - FIX: hex -> text (Mode > Text) always came back as ANSI. The file's text encoding is remembered
+     (detected at load even when the file opened as hex, updated when you pick a view) and restored.
+   - FIX: choosing the view you are already in while CSV was on turned CSV off in the menu but left the
+     table on screen (SetView returned without rebuilding).
+   - NEW: in the hex view the ASCII block has its own text colour and a slightly shaded background
+     (it follows the row's background: plain, green bar, current line, bookmark).
+   - DetectDefaultView is split: DetectTextView answers the text encoding without the binary test.
+
+   Version 6.15 (the hit of Find / F3 / Go To is not seen):
+   - FIX: a jump to a line below the window (Find, F3, Go To, bookmarks, Find All, Ctrl+End)
+     parked it on the LAST painted row. Scroll-into-view counts the half row at the bottom as
+     visible (so arrows and clicks do not scroll for it), and the window height is rarely a multiple
+     of the row height: the hit landed on a row with only a few pixels showing, or none. Now a line
+     that is off screen goes to a FULL row (the first one when it was just above, the last full one
+     when it was just below) and a far jump (more than a window away) CENTERS it. A line already
+     partly visible still does not scroll. Word-wrap mode follows the same three rules in rows.
+
+   Version 6.14 (parallel decode, read-ahead, incremental find):
+   - SPEED: a UTF-8 / ANSI page over 4 MB is decoded AND LF-normalized by several threads (the load
+     worker and the view switch). The page is cut into ~1 MB cells that end right after a LF byte (never
+     inside a multi-byte sequence or a CR LF pair); threads take cells from a shared counter: count the
+     CR / LF of each cell, assign slots by prefix sums, decode (all-ASCII cells are widened with SSE2 on
+     x64, the rest go through MultiByteToWideChar) and expand LF in place inside the cell's own slot, then
+     one compaction pass (none for pure ASCII). Fuzzed against the serial decode + NormalizeNewlines: 40,000
+     cases, 1-4 threads, tiny cells, identical text. Needs >= 2 CPUs; otherwise the old serial path.
+   - SPEED: neighbour-page prefetch: after a page is shown, a low-priority thread reads the next and the
+     previous page into the system file cache (no memory held; skips network shares; INI Prefetch=0 turns
+     it off), so PgDn / PgUp at the edge finds the bytes in memory.
+   - SPEED: PrefetchVirtualMemory (looked up at run time, Windows 8+) before the mapped-view copy and
+     for the next window of the Find Bytes scan. (FILE_FLAG_SEQUENTIAL_SCAN was already used.)
+   - Incremental Find: typing in the Find box selects the first hit from the current selection, wrapping,
+     without leaving the box (texts over 32 M characters skip it).
+   - Project: comdlg32.dll is delay-loaded (the common dialogs are only needed when one is opened).
+     Release already links with /LTCG (WholeProgramOptimization). No PGO, as asked.
+
+   Version 6.13 (perceived speed: tail, key repeat, stray NUL):
+   - SPEED: Tail File no longer reloads the whole page on every size change. When the page on screen
+     is the end of the file (ANSI / UTF-8, no tabs, not CSV), only the LAST LINE plus the new bytes
+     are decoded and spliced into the text, the line index and the raw buffer (TailAppend); a rotated
+     or rewritten file (the last 256 bytes differ), a shrink, a page change or a tab fall back to the
+     old full reload. The splice was fuzzed against a full decode over 360,000 appends (CR / LF split
+     across reads, UTF-8 sequences cut by a read, BOM): text, index and longest line identical.
+   - Key repeat accelerates: after 1 s holding Up / Down / Left / Right / PgUp / PgDn the step grows
+     (Up/Down 1 -> 4 -> 10 -> 25 lines per repeat at 1 s / 2 s / 3.5 s, Left/Right 1 -> 4 -> 12 -> 40
+     chars, PgUp/PgDn 1 -> 2 -> 4 -> 8 pages); releasing the key starts over.
+   - FIX: a single stray NUL byte in the first block made the file open as binary (hex). NULs now
+     count like the other control bytes, and decide on their own only above 0.5% of the window.
+   - Simplification: the in-place LF -> CRLF expansion is its own function (ExpandNewlinesInPlace).
+
+   Version 6.12 (PgUp / PgDn move the caret):
+   - FIX: PgUp / PgDn scrolled the view but left the caret where it was, usually off screen; the
+     next arrow key scrolled the whole view back to it. The caret now travels with the page (by what
+     the view moved, kept inside the rows shown; at the start / end of the text it walks a page toward
+     that edge) and Shift extends the selection.
+   - Simplification: the Up / Down column logic lives in one helper (TV_MoveCaretLines) shared by the
+     arrows and the page keys.
+
+   Version 6.11 (hex end of page, scrolling past the end):
+   - FIX: hex view: the dump ended with a CRLF after its last row, so the line index counted an
+     EMPTY extra line: End / Ctrl+End parked the caret on a blank row (with a gutter label of its
+     own). The last row has no line break now (the truncation notice, when present, still follows
+     a CRLF).
+   - FIX: PgDn (and the scroll bar's End, a wheel burst, or enlarging the window) could leave the
+     first visible row PAST the scroll bar's maximum: the bar clamped its thumb but the view did
+     not, so only a few rows (or just the blank last one) were shown. The first row is clamped to
+     lines - visible rows (what the bar allows) in one place (TV_ScrollRows), and a resize
+     re-clamps it. Wrap mode keeps its line limit.
+
+   Version 6.10 (x64 SSE2 scans, only where it measured):
+   - SPEED (x64): the CR/LF expansion count that precedes every text decode is ONE SSE2 pass
+     instead of a memchr call per CR and per LF: 2.6x faster on CRLF text, 1.7x on LF text
+     (128 MB: 66 -> 25 ms and 44 -> 25 ms). The scan for tabs every delivered text pays once
+     (6.08) is 2x faster. Both have a plain C++ twin for x86 / ARM64, and were fuzzed against it.
+   - Measured and left alone: 64-bit loads in the hex builder (no gain), an SSE2 line-index scan
+     (-15%, memory bound), the UTF-16 count (same ratio as the 1-byte one, more code).
 
    Version 6.09 (tabs everywhere):
    - FIX: the status bar column, Copy Column and Print ignored the tab stops 6.08 gave
@@ -158,6 +239,16 @@
 
 #include "4More.h"
 
+// 6.10: x64 builds scan with SSE2 (part of the x64 baseline: no CPU check, no dispatch). Every use has a
+// plain C++ twin in the #else branch, so x86 / ARM64 builds are unchanged. Measured on 64 M characters /
+// 128 MB: the CR/LF count is 2.6x faster (66 -> 25 ms on CRLF text, 44 -> 25 ms on LF text), the tab scan 2x.
+// Everything else that was tried (64-bit loads in the hex builder, SSE2 line-index scan) gained under 15%
+// and stayed as it was: the loads are memory bound.
+#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
+#include <emmintrin.h>
+#define TV_HAVE_SSE2 1
+#endif
+
 #ifdef _MSC_VER
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -214,7 +305,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.09"
+#define APP_VERSION L"6.16"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -285,6 +376,8 @@ bool g_bRuler = true;                           // V4: View > Ruler — column r
 bool g_bHiliteLine = true;                      // 5.8: View > Highlight Current Line — full-width band on the caret line (5.9.7: ON by default)
 bool g_bEscExit = true;                         // 5.8: View > ESC to Exit (default ON): ESC closes 4More when idle
 int g_iWrapWidth = 0;                            // V4: 0 = wrap to window; >0 = wrap to N chars (View > Wrap to Fixed Width)
+static volatile LONG g_lPrefetchSeq = 0;         // 6.14: bumped by every load: a running neighbour-page prefetch stops
+bool g_bPrefetch = true;                        // 6.14: INI Prefetch=0 turns the neighbour-page read-ahead off
 int g_iTabWidth = 8;                            // 6.08: tab stop distance in columns (INI TabWidth, 1..16)
 int g_iFreezeCols = 0;                          // 6.00: columns kept fixed while scrolling horizontally (0 = off)
 bool g_bRegexFind = false;                      // 6.00: Find / Find Next use std::wregex
@@ -444,6 +537,7 @@ volatile ULONGLONG g_qwSearchResult = (ULONGLONG)-1;   // found offset, -1 = not
 // resource.h (they are consecutive there): ID_VIEW_ANSI + iView is the
 // command ID of each view.
 enum { VIEW_ANSI = 0, VIEW_UTF8 = 1, VIEW_UTF16 = 2, VIEW_UTF16BE = 4, VIEW_EBCDIC = 5, VIEW_HEX = 3 };
+int g_iLastTextView = VIEW_ANSI;                // 6.16: the TEXT encoding of the file (detected / last chosen): hex -> text and CSV return to it
 
 // The one digit table of the hexadecimal dumps, shared by the text builder
 // (BuildHexText) and the bold offset column (PaintGutter).
@@ -588,13 +682,14 @@ HMENU FindSubMenuWithCommand(HWND hWnd, UINT uCommand);   // the bar popup ownin
 void UpdateViewMenu(void);
 void SetView(int iNewView);
 void ApplyView(void);
-bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, LoadJob* pProgJob = nullptr);   // 3.02: los dos últimos responden la ventana de BYTES que se decodificó; 3.10: pProgJob, solo el worker manda tics
+bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, LoadJob* pProgJob = nullptr, bool* pbNormalized = nullptr);   // 3.02: los dos últimos responden la ventana de BYTES que se decodificó; 3.10: pProgJob, solo el worker manda tics
 int DetectDefaultView(const BYTE* pBytes, DWORD cb);
 void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // deliver + own/free the buffer
 BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // DeliverTextToEdit wrapped in SEH
 WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch, LoadJob* pProgJob = nullptr);    // 3.10: pProgJob activa los tics de construcción (solo el worker la pasa)
 bool IsBinaryData(const BYTE* pBytes, DWORD cb);
 bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb);
+int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure = nullptr);   // 6.16: the text encoding, without the binary test
 bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb);   // 2.99: UTF-8 sin BOM
 WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull);  // 64-bit decimal, no CRT/wsprintf dependency
 void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull); // decimal + regional grouping
@@ -607,6 +702,10 @@ bool LoadPage(ULONGLONG qwBase, bool bTailJump); // 3.02: read [qwBase, +cap); F
 void ChangePage(int iDir);                      // PgDn / PgUp (plain or with Ctrl): next / previous page
 void RefreshPage(bool bTailJump);              // F5: reload the page on screen
 void ToggleTail(void);
+static int GutterLineAt(int x, int y);          // 6.16: logical line under a point of the offset / line-number column, -1 = none
+static bool GutterClick(int x, int y, bool bShift);   // 6.16: click on that column: caret to the line
+static void StartPagePrefetch(void);            // 6.14: read the neighbour pages into the file cache in the background
+static bool TailAppend(ULONGLONG cbSize);       // 6.13: tail: decode only the bytes that arrived (false = do the full reload)
 void ToggleLineNums(void);
 void ToggleWrap(void);                          // recreates the edit control (styles are create-only)
 void ToggleGreenbar(void);                      // V4: View > Greenbar
@@ -1131,13 +1230,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             break;
         case ID_VIEW_MODE_TEXT:
             // Mode > Text: leave CSV / hex; at most one rebuild from raw bytes.
-            if (g_bCsvMode)
+            {
+                const bool bWasCsv = g_bCsvMode;
                 g_bCsvMode = false;
-            if (iView == VIEW_HEX)
-                SetView(VIEW_ANSI);
-            else if (pFileBytes != nullptr && cbFile > 0)
-                ShowViewSafely();
-            UpdateViewMenu();
+                if (iView == VIEW_HEX)
+                    SetView(g_iLastTextView);       // 6.16: the file's encoding, not always ANSI
+                else if (bWasCsv && pFileBytes != nullptr && cbFile > 0)
+                    ShowViewSafely();               // 6.16: only when a CSV table is on screen (it rebuilt the whole page every time)
+                UpdateViewMenu();
+            }
             break;
         case ID_VIEW_ANSI:
         case ID_VIEW_UTF8:
@@ -1148,7 +1249,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             // The six IDs are consecutive in resource.h: they map
             // 1:1 to VIEW_*. SetView rejects anything out of range.
             if (g_bCsvMode)
-                g_bCsvMode = false;         // SetView rebuilds once from bytes
+            {
+                g_bCsvMode = false;         // SetView rebuilds once from bytes...
+                if (wmId - ID_VIEW_ANSI == iView)
+                {
+                    ShowViewSafely();       // 6.16: ...except for the SAME view, where it returns at once and the table stayed on screen
+                    UpdateViewMenu();
+                }
+            }
             SetView(wmId - ID_VIEW_ANSI);
             break;
         case ID_VIEW_FONTPLUS:
@@ -1358,6 +1466,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     // window forever, so the bytes arriving past the cap
                     // never reached the screen.
                     bool bFollowEnd = (g_qwBase + (ULONGLONG)((cbFile < PageCapBytes()) ? cbFile : PageCapBytes()) >= g_cbFileTotal);   // 3.06: what the view SHOWS
+                    if (bFollowEnd && TailAppend(cbSize))
+                    {
+                        break;            // 6.13: appended in place (no reload of the whole page)
+                    }
                     ULONGLONG qwBase = g_qwBase;
                     if (bFollowEnd && cbFile >= PageCapBytes())
                     {
@@ -1560,6 +1672,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         EndPaint(hWnd, &ps);
         break;
+    }
+    case WM_LBUTTONDOWN:
+        if (GutterClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), (wParam & MK_SHIFT) != 0))
+        {
+            return 0;                   // 6.16: a click on the offset / line-number column went to that line
+        }
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    case WM_SETCURSOR:
+    {
+        if (LOWORD(lParam) == HTCLIENT)
+        {
+            POINT pt;
+            GetCursorPos(&pt);
+            ScreenToClient(hWnd, &pt);
+            if (GutterLineAt(pt.x, pt.y) >= 0)
+            {
+                SetCursor(LoadCursor(nullptr, IDC_HAND));      // 6.16: the column is clickable
+                return TRUE;
+            }
+        }
+        return DefWindowProc(hWnd, message, wParam, lParam);
     }
     case WM_SIZE:
     {
@@ -1847,6 +1980,64 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 // count IS the character count, so the per-WCHAR walk below (up to ~32M
 // characters per load) would be pure duplicate work. Any other caller
 // passes -1 and gets the self-contained detection pass as before.
+// 6.13: the in-place LF -> CRLF expansion (6.05), now one function shared by NormalizeNewlines and the
+// incremental tail. pacText must have room for cch + cExpand + 1 characters; cExpand must be exact.
+static void ExpandNewlinesInPlace(WCHAR* pacText, int cch, int cExpand, bool bTerminate = true)
+{
+    int i = cch;                      // read index (exclusive end of the unread part)
+    int j = cch + cExpand;            // write index (exclusive end of the written part)
+    bool bPrevLF = false;             // the char to the right (already moved) was a LF
+    if (bTerminate)
+    {
+        pacText[j] = L'\0';               // (a cell expanded in the middle of a bigger buffer writes no terminator)
+    }
+    while (i > 0)
+    {
+        const int iRunEnd = i;
+        while (i > 0 && pacText[i - 1] != L'\r' && pacText[i - 1] != L'\n')
+        {
+            i--;
+        }
+        const int cchRun = iRunEnd - i;
+        if (cchRun > 0)
+        {
+            j -= cchRun;
+            if (j != i)
+            {
+                memmove(pacText + j, pacText + i, (size_t)cchRun * sizeof(WCHAR));
+            }
+            bPrevLF = false;
+        }
+        if (i == 0)
+        {
+            break;
+        }
+        const WCHAR c = pacText[--i];
+        if (c == L'\n')
+        {
+            pacText[--j] = L'\n';
+            if (!(i > 0 && pacText[i - 1] == L'\r'))
+            {
+                pacText[--j] = L'\r';             // lone LF: add its CR
+            }
+            bPrevLF = true;
+        }
+        else
+        {
+            if (bPrevLF)
+            {
+                pacText[--j] = L'\r';             // the CR of a CRLF pair
+            }
+            else
+            {
+                pacText[--j] = L'\n';             // lone CR: add its LF
+                pacText[--j] = L'\r';
+            }
+            bPrevLF = false;
+        }
+    }
+}
+
 WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown)
 {
     // 1) Detection and counting in a single pass (skipped when the
@@ -1888,55 +2079,7 @@ WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown
     // GlobalAlloc block, GlobalSize answers 0) takes the copy path below.
     if (cExpand > 0 && GlobalSize((HGLOBAL)pacText) / sizeof(WCHAR) >= (size_t)cch + (size_t)cExpand + 1)
     {
-        int i = cch;                      // read index (exclusive end of the unread part)
-        int j = cch + cExpand;            // write index (exclusive end of the written part)
-        bool bPrevLF = false;             // the char to the right (already moved) was a LF
-        pacText[j] = L'\0';
-        while (i > 0)
-        {
-            const int iRunEnd = i;
-            while (i > 0 && pacText[i - 1] != L'\r' && pacText[i - 1] != L'\n')
-            {
-                i--;
-            }
-            const int cchRun = iRunEnd - i;
-            if (cchRun > 0)
-            {
-                j -= cchRun;
-                if (j != i)
-                {
-                    memmove(pacText + j, pacText + i, (size_t)cchRun * sizeof(WCHAR));
-                }
-                bPrevLF = false;
-            }
-            if (i == 0)
-            {
-                break;
-            }
-            const WCHAR c = pacText[--i];
-            if (c == L'\n')
-            {
-                pacText[--j] = L'\n';
-                if (!(i > 0 && pacText[i - 1] == L'\r'))
-                {
-                    pacText[--j] = L'\r';             // lone LF: add its CR
-                }
-                bPrevLF = true;
-            }
-            else
-            {
-                if (bPrevLF)
-                {
-                    pacText[--j] = L'\r';             // the CR of a CRLF pair
-                }
-                else
-                {
-                    pacText[--j] = L'\n';             // lone CR: add its LF
-                    pacText[--j] = L'\r';
-                }
-                bPrevLF = false;
-            }
-        }
+        ExpandNewlinesInPlace(pacText, cch, cExpand);
         *pcchOut = cch + cExpand;
         return(pacText);
     }
@@ -2081,6 +2224,7 @@ LoadJob* BeginLoadJob(bool bStdin)
 // thread is available. Called with a fully prepared job (path, base, flags).
 void LaunchLoadJob(LoadJob* pJob)
 {
+    InterlockedIncrement(&g_lPrefetchSeq);   // 6.14: a real load starts: the background neighbour-page read stops
     g_pJob = pJob;                          // busy marker (cleared on WM_APP_LOADDONE / WM_DESTROY)
     // 3.12: the bar is fed by THIS poll, not by posted ticks: a WM_TIMER
     // that reads the job's atomic permille and paints. 3.13: the period is
@@ -2191,7 +2335,7 @@ unsigned __stdcall LoadThreadProc(void* pParameter)
 // U+FFFD). Answers the same cExpand NormalizeNewlines would compute: lone \r
 // and lone \n each cost one character, \r\n costs nothing. Two memchr chains
 // let the CRT scan with its SIMD loops instead of a per-byte walk.
-static int CountCRLFExpansion(const BYTE* pBytes, DWORD cb)
+static int CountCRLFExpansionScalar(const BYTE* pBytes, DWORD cb)
 {
     int cExpand = 0;
     const BYTE* p = pBytes;
@@ -2225,6 +2369,65 @@ static int CountCRLFExpansion(const BYTE* pBytes, DWORD cb)
     }
     return(cExpand);
 }
+
+#ifdef TV_HAVE_SSE2
+// 6.10: ONE pass instead of a memchr call per CR and per LF (a 40-character line costs one call each).
+// Expansions = lone CR + lone LF = (#CR + #LF) - 2 * #CRLF. Per 16 bytes: byte masks of CR and LF, the
+// "CR just before this LF" mask (the CR mask shifted one lane, the carry coming from the previous block),
+// and three byte-lane accumulators flushed with PSADBW every 255 blocks. The (< 16 byte) tail is scalar.
+static int CountCRLFExpansion(const BYTE* pBytes, DWORD cb)
+{
+    if (cb < 64)
+    {
+        return CountCRLFExpansionScalar(pBytes, cb);
+    }
+    const __m128i vCR = _mm_set1_epi8(0x0D);
+    const __m128i vLF = _mm_set1_epi8(0x0A);
+    const __m128i vZero = _mm_setzero_si128();
+    LONGLONG nCR = 0, nLF = 0, nPair = 0;
+    __m128i prevCR = vZero;
+    DWORD i = 0;
+    while (i + 16 <= cb)
+    {
+        __m128i aCR = vZero, aLF = vZero, aPair = vZero;
+        for (int it = 0; it < 255 && i + 16 <= cb; it++, i += 16)
+        {
+            const __m128i v = _mm_loadu_si128((const __m128i*)(pBytes + i));
+            const __m128i cr = _mm_cmpeq_epi8(v, vCR);
+            const __m128i lf = _mm_cmpeq_epi8(v, vLF);
+            const __m128i crBefore = _mm_or_si128(_mm_slli_si128(cr, 1), _mm_srli_si128(prevCR, 15));
+            aCR = _mm_sub_epi8(aCR, cr);                         // lanes hold 0xFF = -1: subtracting counts
+            aLF = _mm_sub_epi8(aLF, lf);
+            aPair = _mm_sub_epi8(aPair, _mm_and_si128(crBefore, lf));
+            prevCR = cr;
+        }
+        const __m128i sCR = _mm_sad_epu8(aCR, vZero);
+        const __m128i sLF = _mm_sad_epu8(aLF, vZero);
+        const __m128i sPair = _mm_sad_epu8(aPair, vZero);
+        nCR += _mm_cvtsi128_si32(sCR) + _mm_cvtsi128_si32(_mm_srli_si128(sCR, 8));
+        nLF += _mm_cvtsi128_si32(sLF) + _mm_cvtsi128_si32(_mm_srli_si128(sLF, 8));
+        nPair += _mm_cvtsi128_si32(sPair) + _mm_cvtsi128_si32(_mm_srli_si128(sPair, 8));
+    }
+    for (; i < cb; i++)                                          // tail: the previous byte decides the pair
+    {
+        if (pBytes[i] == 0x0D)
+        {
+            nCR++;
+        }
+        else if (pBytes[i] == 0x0A)
+        {
+            nLF++;
+            if (pBytes[i - 1] == 0x0D) nPair++;
+        }
+    }
+    return (int)(nCR + nLF - 2 * nPair);
+}
+#else
+static int CountCRLFExpansion(const BYTE* pBytes, DWORD cb)
+{
+    return CountCRLFExpansionScalar(pBytes, cb);
+}
+#endif
 
 
 /* -------------------------------------------------------------------------------------------- */
@@ -2556,6 +2759,29 @@ static void UnmapFileRange(TVMappedView* pV)
 // The real on-disk size travels in the job (status bar and notices show it);
 // the loaded bytes stay bounded. Results (and errors) are recorded in the
 // job; no UI calls from here. Cancel stays responsive (checked per chunk).
+// 6.14: READ-AHEAD. PrefetchVirtualMemory (Windows 8+, looked up at run time: the build targets Windows 7)
+// asks the memory manager to fault a mapped range in with large sequential reads, instead of one page fault
+// at a time while the copy walks it. A hint: ignored when unavailable or when the range is small.
+struct TVMemRange
+{
+    PVOID  VirtualAddress;
+    SIZE_T NumberOfBytes;
+};
+typedef BOOL (WINAPI* PFN_PREFETCHVM)(HANDLE, ULONG_PTR, TVMemRange*, ULONG);
+
+static void PrefetchRange(const BYTE* p, SIZE_T cb)
+{
+    static PFN_PREFETCHVM s_pfn = (PFN_PREFETCHVM)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory");
+    if (s_pfn == nullptr || cb < ((SIZE_T)4 << 20))
+    {
+        return;
+    }
+    TVMemRange r;
+    r.VirtualAddress = (PVOID)p;
+    r.NumberOfBytes = cb;
+    s_pfn(GetCurrentProcess(), 1, &r, 0);
+}
+
 void RunLoadJob(LoadJob* pJob)
 {
     HANDLE hFile;
@@ -2873,6 +3099,7 @@ void RunLoadJob(LoadJob* pJob)
                         }
                         else if (cbTotal < cbFinal)
                         {
+                            PrefetchRange(mvPage.pView + (pJob->qwBase - mvPage.qwStart) + cbTotal, (SIZE_T)(cbFinal - cbTotal));   // 6.14: one big read-ahead before the copy walks the pages
                             CopyMemory(pJob->pBytes + cbTotal,
                                 mvPage.pView + (pJob->qwBase - mvPage.qwStart) + cbTotal,
                                 cbFinal - cbTotal);
@@ -2995,7 +3222,8 @@ void RunLoadJob(LoadJob* pJob)
         WCHAR* pText = nullptr;
         DWORD cch = 0;
         DWORD dwSrcOff = 0, dwSrcLen = 0;       // 3.02: raw window the decode covered (O2)
-        if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen, pJob))
+        bool bPreNorm = false;                // 6.14: the parallel decode already normalized the text
+        if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen, pJob, &bPreNorm))
         {
             WCHAR* pNorm = pText;
             int cchNorm = (int)cch;
@@ -3008,7 +3236,7 @@ void RunLoadJob(LoadJob* pJob)
             // 16M characters per load.
             bool bNeedNorm = false;
             int cExpand = -1;               // -1: NormalizeNewlines counts it itself
-            if (pText != nullptr && cch > 0)
+            if (pText != nullptr && cch > 0 && !bPreNorm)
             {
                 PlanCRLFPass(pJob->iDetected, pJob->pBytes, dwSrcOff, dwSrcLen, bNeedNorm, cExpand);
             }
@@ -3084,6 +3312,18 @@ void ApplyLoadResult(LoadJob* pJob)
     g_cbFileTotal = pJob->cbOnDisk;         // REAL size: status bar + truncation notices
     g_qwBase = pJob->qwBase;                 // file offset of the page now on screen
     iView = pJob->iDetected;
+    if (!pJob->bKeepView)
+    {
+        // 6.16: the file's TEXT encoding, even when it opened as hex (Mode > Text must not fall back to ANSI)
+        if (iView != VIEW_HEX)
+        {
+            g_iLastTextView = iView;
+        }
+        else if (pFileBytes != nullptr && cbFile > 0)
+        {
+            g_iLastTextView = DetectTextView(pFileBytes, cbFile);
+        }
+    }
     // The loaded file becomes "the current file": pages, refresh, tail and the
     // raw-file byte search all work on it. A failed open leaves no file.
     if (!pJob->bStdin && !pJob->bOpenFailed)
@@ -3215,10 +3455,19 @@ void ApplyLoadResult(LoadJob* pJob)
             PositionAtOffset(qwGoto);
         }
         TimingFlash();                  // /timing: the load path is complete
-        if (g_bCsvMode)
+        if (g_bCsvMode && iView == VIEW_HEX)
+        {
+            g_bCsvMode = false;         // 6.16: a hex page is never formatted as CSV (it showed the dump's bytes as a table)
+            UpdateViewMenu();
+        }
+        else if (g_bCsvMode)
         {
             ApplyCsvMode(true);         // 6.00: /csv or menu — format after first delivery
         }
+    }
+    if (!pJob->bStdin && !pJob->bOpenFailed)
+    {
+        StartPagePrefetch();               // 6.14: the page is on screen: warm the file cache for PgDn / PgUp
     }
     delete pJob;
 }
@@ -3282,10 +3531,8 @@ bool IsBinaryData(const BYTE* pBytes, DWORD cb)
 {
     // 3.05: no cb>0 guards — memchr with a zero count answers nullptr and
     // zero control bytes can never beat the 10% rule below.
-    if (memchr(pBytes, 0x00, cb) != nullptr)
-    {
-        return(true);                   // any NUL byte: binary for sure
-    }
+    // 6.13: ONE stray NUL no longer makes the file binary (it opened in hex): NULs count as control bytes
+    // below, and above 0.5% of the window they decide on their own (executables, images, databases).
     // 5.2: the control-byte classification goes through a 256-entry LUT
     // (one load per byte instead of six comparisons). Function-local static:
     // C++11 makes the one-time fill thread-safe (the worker arrives here).
@@ -3301,13 +3548,18 @@ bool IsBinaryData(const BYTE* pBytes, DWORD cb)
         }
     };
     static const CtrlMap cm;
-    DWORD cCtrl = 0;
+    DWORD cCtrl = 0, cNul = 0;
     for (DWORD i = 0; i < cb; i++)
     {
         if (cm.bCtrl[pBytes[i]])
         {
             cCtrl++;
+            if (pBytes[i] == 0) cNul++;
         }
+    }
+    if (cNul != 0 && (unsigned long long)cNul * 200 > cb)
+    {
+        return(true);
     }
     return((unsigned long long) cCtrl * 10 > cb);
 }
@@ -3562,8 +3814,13 @@ bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb)
 // multi-gigabyte open. A file that starts as text and only turns binary past
 // the window opens as text, which is what the viewer would show first
 // anyway (text views start at the beginning).
-int DetectDefaultView(const BYTE* pBytes, DWORD cb)
+// 6.16: the TEXT encoding a file would open with: BOM, UTF-16 look, UTF-8 look, else ANSI. It does NOT
+// run the binary test, so a file that opened as hex can still answer "which text encoding is this?":
+// hex -> text used to reset to ANSI. *pbSure = decided by a BOM or the UTF-16 look (text, whatever the
+// other bytes say: the binary test must not overrule it).
+int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure)
 {
+    if (pbSure != nullptr) *pbSure = true;
     if (cb >= 3 && pBytes[0] == 0xEF && pBytes[1] == 0xBB && pBytes[2] == 0xBF)
     {
         return(VIEW_UTF8);                      // UTF-8 con BOM
@@ -3576,20 +3833,24 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
     {
         return(VIEW_UTF16BE);                   // UTF-16 BE con BOM
     }
-    DWORD cbWin = (cb < DETECT_WINDOW_BYTES) ? cb : DETECT_WINDOW_BYTES;
+    const DWORD cbWin = (cb < DETECT_WINDOW_BYTES) ? cb : DETECT_WINDOW_BYTES;
     if (LooksLikeUTF16Text(pBytes, cbWin))
     {
         return(VIEW_UTF16);                     // UTF-16 sin BOM
     }
-    if (IsBinaryData(pBytes, cbWin))
+    if (pbSure != nullptr) *pbSure = false;
+    return(LooksLikeUTF8Text(pBytes, cbWin) ? VIEW_UTF8 : VIEW_ANSI);     // UTF-8 sin BOM (2.99) / ANSI (active code page)
+}
+
+int DetectDefaultView(const BYTE* pBytes, DWORD cb)
+{
+    bool bSure = false;
+    const int iText = DetectTextView(pBytes, cb, &bSure);
+    if (!bSure && IsBinaryData(pBytes, (cb < DETECT_WINDOW_BYTES) ? cb : DETECT_WINDOW_BYTES))
     {
         return(VIEW_HEX);                       // not text: hexadecimal
     }
-    if (LooksLikeUTF8Text(pBytes, cbWin))
-    {
-        return(VIEW_UTF8);                      // UTF-8 sin BOM (2.99)
-    }
-    return(VIEW_ANSI);                              // ANSI (active code page)
+    return(iText);
 }
 
 
@@ -3781,6 +4042,10 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
             LoadProgressPublish(pProgJob, (ULONGLONG)cb + (ULONGLONG)(p - pOut), (ULONGLONG)cb + EstBuildChars(VIEW_HEX, cb));
         }
     }
+    if (!bTruncated && p > pOut)
+    {
+        p -= 2;   // 6.11: no CRLF after the LAST row: the index counted an extra, empty line (End / Ctrl+End parked the caret on a blank row, and its gutter label)
+    }
     if (bTruncated)
     {
         WCHAR szFirst[32], szLast[32], szTotal[32];
@@ -3817,7 +4082,251 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
 // false ONLY on out of memory — 3.05: checked HERE, because a null block used
 // to be stored and written through (an access violation that only the SEH
 // jackets happened to survive); the caller reports it.
-bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen, LoadJob* pProgJob)
+// 6.14: PARALLEL DECODE + NORMALIZE of a big UTF-8 / ANSI page. One MultiByteToWideChar call plus the CR/LF
+// count and the LF -> CRLF pass were three serial sweeps over 128 MB. Here the page is cut into ~1 MB CELLS,
+// each ending just after a LF byte (an ASCII byte: it can never be inside a multi-byte sequence, in UTF-8 or
+// in any ANSI code page, and a CR LF pair is never split), and a few threads take cells from a shared counter:
+//   phase 1  count the CR / LF expansions of each cell (SIMD single pass on x64)
+//   (main)   prefix sums: cell i decodes into a slot that starts at  byte offset + expansions of the cells before
+//            it, and has room for  its bytes + its own expansions  (decoded chars <= bytes)
+//   phase 2  decode the cell (all-ASCII cells are widened with SSE2, the rest go through MultiByteToWideChar),
+//            then expand its LF in place, inside its own slot (no NUL written: the next slot is another thread's)
+//   (main)   compaction: only text with multi-byte characters leaves gaps; pure ASCII needs no move at all
+// The result is the text BuildViewText used to produce plus the caller's NormalizeNewlines, byte for byte
+// (fuzzed against that sequence). Used by the load worker only (pbNormalized != nullptr), above 4 MB.
+#define PAR_DECODE_MIN (4u << 20)
+#define PAR_CELL_BYTES (1u << 20)
+#define PAR_MAX_THREADS 8
+
+struct ParCell
+{
+    DWORD  cbStart;       // raw offset inside the source
+    DWORD  cbLen;         // raw bytes (ends after a LF, or at the end of the source)
+    int    cExp;          // lone CR / LF in this cell: chars the normalization adds
+    int    cchOut;        // decoded + expanded chars written to the slot
+    size_t slot;          // where the cell decodes in the destination
+};
+
+struct ParDecodeCtx
+{
+    UINT          cp;
+    const BYTE*   pSrc;
+    WCHAR*        pDst;
+    ParCell*      pCells;
+    LONG          cCells;
+    volatile LONG iNext;
+    int           iPhase;
+};
+
+static bool ParBuildCells(const BYTE* pSrc, DWORD cbSrc, DWORD cbCell, std::vector<ParCell>& v)
+{
+    try
+    {
+        DWORD pos = 0;
+        while (pos < cbSrc)
+        {
+            DWORD end = pos + cbCell;
+            if (end >= cbSrc || end < pos)
+            {
+                end = cbSrc;
+            }
+            else
+            {
+                const BYTE* pLf = (const BYTE*)memchr(pSrc + end, 0x0A, cbSrc - end);
+                end = (pLf != nullptr) ? (DWORD)(pLf - pSrc) + 1 : cbSrc;
+            }
+            ParCell k;
+            k.cbStart = pos;
+            k.cbLen = end - pos;
+            k.cExp = 0;
+            k.cchOut = 0;
+            k.slot = 0;
+            v.push_back(k);
+            pos = end;
+        }
+    }
+    catch (...)
+    {
+        return false;
+    }
+    return true;
+}
+
+// true when every byte is ASCII (then d[0..cb) holds the widened text); false at the first byte >= 0x80
+static bool ParWidenAscii(const BYTE* p, int cb, WCHAR* d)
+{
+    int i = 0;
+#ifdef TV_HAVE_SSE2
+    const __m128i vZero = _mm_setzero_si128();
+    for (; i + 16 <= cb; i += 16)
+    {
+        const __m128i v = _mm_loadu_si128((const __m128i*)(p + i));
+        if (_mm_movemask_epi8(v) != 0)
+        {
+            return false;
+        }
+        _mm_storeu_si128((__m128i*)(d + i), _mm_unpacklo_epi8(v, vZero));
+        _mm_storeu_si128((__m128i*)(d + i + 8), _mm_unpackhi_epi8(v, vZero));
+    }
+#endif
+    for (; i < cb; i++)
+    {
+        if (p[i] & 0x80)
+        {
+            return false;
+        }
+        d[i] = (WCHAR)p[i];
+    }
+    return true;
+}
+
+static void ParRunCell(ParDecodeCtx* c, LONG i)
+{
+    ParCell& k = c->pCells[i];
+    const BYTE* p = c->pSrc + k.cbStart;
+    if (c->iPhase == 1)
+    {
+        k.cExp = CountCRLFExpansion(p, k.cbLen);
+        return;
+    }
+    WCHAR* d = c->pDst + k.slot;
+    const int cb = (int)k.cbLen;
+    int n;
+    if (ParWidenAscii(p, cb, d))
+    {
+        n = cb;
+    }
+    else
+    {
+        n = MultiByteToWideChar(c->cp, 0, (LPCCH)p, cb, d, cb);
+        if (n <= 0 && c->cp == CP_UTF8)
+        {
+            n = MultiByteToWideChar(CP_ACP, 0, (LPCCH)p, cb, d, cb);   // same fallback as the serial path
+        }
+        if (n < 0 || n > cb)
+        {
+            n = 0;
+        }
+    }
+    if (n > 0 && k.cExp > 0)
+    {
+        ExpandNewlinesInPlace(d, n, k.cExp, false);
+    }
+    k.cchOut = (n > 0) ? n + k.cExp : 0;
+}
+
+// prefix sums: slot of cell i = its raw offset + the expansions of the cells before it
+static int ParAssignSlots(ParCell* pCells, LONG n)
+{
+    int iExpBefore = 0;
+    for (LONG i = 0; i < n; i++)
+    {
+        pCells[i].slot = (size_t)pCells[i].cbStart + (size_t)iExpBefore;
+        iExpBefore += pCells[i].cExp;
+    }
+    return iExpBefore;
+}
+
+// moves every cell's text to its final place, left to right (the destination never passes the source)
+static size_t ParCompact(WCHAR* pText, const ParCell* pCells, LONG n)
+{
+    size_t outPos = 0;
+    for (LONG i = 0; i < n; i++)
+    {
+        const size_t cch = (size_t)pCells[i].cchOut;
+        if (cch > 0 && outPos != pCells[i].slot)
+        {
+            memmove(pText + outPos, pText + pCells[i].slot, cch * sizeof(WCHAR));
+        }
+        outPos += cch;
+    }
+    return outPos;
+}
+
+static unsigned __stdcall ParWorker(void* pParam)
+{
+    ParDecodeCtx* c = (ParDecodeCtx*)pParam;
+    for (;;)
+    {
+        const LONG i = InterlockedIncrement(&c->iNext) - 1;
+        if (i >= c->cCells)
+        {
+            break;
+        }
+        ParRunCell(c, i);
+    }
+    return 0;
+}
+
+static void ParRun(ParDecodeCtx* c, int nThreads)
+{
+    HANDLE h[PAR_MAX_THREADS];
+    int nH = 0;
+    c->iNext = 0;
+    for (int t = 1; t < nThreads && nH < PAR_MAX_THREADS; t++)
+    {
+        HANDLE x = (HANDLE)_beginthreadex(nullptr, 0, ParWorker, c, 0, nullptr);
+        if (x != nullptr)
+        {
+            h[nH++] = x;
+        }
+    }
+    ParWorker(c);                                    // this thread works too (and finishes everything alone if no thread started)
+    if (nH > 0)
+    {
+        WaitForMultipleObjects((DWORD)nH, h, TRUE, INFINITE);
+        for (int t = 0; t < nH; t++)
+        {
+            CloseHandle(h[t]);
+        }
+    }
+}
+
+// false = not done (too small, one CPU, no memory): the caller runs the serial path.
+static bool ParallelDecodeText(UINT cp, const BYTE* pSrc, DWORD cbSrc, DWORD cExtra, WCHAR** ppText, int* pcch)
+{
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int nThreads = (int)si.dwNumberOfProcessors;
+    if (nThreads > PAR_MAX_THREADS)
+    {
+        nThreads = PAR_MAX_THREADS;
+    }
+    if (nThreads < 2 || cbSrc < PAR_DECODE_MIN)
+    {
+        return false;
+    }
+    std::vector<ParCell> cells;
+    if (!ParBuildCells(pSrc, cbSrc, PAR_CELL_BYTES, cells) || cells.size() < 2)
+    {
+        return false;
+    }
+    ParDecodeCtx c;
+    c.cp = cp;
+    c.pSrc = pSrc;
+    c.pDst = nullptr;
+    c.pCells = cells.data();
+    c.cCells = (LONG)cells.size();
+    c.iNext = 0;
+    c.iPhase = 1;
+    ParRun(&c, nThreads);
+    const int cExpTotal = ParAssignSlots(c.pCells, c.cCells);
+    WCHAR* pText = AllocViewText(cbSrc + (DWORD)cExpTotal + 1 + cExtra);
+    if (pText == nullptr)
+    {
+        return false;
+    }
+    c.pDst = pText;
+    c.iPhase = 2;
+    ParRun(&c, nThreads);
+    const size_t cch = ParCompact(pText, c.pCells, c.cCells);
+    pText[cch] = L'\0';
+    *ppText = pText;
+    *pcch = (int)cch;
+    return true;
+}
+
+bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen, LoadJob* pProgJob, bool* pbNormalized)
 {
     *ppText = nullptr;
     *pcch = 0;
@@ -3905,13 +4414,31 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
             *pdwSrcLen = (DWORD)cbSrc;
         }
-        pText = AllocViewText((DWORD)cbSrc + 1 + 160 + ((DWORD)cbSrc >> 4));       // + notice room
+        // 6.14: the load worker (pbNormalized != nullptr) decodes AND normalizes a big page in parallel cells
+        bool bParDone = false;
+        if (pbNormalized != nullptr && cbSrc >= (int)PAR_DECODE_MIN)
+        {
+            int cchPar = 0;
+            if (ParallelDecodeText(CP_UTF8, (const BYTE*)pSrc, (DWORD)cbSrc, 160, &pText, &cchPar))
+            {
+                bParDone = true;
+                cch = cchPar;
+                *pbNormalized = true;
+            }
+        }
+        if (!bParDone)
+        {
+            pText = AllocViewText((DWORD)cbSrc + 1 + 160 + ((DWORD)cbSrc >> 4));       // + notice room
+        }
         if (pText == nullptr)
         {
             return(false);                          // 3.05: OOM answers FALSE, not a null store
         }
-        cch = 0;
-        if (cbSrc > 0)
+        if (!bParDone)
+        {
+            cch = 0;
+        }
+        if (cbSrc > 0 && !bParDone)
         {
             // cbMultiByte is only ever called with a byte count > 0:
             // the zero form ("input is a terminated string" for some
@@ -4126,13 +4653,30 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
             *pdwSrcLen = cbShown;
         }
-        pText = AllocViewText((DWORD)cbSrc + 1 + 160 + ((DWORD)cbSrc >> 4));  // 6.05: + ~6% room so NormalizeNewlines can expand LF -> CRLF in place
+        bool bParDone = false;                      // 6.14: same parallel cells as the UTF-8 path
+        if (pbNormalized != nullptr && cbSrc >= (int)PAR_DECODE_MIN)
+        {
+            int cchPar = 0;
+            if (ParallelDecodeText(CP_ACP, pBytes, (DWORD)cbSrc, 160, &pText, &cchPar))
+            {
+                bParDone = true;
+                cch = cchPar;
+                *pbNormalized = true;
+            }
+        }
+        if (!bParDone)
+        {
+            pText = AllocViewText((DWORD)cbSrc + 1 + 160 + ((DWORD)cbSrc >> 4));  // 6.05: + ~6% room so NormalizeNewlines can expand LF -> CRLF in place
+        }
         if (pText == nullptr)
         {
             return(false);                          // 3.05: OOM answers FALSE, not a null store
         }
-        cch = 0;
-        if (cbSrc > 0)                          // defensive symmetry with the UTF-8 path
+        if (!bParDone)
+        {
+            cch = 0;
+        }
+        if (cbSrc > 0 && !bParDone)                 // defensive symmetry with the UTF-8 path
         {
             cch = MultiByteToWideChar(CP_ACP, 0, (LPCCH)pBytes, cbSrc, pText, cbSrc);
             if (cch < 0 || cch > cbSrc)
@@ -4643,12 +5187,39 @@ static int TV_DispEnd(const WCHAR* pText, int iLS, int iLE);
 // 6.08: called once per delivered text: does it hold a tab, and how wide is its widest line in
 // visual columns (the horizontal scroll range). A line of L characters is at most L * tab-width
 // columns wide, so the lines that cannot beat the best so far are skipped without being read.
+// 6.10: "does the text hold this character" in one pass (SSE2 on x64, wmemchr elsewhere): the scan every
+// delivered text pays once, hex pages included.
+static bool TV_HasWChar(const WCHAR* p, size_t n, WCHAR c)
+{
+#ifdef TV_HAVE_SSE2
+    const WCHAR* pEnd = p + n;
+    const __m128i vc = _mm_set1_epi16((short)c);
+    while ((size_t)(pEnd - p) >= 16)
+    {
+        const __m128i m = _mm_or_si128(_mm_cmpeq_epi16(_mm_loadu_si128((const __m128i*)p), vc),
+                                       _mm_cmpeq_epi16(_mm_loadu_si128((const __m128i*)(p + 8)), vc));
+        if (_mm_movemask_epi8(m) != 0)
+        {
+            return true;
+        }
+        p += 16;
+    }
+    for (; p < pEnd; p++)
+    {
+        if (*p == c) return true;
+    }
+    return false;
+#else
+    return wmemchr(p, c, n) != nullptr;
+#endif
+}
+
 static void TV_ScanTabs(void)
 {
     g_tv.bTabs = false;
     g_tv.iMaxVisCols = g_tv.iMaxLineChars;
     if (g_tv.pText == nullptr || g_tv.cch <= 0 || g_tv.pLineStarts == nullptr ||
-        wmemchr(g_tv.pText, L'\t', (size_t)g_tv.cch) == nullptr)
+        !TV_HasWChar(g_tv.pText, (size_t)g_tv.cch, L'\t'))
     {
         return;
     }
@@ -5076,26 +5647,67 @@ static int TV_WrapCaretRow(int iLine, int iCaret, int iMaxChars, int iCap)
     return iRow;
 }
 
-static int TV_WrapFirstForCaret(int iCaretLine, int iClientW, int cVis)
+// 6.15: where the first visible row goes so the caret's line shows. The old rule parked a line that was
+// off screen on the LAST painted row, and that row may be a sliver (the window height is rarely a multiple of
+// the row height: the half row counts as "visible" so arrows do not scroll for it): a Find / F3 / Go To /
+// bookmark jump landed on a row with a few pixels showing, or none, and looked like it had not arrived.
+//   - already (even partly) on screen            -> no scroll (unchanged)
+//   - just outside (within one window)            -> the minimum scroll, onto a FULL row: first row when it
+//                                                    was above, last full row when it was below
+//   - a far jump (more than a window away)        -> centered, like a search hit should be
+static int TV_ScrollFirstForLine(int iLine, int iFirst, int cVis, int cFull)
+{
+    if (iLine >= iFirst && iLine < iFirst + cVis)
+    {
+        return iFirst;
+    }
+    const bool bAbove = (iLine < iFirst);
+    const int iDist = bAbove ? (iFirst - iLine) : (iLine - (iFirst + cVis - 1));
+    int iNew;
+    if (iDist > cFull)
+    {
+        iNew = iLine - cFull / 2;
+    }
+    else if (bAbove)
+    {
+        iNew = iLine;
+    }
+    else
+    {
+        iNew = iLine - cFull + 1;
+    }
+    return (iNew < 0) ? 0 : iNew;
+}
+
+// Wrap mode: the same three cases counted in VISUAL rows (a line may take several).
+static int TV_WrapFirstForCaret(int iCaretLine, int iClientW, int cVis, int cFull)
 {
     const int iMaxChars = TV_WrapChars(g_tv.iWrapWidth, iClientW);
     const int iFirst = g_tv.iFirstVisible;
-    if (iCaretLine < iFirst)
-    {
-        return iCaretLine;
-    }
     const int iCaretRow = TV_WrapCaretRow(iCaretLine, g_tv.iSelEnd, iMaxChars, cVis);
-    int cBefore = 0;                      // rows of the lines between the first one and the caret's
-    for (int l = iFirst; l < iCaretLine && cBefore + iCaretRow < cVis; l++)
+    int iBudget;                          // rows of PREVIOUS lines kept above the caret's line
+    if (iCaretLine >= iFirst)
     {
-        cBefore += TV_WrapRowsOfLine(l, iMaxChars, cVis);
+        int cBefore = 0;                  // rows of the lines between the first one and the caret's
+        for (int l = iFirst; l < iCaretLine && cBefore + iCaretRow < cVis; l++)
+        {
+            cBefore += TV_WrapRowsOfLine(l, iMaxChars, cVis);
+        }
+        if (cBefore + iCaretRow < cVis)
+        {
+            return iFirst;                // the caret's row is already painted
+        }
+        iBudget = (iCaretLine - iFirst > cFull) ? (cFull - 1) / 2 - iCaretRow : cFull - iCaretRow - 1;
     }
-    if (cBefore + iCaretRow < cVis)
+    else
     {
-        return iFirst;                    // the caret's row is already painted
+        if (iFirst - iCaretLine <= cFull)
+        {
+            return iCaretLine;            // just above: its line becomes the first row
+        }
+        iBudget = (cFull - 1) / 2 - iCaretRow;
     }
-    int iNew = iCaretLine;                // else: scroll so the caret's row is the last one
-    int iBudget = cVis - iCaretRow - 1;
+    int iNew = iCaretLine;
     while (iNew > 0 && iBudget > 0)
     {
         const int r = TV_WrapRowsOfLine(iNew - 1, iMaxChars, cVis);
@@ -5105,6 +5717,7 @@ static int TV_WrapFirstForCaret(int iCaretLine, int iClientW, int cVis)
     }
     return iNew;
 }
+
 
 void TV_ScrollCaret(void)
 {
@@ -5120,13 +5733,17 @@ void TV_ScrollCaret(void)
     // caret truly leaves the painted area.
     int cVis = (rc.bottom + iHexLineH - 1) / iHexLineH;
     if (cVis < 1) cVis = 1;
+    int cFull = rc.bottom / iHexLineH;                    // 6.15: rows that show IN FULL (cVis counts the half row too)
+    if (cFull < 1) cFull = 1;
     int iFirst = g_tv.iFirstVisible;
     if (g_tv.bWrap && g_tv.pLineStarts != nullptr && g_tv.pText != nullptr)
     {
-        iFirst = TV_WrapFirstForCaret(iCaretLine, rc.right, cVis);      // 6.05: rows, not lines
+        iFirst = TV_WrapFirstForCaret(iCaretLine, rc.right, cVis, cFull);      // 6.05: rows, not lines
     }
-    else if (iCaretLine < iFirst) iFirst = iCaretLine;
-    else if (iCaretLine >= iFirst + cVis) { iFirst = iCaretLine - cVis + 1; if (iFirst < 0) iFirst = 0; }
+    else
+    {
+        iFirst = TV_ScrollFirstForLine(iCaretLine, iFirst, cVis, cFull);       // 6.15: full row, centered when far
+    }
     // 5.4: TV_ScrollRows clamps, syncs the scrollbar and blits the rows that
     // can move; the selection delta below still repaints the rows the
     // highlight changes on (5.5: with both selections empty NOTHING is
@@ -5280,9 +5897,26 @@ void TV_CopyColumn(void)
 // span several visual rows, so the pixel delta is not rows * iHexLineH.
 static void TV_ScrollRows(HWND hWnd, TextViewState* pState, int iNewFirst)
 {
+    // 6.11: the highest first row is the one the scroll bar itself allows (nMax - nPage + 1 =
+    // lines - visible rows), not "the last line": PgDn, End of the scroll bar (SB_BOTTOM), a wheel
+    // burst or a window that grew used to leave iFirstVisible beyond it (the bar clamped its thumb, the
+    // view did not), so the view showed a few rows, or ONE, and the rest was blank. Wrap mode keeps
+    // the line limit (its rows are not lines).
+    int iMaxFirst = pState->cLines - 1;
+    if (!pState->bWrap && iHexLineH > 0)
+    {
+        RECT rcV;
+        if (GetClientRect(hWnd, &rcV))
+        {
+            int cVis = rcV.bottom / iHexLineH;
+            if (cVis < 1) cVis = 1;
+            if (pState->cLines - cVis < iMaxFirst) iMaxFirst = pState->cLines - cVis;
+        }
+    }
+    if (iMaxFirst < 0) iMaxFirst = 0;
     if (iNewFirst < 0) iNewFirst = 0;
     if (pState->cLines <= 0) iNewFirst = 0;
-    else if (iNewFirst > pState->cLines - 1) iNewFirst = pState->cLines - 1;
+    else if (iNewFirst > iMaxFirst) iNewFirst = iMaxFirst;
     if (iNewFirst == pState->iFirstVisible) return;
     int dy = (iNewFirst - pState->iFirstVisible) * iHexLineH;
     pState->iFirstVisible = iNewFirst;
@@ -5581,7 +6215,7 @@ static void TV_PaintChunkText(HDC hdc, const WCHAR* pText, int xBase, int y, int
 // or in wrap mode) goes straight to the text painter. A row with tabs is expanded into a small buffer
 // holding ONLY the visible columns (a minified 100 MB line stays cheap), the selection endpoints are
 // translated to visual columns, and the same painter draws that buffer.
-static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y, int iPos, int iChunkEnd,
+static void TV_PaintChunkTabs(HDC hdc, const TextViewState* pState, int xBase, int y, int iPos, int iChunkEnd,
     int iSelLo, int iSelHi, HBRUSH hbrBg, COLORREF clrBg, COLORREF clrText, COLORREF clrSelBg, COLORREF clrSelTx, int cxClient)
 {
     if (!pState->bTabs || pState->bWrap || g_iTabWidth <= 0 || iHexCharW <= 0 || iChunkEnd <= iPos ||
@@ -5625,6 +6259,181 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
         if (iExHi > nEx) iExHi = nEx;
     }
     TV_PaintChunkText(hdc, ex, xBase + colA * iHexCharW, y, 0, nEx, iExLo, iExHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);
+}
+
+// 6.16: HEX vs ASCII. The dump's two blocks looked alike; the ASCII block (from column 50: 16 bytes x 3 + the
+// mid gap + one space) now has its own text colour and a slightly shaded background, so the eye can follow a
+// row across the two. The shade follows whatever background the row has (plain, green bar, current line,
+// bookmark), the text colour follows the theme (blue on light, light blue on dark). Each part is drawn with
+// its own clip rectangle by the same painters (selection, tabs, frozen columns all keep working).
+#define TV_HEX_ASCII_COL 50
+
+static COLORREF TV_HexAsciiBg(COLORREF c)
+{
+    const int r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+    if ((r * 299 + g * 587 + b * 114) / 1000 >= 128)
+    {
+        return RGB(r * 93 / 100, g * 93 / 100, b * 93 / 100);                       // light: a touch darker
+    }
+    return RGB((r + 18 > 255) ? 255 : r + 18, (g + 18 > 255) ? 255 : g + 18, (b + 18 > 255) ? 255 : b + 18);   // dark: a touch lighter
+}
+
+static COLORREF TV_HexAsciiText(COLORREF clrBg)
+{
+    const int r = GetRValue(clrBg), g = GetGValue(clrBg), b = GetBValue(clrBg);
+    return ((r * 299 + g * 587 + b * 114) / 1000 >= 128) ? RGB(0x1F, 0x5F, 0x9F) : RGB(0x8F, 0xD0, 0xFF);
+}
+
+static HBRUSH TV_HexAsciiBrush(COLORREF clr)
+{
+    static COLORREF s_clr[8];
+    static HBRUSH s_hbr[8];
+    static int s_n = 0;
+    for (int i = 0; i < s_n; i++)
+    {
+        if (s_clr[i] == clr) return s_hbr[i];
+    }
+    HBRUSH h = CreateSolidBrush(clr);
+    if (h == nullptr) return nullptr;
+    if (s_n < 8)
+    {
+        s_clr[s_n] = clr;
+        s_hbr[s_n++] = h;
+        return h;
+    }
+    DeleteObject(s_hbr[0]);                    // the user changed the colours many times: recycle the first slot
+    s_clr[0] = clr;
+    s_hbr[0] = h;
+    return h;
+}
+
+static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y, int iPos, int iChunkEnd,
+    int iSelLo, int iSelHi, HBRUSH hbrBg, COLORREF clrBg, COLORREF clrText, COLORREF clrSelBg, COLORREF clrSelTx, int cxClient)
+{
+    // a byte row (not the truncation notice, which starts with '[') in the hex view, unwrapped, long enough to hold the ASCII block
+    if (iView != VIEW_HEX || pState->bWrap || iHexCharW <= 0 || iChunkEnd - iPos <= TV_HEX_ASCII_COL ||
+        pState->pText[iPos] == L'[')
+    {
+        TV_PaintChunkTabs(hdc, pState, xBase, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);
+        return;
+    }
+    const COLORREF clrAscBg = TV_HexAsciiBg(clrBg);
+    HBRUSH hbrAsc = TV_HexAsciiBrush(clrAscBg);
+    if (hbrAsc == nullptr)
+    {
+        TV_PaintChunkTabs(hdc, pState, xBase, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);
+        return;
+    }
+    const COLORREF clrAscTx = TV_HexAsciiText(clrBg);
+    const int xSplit = xBase + TV_HEX_ASCII_COL * iHexCharW;
+    const int iSplit = iPos + TV_HEX_ASCII_COL;
+    if (xSplit > 0)                                         // the hex block (unless it is scrolled out to the left)
+    {
+        const int iSaved = SaveDC(hdc);
+        IntersectClipRect(hdc, 0, y, (xSplit < cxClient) ? xSplit : cxClient, y + iHexLineH);
+        TV_PaintChunkTabs(hdc, pState, xBase, y, iPos, iSplit, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);
+        RestoreDC(hdc, iSaved);
+    }
+    if (xSplit < cxClient)                                  // the ASCII block
+    {
+        const int iSaved = SaveDC(hdc);
+        IntersectClipRect(hdc, (xSplit > 0) ? xSplit : 0, y, cxClient, y + iHexLineH);
+        SetTextColor(hdc, clrAscTx);
+        TV_PaintChunkTabs(hdc, pState, xSplit, y, iSplit, iChunkEnd, iSelLo, iSelHi, hbrAsc, clrAscBg, clrAscTx, clrSelBg, clrSelTx, cxClient);
+        RestoreDC(hdc, iSaved);
+    }
+}
+
+// 6.12: move the caret iDelta LOGICAL lines (clamped to the text) keeping the preferred VISUAL
+// column g_iCaretCol: it survives short lines, a horizontal move or a click resets it (5.7). One
+// place for the Up / Down arrows (iDelta = -1 / +1) and for PgUp / PgDn, where the caret now
+// travels with the page. Returns false when the caret is already on the first / last line.
+static bool TV_MoveCaretLines(TextViewState* pState, int iDelta, bool bShift)
+{
+    const int iL = TV_LineFromChar(pState->iSelEnd);
+    int iT = iL + iDelta;
+    if (iT < 0) iT = 0;
+    if (iT > pState->cLines - 1) iT = pState->cLines - 1;
+    if (iT == iL)
+    {
+        return false;
+    }
+    if (g_iCaretCol < 0)
+    {
+        // 5.9.12: preferred column is relative to the DISPLAY end of
+        // the current line. A caret parked on the CR/LF (reachable
+        // with VK_RIGHT) must not seed a phantom column past the
+        // last visible character — editors keep the visible column.
+        int iLS0 = TV_LineIndex(iL);
+        int iN0 = TV_LineIndex(iL + 1);
+        int iLE0 = (iN0 < 0) ? pState->cch : iN0;
+        int iDE0 = TV_DispEnd(pState->pText, iLS0, iLE0);
+        int iCol = pState->iSelEnd - iLS0;
+        if (iCol < 0) iCol = 0;
+        if (iLS0 >= 0 && iCol > iDE0 - iLS0) iCol = iDE0 - iLS0;
+        if (iCol < 0) iCol = 0;
+        if (iLS0 >= 0) iCol = TV_VisCol(iLS0, iLS0 + iCol);   // 6.08: the remembered column is VISUAL
+        g_iCaretCol = iCol;
+    }
+    int iLS2 = TV_LineIndex(iT);
+    int iN2 = TV_LineIndex(iT + 1);
+    int iLE2 = (iN2 < 0) ? pState->cch : iN2;
+    int iDE2 = TV_DispEnd(pState->pText, iLS2, iLE2);   // 5.9.11: one helper (was inline CR/LF strip)
+    int iPos = TV_CharOfCol(iLS2, iDE2, g_iCaretCol);
+    pState->iSelEnd = iPos;
+    if (!bShift) pState->iSelStart = pState->iSelEnd;
+    TV_ScrollCaret();
+    return true;
+}
+
+// 6.13: KEY-REPEAT ACCELERATION. Holding a navigation key moves at the keyboard's repeat rate (about 30
+// steps / s). After 1 s the step grows, again at 2 s and 3.5 s, so crossing a long file does not take
+// minutes; releasing the key (or pressing another) starts over at one step. The hold time is measured
+// from the first auto-repeat of the same key (lParam bit 30 = "was already down").
+static WPARAM s_wHeldKey = 0;
+static ULONGLONG s_qwHeldSince = 0;
+static const int kKeyLines[4] = { 1, 4, 10, 25 };     // Up / Down: lines per repeat
+static const int kKeyChars[4] = { 1, 4, 12, 40 };     // Left / Right: characters per repeat
+static const int kKeyPages[4] = { 1, 2, 4, 8 };       // PgUp / PgDn: pages per repeat
+
+static int TV_KeyStage(WPARAM wKey, LPARAM lParam)
+{
+    const ULONGLONG qwNow = GetTickCount64();
+    if ((lParam & (1 << 30)) == 0 || wKey != s_wHeldKey)
+    {
+        s_wHeldKey = wKey;
+        s_qwHeldSince = qwNow;
+        return 0;
+    }
+    const ULONGLONG qwHeld = qwNow - s_qwHeldSince;
+    return (qwHeld < 1000) ? 0 : (qwHeld < 2000) ? 1 : (qwHeld < 3500) ? 2 : 3;
+}
+
+// Left / Right: cSteps characters (a CRLF counts as one step), the caret column memory resets.
+static void TV_MoveCaretChars(TextViewState* pState, int iDir, int cSteps, bool bShift)
+{
+    int iPos = pState->iSelEnd;
+    for (int s = 0; s < cSteps; s++)
+    {
+        if (iDir < 0)
+        {
+            if (iPos <= 0) break;
+            iPos -= (iPos >= 2 && pState->pText[iPos - 2] == L'\r' && pState->pText[iPos - 1] == L'\n') ? 2 : 1;
+        }
+        else
+        {
+            if (iPos >= pState->cch) break;
+            iPos += (iPos + 1 < pState->cch && pState->pText[iPos] == L'\r' && pState->pText[iPos + 1] == L'\n') ? 2 : 1;
+        }
+    }
+    if (iPos == pState->iSelEnd)
+    {
+        return;
+    }
+    pState->iSelEnd = iPos;
+    if (!bShift) pState->iSelStart = pState->iSelEnd;
+    g_iCaretCol = -1;
+    TV_ScrollCaret();
 }
 
 #ifndef WM_MOUSEHWHEEL
@@ -5964,6 +6773,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         if (pState == nullptr) return 0;
         bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         bool bCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const int iStage = TV_KeyStage(wParam, lParam);   // 6.13: 0..3 by how long this key has been held
         // V5: Ctrl+C = copy, Ctrl+A = select all
         if (bCtrl && wParam == L'C') { TV_Copy(); return 0; }
         if (bCtrl && wParam == L'A') { TV_SetSel(0, pState->cch); TV_ScrollCaret(); return 0; }
@@ -5977,49 +6787,15 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             else if (g_bEscExit) { PostMessage(hWndMain, WM_CLOSE, 0, 0); }
             return 0;
         case VK_LEFT:
-            if (pState->iSelEnd > 0) { pState->iSelEnd -= (pState->iSelEnd >= 2 && pState->pText[pState->iSelEnd - 2] == L'\r' && pState->pText[pState->iSelEnd - 1] == L'\n') ? 2 : 1; if (!bShift) pState->iSelStart = pState->iSelEnd; g_iCaretCol = -1; TV_ScrollCaret(); }
+            TV_MoveCaretChars(pState, -1, kKeyChars[iStage], bShift);
             return 0;
         case VK_RIGHT:
-            if (pState->iSelEnd < pState->cch) { pState->iSelEnd += (pState->iSelEnd + 1 < pState->cch && pState->pText[pState->iSelEnd] == L'\r' && pState->pText[pState->iSelEnd + 1] == L'\n') ? 2 : 1; if (!bShift) pState->iSelStart = pState->iSelEnd; g_iCaretCol = -1; TV_ScrollCaret(); }
+            TV_MoveCaretChars(pState, 1, kKeyChars[iStage], bShift);
             return 0;
         case VK_UP:
         case VK_DOWN:
-        {
-            // 5.7: the column survives vertical moves (the caret used to
-            // jump to column 0 of the adjacent line). g_iCaretCol seeds
-            // from the caret on the first vertical step and survives short
-            // lines, editors' standard behavior; a horizontal move or a
-            // click resets it to -1.
-            int iL = TV_LineFromChar(pState->iSelEnd);
-            int iT = (wParam == VK_UP) ? iL - 1 : iL + 1;
-            if (iT < 0 || iT >= pState->cLines) return 0;
-            if (g_iCaretCol < 0)
-            {
-                // 5.9.12: preferred column is relative to the DISPLAY end of
-                // the current line. A caret parked on the CR/LF (reachable
-                // with VK_RIGHT) must not seed a phantom column past the
-                // last visible character — editors keep the visible column.
-                int iLS0 = TV_LineIndex(iL);
-                int iN0 = TV_LineIndex(iL + 1);
-                int iLE0 = (iN0 < 0) ? pState->cch : iN0;
-                int iDE0 = TV_DispEnd(pState->pText, iLS0, iLE0);
-                int iCol = pState->iSelEnd - iLS0;
-                if (iCol < 0) iCol = 0;
-                if (iLS0 >= 0 && iCol > iDE0 - iLS0) iCol = iDE0 - iLS0;
-                if (iCol < 0) iCol = 0;
-                if (iLS0 >= 0) iCol = TV_VisCol(iLS0, iLS0 + iCol);   // 6.08: the remembered column is VISUAL
-                g_iCaretCol = iCol;
-            }
-            int iLS2 = TV_LineIndex(iT);
-            int iN2 = TV_LineIndex(iT + 1);
-            int iLE2 = (iN2 < 0) ? pState->cch : iN2;
-            int iDE2 = TV_DispEnd(pState->pText, iLS2, iLE2);   // 5.9.11: one helper (was inline CR/LF strip)
-            int iPos = TV_CharOfCol(iLS2, iDE2, g_iCaretCol);
-            pState->iSelEnd = iPos;
-            if (!bShift) pState->iSelStart = pState->iSelEnd;
-            TV_ScrollCaret();
+            TV_MoveCaretLines(pState, ((wParam == VK_UP) ? -1 : 1) * kKeyLines[iStage], bShift);
             return 0;
-        }
         case VK_HOME:
             if (bCtrl) { JumpFilePage(false); return 0; }   // 5.4: first page (lived in EditSubclassProc)
             {
@@ -6068,7 +6844,27 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
                     else ChangePage((wParam == VK_NEXT) ? 1 : -1);
                     return 0;
                 }
-                TV_ScrollRows(hWnd, pState, pState->iFirstVisible + ((wParam == VK_NEXT) ? cVis : -cVis));
+                const int cStep = cVis * kKeyPages[iStage];       // 6.13: pages per repeat grow with the hold time
+                const int iOldFirst = pState->iFirstVisible;
+                TV_ScrollRows(hWnd, pState, iOldFirst + ((wParam == VK_NEXT) ? cStep : -cStep));
+                // 6.12: the caret travels with the page (it used to stay behind, off screen, and the next
+                // arrow key scrolled the view all the way back to it). It moves by what the view moved,
+                // kept inside the rows now shown; when the view could not move (start / end of the text)
+                // it walks a page toward that edge.
+                const int iMoved = pState->iFirstVisible - iOldFirst;
+                const int iL = TV_LineFromChar(pState->iSelEnd);
+                if (iMoved != 0)
+                {
+                    int iT = iL + iMoved;
+                    const int iLastVis = pState->iFirstVisible + cVis - 1;
+                    if (iT > iLastVis) iT = iLastVis;
+                    if (iT < pState->iFirstVisible) iT = pState->iFirstVisible;
+                    TV_MoveCaretLines(pState, iT - iL, bShift);
+                }
+                else
+                {
+                    TV_MoveCaretLines(pState, (wParam == VK_NEXT) ? cStep : -cStep, bShift);
+                }
             }
             return 0;
         }
@@ -6219,6 +7015,10 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
             si.nPage = LOWORD(lParam);      // 5.2: horz page follows the width too (range is in pixels)
             SetScrollInfo(hWnd, SB_HORZ, &si, TRUE);
+            if (pState != nullptr)
+            {
+                TV_ScrollRows(hWnd, pState, pState->iFirstVisible);   // 6.11: a taller window may leave the first row past the new maximum
+            }
         }
         InvalidateRect(hWnd, nullptr, FALSE);
         return 0;
@@ -6431,6 +7231,14 @@ void SetView(int iNewView)
     {
         return;
     }
+    if (iNewView == VIEW_HEX)
+    {
+        g_bCsvMode = false;                     // 6.16: hex is never a CSV table
+    }
+    else
+    {
+        g_iLastTextView = iNewView;             // 6.16: where hex -> text comes back to
+    }
     // 5.4: ONE control for every view — a view switch never recreates it
     // (the old custom<->EDIT recreate branch died with the EDIT).
     // 5.9.2: keep the user's place across the switch. The caret line is
@@ -6519,7 +7327,8 @@ void ApplyView(void)
         WCHAR* pText = nullptr;
         DWORD cch = 0;
         DWORD dwSrcOff = 0, dwSrcLen = 0;
-        if (!BuildViewText(iView, pFileBytes, cbDecode, g_cbFileTotal, g_qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen))
+        bool bPreNorm = false;                // 6.14: a big page is decoded and normalized in parallel cells
+        if (!BuildViewText(iView, pFileBytes, cbDecode, g_cbFileTotal, g_qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen, nullptr, &bPreNorm))
         {
             // 3.05: out of memory in the decode — an honest FALSE with
             // its message, where a null block used to be written through.
@@ -6535,7 +7344,7 @@ void ApplyView(void)
         // genuinely mixed page pays the copy pass.
         bool bNeedNorm = false;
         int cExpand = -1;
-        if (pText != nullptr && cch > 0)
+        if (pText != nullptr && cch > 0 && !bPreNorm)
         {
             PlanCRLFPass(iView, pFileBytes, dwSrcOff, dwSrcLen, bNeedNorm, cExpand);
         }
@@ -6969,6 +7778,8 @@ void UpdateStatusBar(bool bForce)
 
 
 /* -------------------------------------------------------------------------------------------- */
+static LRESULT CALLBACK FindDlgSubclassProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR uId, DWORD_PTR dwRef);
+
 void OpenFindDialog(HWND hWnd)
 {
     if (hDlgFind != nullptr)
@@ -6985,6 +7796,10 @@ void OpenFindDialog(HWND hWnd)
     fr.lpstrFindWhat = szFind;
     fr.wFindWhatLen = _countof(szFind);
     hDlgFind = FindTextW(&fr);
+    if (hDlgFind != nullptr)
+    {
+        SetWindowSubclass(hDlgFind, FindDlgSubclassProc, 1, 0);        // 6.14: incremental find (hears the edit box)
+    }
 }
 
 
@@ -7212,6 +8027,66 @@ void SearchNext(HWND hWnd, bool bShowError)
 /* ============================================================================================
    6.00 high-priority features (V-inspired)
    ============================================================================================ */
+
+// 6.14: INCREMENTAL FIND. The Find dialog is the system's FindText: it only reports when Find Next is pressed.
+// The dialog is subclassed to hear its edit box (id 0x480): every change searches from the START of the current
+// selection (typing one more letter keeps the same hit, Backspace keeps it too), wrapping once, and selects /
+// scrolls to the hit without taking the focus away from the box. No message boxes while typing (an unfinished
+// regex or an absent word is not an error); texts over 32 M characters skip it (a keystroke must not stall the
+// window): Find Next / Enter still search there.
+#define FINDDLG_EDIT_ID   0x0480      // edt1
+#define FINDDLG_CASE_ID   0x0410      // chx1
+
+static void IncrementalFind(void)
+{
+    if (szFind[0] == L'\0' || g_tv.pText == nullptr || g_tv.cch <= 0 || g_tv.cch > (32 << 20))
+    {
+        return;
+    }
+    DWORD dwSelStart, dwSelEnd;
+    EditGetSel(dwSelStart, dwSelEnd);
+    DWORD dwFrom = (dwSelStart < dwSelEnd) ? dwSelStart : dwSelEnd;
+    if (dwFrom > (DWORD)g_tv.cch)
+    {
+        dwFrom = (DWORD)g_tv.cch;
+    }
+    const WCHAR* pFound = FindPatternFrom(g_tv.pText, dwFrom);
+    if (pFound == nullptr && dwFrom > 0)
+    {
+        pFound = FindPatternFrom(g_tv.pText, 0);
+    }
+    if (pFound == nullptr)
+    {
+        return;
+    }
+    const int iPos = (int)(pFound - g_tv.pText);
+    const int cchHit = (g_bRegexFind && g_cchLastRegexMatch > 0) ? g_cchLastRegexMatch : lstrlenW(szFind);
+    TV_SetSel(iPos, iPos + cchHit);
+    TV_ScrollCaret();
+    UpdateStatusBar();
+}
+
+static LRESULT CALLBACK FindDlgSubclassProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR uId, DWORD_PTR)
+{
+    if (message == WM_COMMAND && LOWORD(wParam) == FINDDLG_EDIT_ID && HIWORD(wParam) == EN_CHANGE)
+    {
+        GetDlgItemTextW(hDlg, FINDDLG_EDIT_ID, szFind, _countof(szFind));
+        if (IsDlgButtonChecked(hDlg, FINDDLG_CASE_ID) == BST_CHECKED)
+        {
+            fr.Flags |= FR_MATCHCASE;                 // the dialog reports its flags only at Find Next
+        }
+        else
+        {
+            fr.Flags &= ~(DWORD)FR_MATCHCASE;
+        }
+        IncrementalFind();
+    }
+    else if (message == WM_NCDESTROY)
+    {
+        RemoveWindowSubclass(hDlg, FindDlgSubclassProc, uId);
+    }
+    return DefSubclassProc(hDlg, message, wParam, lParam);
+}
 
 void FindAllMatches(void)
 {
@@ -7491,6 +8366,19 @@ void OpenFreezeColsDialog(HWND hWnd)
 
 void ApplyCsvMode(bool bOn)
 {
+    if (bOn && iView == VIEW_HEX)
+    {
+        // 6.16: CSV formats the TEXT of the page; in hex that text is the dump itself, and the table
+        // came out as garbage. Go to the file's text view first, then format.
+        g_bCsvMode = false;
+        SetView(g_iLastTextView);
+        if (iView == VIEW_HEX)
+        {
+            UpdateViewMenu();
+            StatusFlash(L"CSV needs a text view.");
+            return;
+        }
+    }
     g_bCsvMode = bOn;
     if (!bOn)
     {
@@ -7851,6 +8739,347 @@ void JumpFilePage(bool bLast)
 // View > Refresh (F5): reload the page on screen, exactly as it is (same
 // base, same view). The file may have changed underneath (log rotated, file
 // rewritten); the tail timer uses the same door when it detects a change.
+// 6.14: NEIGHBOUR-PAGE PREFETCH. Once a page is on screen, a background thread (low CPU / memory / I/O priority)
+// READS the next and the previous page of the file and throws the bytes away: that only fills the system file
+// cache, so PgDn / PgUp at the edge finds its bytes in memory (no seek, no disk wait) and costs only the decode.
+// It holds no memory (one 1 MB scratch buffer), it stops as soon as another load starts (the sequence number),
+// and it skips network shares (pulling 128 MB nobody asked for would hurt there). INI: Prefetch=0 turns it off.
+struct PrefetchCtx
+{
+    WCHAR     szPath[MAX_PATH];
+    ULONGLONG qwFrom[2];
+    ULONGLONG qwLen[2];
+    LONG      lSeq;
+};
+
+static unsigned __stdcall PrefetchThreadProc(void* pParam)
+{
+    PrefetchCtx* c = (PrefetchCtx*)pParam;
+    SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);        // Vista+: background I/O and memory priority
+    HANDLE hFile = CreateFileW(c->szPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        const DWORD cbBuf = 1u << 20;
+        BYTE* pBuf = (BYTE*)VirtualAlloc(nullptr, cbBuf, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (pBuf != nullptr)
+        {
+            for (int r = 0; r < 2 && c->lSeq == g_lPrefetchSeq; r++)
+            {
+                LARGE_INTEGER li;
+                li.QuadPart = (LONGLONG)c->qwFrom[r];
+                if (c->qwLen[r] == 0 || !SetFilePointerEx(hFile, li, nullptr, FILE_BEGIN))
+                {
+                    continue;
+                }
+                ULONGLONG qwLeft = c->qwLen[r];
+                while (qwLeft > 0 && c->lSeq == g_lPrefetchSeq)
+                {
+                    const DWORD cbWant = (qwLeft > cbBuf) ? cbBuf : (DWORD)qwLeft;
+                    DWORD cbGot = 0;
+                    if (!ReadFile(hFile, pBuf, cbWant, &cbGot, nullptr) || cbGot == 0)
+                    {
+                        break;
+                    }
+                    qwLeft -= cbGot;
+                }
+            }
+            VirtualFree(pBuf, 0, MEM_RELEASE);
+        }
+        CloseHandle(hFile);
+    }
+    delete c;
+    return 0;
+}
+
+static void StartPagePrefetch(void)
+{
+    const LONG lSeq = InterlockedIncrement(&g_lPrefetchSeq);        // any earlier prefetch stops here
+    if (!g_bPrefetch || g_bTail || g_szCurrentFile[0] == L'\0' || g_cbFileTotal == 0 || pFileBytes == nullptr)
+    {
+        return;
+    }
+    if (g_szCurrentFile[0] == L'\\' && g_szCurrentFile[1] == L'\\')
+    {
+        return;                                                     // UNC path: a network share
+    }
+    if (g_szCurrentFile[1] == L':' && g_szCurrentFile[2] == L'\\')
+    {
+        const WCHAR szRoot[4] = { g_szCurrentFile[0], L':', L'\\', L'\0' };
+        if (GetDriveTypeW(szRoot) == DRIVE_REMOTE)
+        {
+            return;
+        }
+    }
+    const ULONGLONG qwCap = (ULONGLONG)PageCapBytes();
+    ULONGLONG qwNext = g_qwBase + ((cbFile < qwCap) ? (ULONGLONG)cbFile : qwCap);
+    PrefetchCtx* c = new (std::nothrow) PrefetchCtx;
+    if (c == nullptr)
+    {
+        return;
+    }
+    ZeroMemory(c, sizeof(*c));
+    lstrcpynW(c->szPath, g_szCurrentFile, MAX_PATH);
+    c->lSeq = lSeq;
+    if (qwNext < g_cbFileTotal)
+    {
+        c->qwFrom[0] = qwNext;
+        c->qwLen[0] = (g_cbFileTotal - qwNext < qwCap) ? (g_cbFileTotal - qwNext) : qwCap;
+    }
+    if (g_qwBase > 0)
+    {
+        const ULONGLONG qwPrev = LastPageBase(g_qwBase);
+        c->qwFrom[1] = qwPrev;
+        c->qwLen[1] = g_qwBase - qwPrev;
+    }
+    HANDLE hThread = (c->qwLen[0] != 0 || c->qwLen[1] != 0) ? (HANDLE)_beginthreadex(nullptr, 0, PrefetchThreadProc, c, 0, nullptr) : nullptr;
+    if (hThread == nullptr)
+    {
+        delete c;
+        return;
+    }
+    CloseHandle(hThread);                                           // detached: it ends by itself or when the sequence moves on
+}
+
+// 6.13: INCREMENTAL TAIL. With Tail File on, every size change used to reload and decode the WHOLE page
+// (up to 128 MB) every 2 s. When the page on screen is the end of the file, the view is ANSI / UTF-8 and the
+// file only GREW, only the last line and the new bytes are decoded:
+//   r  = raw offset where the re-decode starts: just after the last CR / LF byte of the page (the last line may
+//        still be growing), or the last CR itself when the page ends with a lone CR (its LF may arrive next)
+//   k  = the text index that corresponds to r: the start of the last line, or 2 chars before the end when the
+//        text ends with the "\r\n" that CR was expanded to
+// Everything before k is untouched (text, line index); the tail is decoded into a temp buffer, checked (a tab
+// would need the visual-width scan: full reload), and committed only when nothing can fail any more.
+// Pure helpers first (no Win32, so they can be tested against a full decode); TailAppend is the glue.
+static bool TailLocate(const BYTE* pR, DWORD cb, DWORD srcOff, const WCHAR* pText, int cch,
+    const int* pLines, int cLines, DWORD* pr, int* pk, int* pcLinesBase)
+{
+    if (cb == 0 || cch <= 0 || cLines <= 0)
+    {
+        return false;
+    }
+    if (pR[cb - 1] == 0x0D)
+    {
+        if (cch < 2 || cLines < 2 || pText[cch - 2] != L'\r' || pText[cch - 1] != L'\n' || pLines[cLines - 1] != cch)
+        {
+            return false;                 // the text is not what the raw bytes say: full reload
+        }
+        *pr = cb - 1;
+        *pk = cch - 2;
+        *pcLinesBase = cLines - 1;        // the empty line after that CR is rebuilt
+        return true;
+    }
+    DWORD i = cb;
+    while (i > srcOff && pR[i - 1] != 0x0A && pR[i - 1] != 0x0D)
+    {
+        i--;
+    }
+    const int k = pLines[cLines - 1];
+    if (k < 0 || k > cch)
+    {
+        return false;
+    }
+    if (i > srcOff ? !(k >= 1 && pText[k - 1] == L'\n') : (k != 0))
+    {
+        return false;
+    }
+    *pr = i;
+    *pk = k;
+    *pcLinesBase = cLines;                // the last line keeps its start and grows
+    return true;
+}
+
+static int TailCountBreaks(const WCHAR* pTmp, int cchTmp)
+{
+    int n = 0;
+    const WCHAR* p = pTmp;
+    const WCHAR* pEnd = pTmp + cchTmp;
+    while (p < pEnd)
+    {
+        const WCHAR* pNl = (const WCHAR*)wmemchr(p, L'\n', (size_t)(pEnd - p));
+        if (pNl == nullptr)
+        {
+            break;
+        }
+        n++;
+        p = pNl + 1;
+    }
+    return n;
+}
+
+// pIdx already holds the first cLinesBase starts; appends the starts of the new lines and answers the
+// longest line (same measure as the index builder: the '\n' is not part of the line).
+static int TailIndexExtend(const WCHAR* pTmp, int cchTmp, int k, int cchTotal, int* pIdx, int cLinesBase, int iMax, int* pcLines)
+{
+    int sCur = pIdx[cLinesBase - 1];
+    int j = cLinesBase;
+    const WCHAR* p = pTmp;
+    const WCHAR* pEnd = pTmp + cchTmp;
+    for (;;)
+    {
+        const WCHAR* pNl = (p < pEnd) ? (const WCHAR*)wmemchr(p, L'\n', (size_t)(pEnd - p)) : nullptr;
+        if (pNl == nullptr)
+        {
+            const int len = cchTotal - sCur;
+            if (len > iMax) iMax = len;
+            break;
+        }
+        const int iAt = k + (int)(pNl - pTmp);
+        const int len = iAt - sCur;
+        if (len > iMax) iMax = len;
+        sCur = iAt + 1;
+        pIdx[j++] = sCur;
+        p = pNl + 1;
+    }
+    *pcLines = j;
+    return iMax;
+}
+
+static bool TailAppend(ULONGLONG cbSize)
+{
+    if (g_szCurrentFile[0] == L'\0' || g_bCsvMode || (iView != VIEW_ANSI && iView != VIEW_UTF8) || hEdit == nullptr ||
+        pFileBytes == nullptr || cbFile == 0 || g_tv.pText == nullptr || g_tv.pText != g_pViewText ||
+        g_tv.pLineStarts == nullptr || g_tv.cLines <= 0 || g_tv.cch <= 0 || g_tv.bTabs)
+    {
+        return false;
+    }
+    if (g_qwBase + (ULONGLONG)cbFile != g_cbFileTotal || cbSize <= g_cbFileTotal)
+    {
+        return false;                     // not the end of the file, or it did not grow (shrunk / rotated)
+    }
+    const ULONGLONG qwDelta = cbSize - g_cbFileTotal;
+    if (qwDelta > (64ULL << 20) || (ULONGLONG)cbFile + qwDelta > (ULONGLONG)PageCapBytes())
+    {
+        return false;                     // a big jump or a full page: the regular reload / page change
+    }
+    const DWORD cbDelta = (DWORD)qwDelta;
+    const DWORD cbNew = cbFile + cbDelta;
+    const int cch0 = g_tv.cch;
+    const DWORD srcOff = (iView == VIEW_UTF8 && g_qwBase == 0 && cbFile >= 3 &&
+        pFileBytes[0] == 0xEF && pFileBytes[1] == 0xBB && pFileBytes[2] == 0xBF) ? 3 : 0;
+    DWORD r = 0;
+    int k = 0, cLinesBase = 0;
+    if (!TailLocate(pFileBytes, cbFile, srcOff, g_tv.pText, cch0, g_tv.pLineStarts, g_tv.cLines, &r, &k, &cLinesBase))
+    {
+        return false;
+    }
+
+    // 1) the raw bytes: old page + delta. The last 256 old bytes are re-read and compared: a file that was
+    //    truncated and rewritten (log rotation) is not an append, it gets the full reload.
+    HANDLE hFile = CreateFileW(g_szCurrentFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        return false;
+    }
+    BYTE* pRaw = new (std::nothrow) BYTE[cbNew];
+    bool bOk = (pRaw != nullptr);
+    if (bOk)
+    {
+        CopyMemory(pRaw, pFileBytes, cbFile);
+        const DWORD cbOv = (cbFile < 256) ? cbFile : 256;
+        BYTE abOv[256];
+        DWORD cbRead = 0;
+        LARGE_INTEGER li;
+        li.QuadPart = (LONGLONG)(g_qwBase + (ULONGLONG)cbFile - cbOv);
+        bOk = SetFilePointerEx(hFile, li, nullptr, FILE_BEGIN) &&
+            ReadFile(hFile, abOv, cbOv, &cbRead, nullptr) && cbRead == cbOv &&
+            memcmp(abOv, pFileBytes + cbFile - cbOv, cbOv) == 0 &&
+            ReadFile(hFile, pRaw + cbFile, cbDelta, &cbRead, nullptr) && cbRead == cbDelta;
+    }
+    CloseHandle(hFile);
+    if (!bOk)
+    {
+        delete[] pRaw;
+        return false;
+    }
+
+    // 2) decode + normalize the tail into a temp buffer
+    const DWORD nTail = cbNew - r;
+    const BYTE* pTail = pRaw + r;
+    const int cExpand = CountCRLFExpansion(pTail, nTail);
+    WCHAR* pTmp = new (std::nothrow) WCHAR[(size_t)nTail + (size_t)cExpand + 1];
+    int cchNew = 0;
+    if (pTmp != nullptr)
+    {
+        cchNew = MultiByteToWideChar((iView == VIEW_UTF8) ? CP_UTF8 : CP_ACP, 0, (LPCCH)pTail, (int)nTail, pTmp, (int)nTail);
+        if (cchNew <= 0 && iView == VIEW_UTF8)
+        {
+            cchNew = MultiByteToWideChar(CP_ACP, 0, (LPCCH)pTail, (int)nTail, pTmp, (int)nTail);   // same fallback as BuildViewText
+        }
+    }
+    if (pTmp == nullptr || cchNew <= 0 || cchNew > (int)nTail || TV_HasWChar(pTmp, (size_t)cchNew, L'\t'))
+    {
+        delete[] pTmp;                    // (a tab needs the visual-width scan: full reload)
+        delete[] pRaw;
+        return false;
+    }
+    if (cExpand > 0)
+    {
+        ExpandNewlinesInPlace(pTmp, cchNew, cExpand);
+    }
+    const int cchTmp = cchNew + cExpand;
+    const int cchTotal = k + cchTmp;
+
+    // 3) the line index and the text capacity (every allocation that can fail happens before the commit)
+    const int nNew = TailCountBreaks(pTmp, cchTmp);
+    int* pIdx = new (std::nothrow) int[(size_t)cLinesBase + (size_t)nNew + 1];
+    WCHAR* pBigText = nullptr;
+    bool bRoom = (GlobalSize((HGLOBAL)g_pViewText) / sizeof(WCHAR) >= (size_t)cchTotal + 1);
+    if (!bRoom)
+    {
+        pBigText = AllocViewText((DWORD)cchTotal + (DWORD)(cchTotal >> 2) + 4096);     // 1.25x: amortized growth
+    }
+    if (pIdx == nullptr || (!bRoom && pBigText == nullptr))
+    {
+        delete[] pIdx;
+        if (pBigText != nullptr) FreeViewText(pBigText);
+        delete[] pTmp;
+        delete[] pRaw;
+        return false;
+    }
+    CopyMemory(pIdx, g_tv.pLineStarts, (size_t)cLinesBase * sizeof(int));
+    int cLinesNew = 0;
+    const int iMaxNew = TailIndexExtend(pTmp, cchTmp, k, cchTotal, pIdx, cLinesBase, g_tv.iMaxLineChars, &cLinesNew);
+
+    // 4) commit: nothing below can fail
+    const int iGutterBefore = GutterWidth();
+    if (pBigText != nullptr)
+    {
+        CopyMemory(pBigText, g_tv.pText, (size_t)k * sizeof(WCHAR));
+        FreeViewText(g_pViewText);
+        g_pViewText = pBigText;
+        g_tv.pText = pBigText;
+    }
+    CopyMemory(g_tv.pText + k, pTmp, (size_t)cchTmp * sizeof(WCHAR));
+    g_tv.pText[cchTotal] = L'\0';
+    delete[] g_tv.pLineStarts;
+    g_tv.pLineStarts = pIdx;
+    g_tv.cLines = cLinesNew;
+    g_tv.cch = cchTotal;
+    g_tv.iMaxLineChars = iMaxNew;
+    g_tv.iMaxVisCols = iMaxNew;
+    g_iLineMemo0Char = -1; g_iLineMemo0Line = -1;      // the memos pointed into the old index
+    g_iLineMemo1Char = -1; g_iLineMemo1Line = -1;
+    delete[] pFileBytes;
+    pFileBytes = pRaw;
+    cbFile = cbNew;
+    g_cbFileTotal = g_qwBase + (ULONGLONG)cbNew;
+    delete[] pTmp;
+
+    g_tv.bGutterDirty = true;
+    TV_UpdateScrollRanges();
+    if (GutterWidth() != iGutterBefore)
+    {
+        LayoutEdit();                     // one more digit of line number: the column grows
+    }
+    TV_SetSel(cchTotal, cchTotal);        // the tail follows the end, like the full reload did
+    TV_ScrollCaret();
+    UpdateStatusBar();
+    InvalidateRect(hEdit, nullptr, FALSE);
+    return true;
+}
+
 void RefreshPage(bool bTailJump)
 {
     if (g_szCurrentFile[0] == L'\0')
@@ -8963,6 +10192,11 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
                 break;                            // EOF: the whole view is scanned
             }
             ULONGLONG cbRest = qwLim - qwPos;
+            if (cbRest > (ULONGLONG)CB_CHUNK)
+            {
+                const ULONGLONG cbAhead = cbRest - CB_CHUNK;                              // 6.14: read-ahead of the NEXT window while this one is scanned
+                PrefetchRange(pView + qwPos + CB_CHUNK, (SIZE_T)((cbAhead > (ULONGLONG)CB_CHUNK) ? CB_CHUNK : cbAhead));
+            }
             DWORD cbWindow = (cbRest < (ULONGLONG)(CB_CHUNK + cbOverlap)) ? (DWORD)cbRest : (DWORD)(CB_CHUNK + cbOverlap);
             ULONGLONG qwHit = 0;
             if (ScanForPattern(pView + qwPos, cbWindow, qwPos, &qwHit))
@@ -9390,6 +10624,91 @@ int GutterWidth(void)
         return((cDigits + 2) * iHexCharW + 6);
     }
     return(0);
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 6.16: CLICK ON THE OFFSET / LINE-NUMBER COLUMN. The column is painted on the parent (PaintGutter), next to
+// the rows of the view, so a click there is a click on a row: the caret goes to the start of that line
+// (Shift+click extends the selection to it), in the text views and in the hex view alike. The row -> line
+// walk is the one the painter uses: one row per line, or in word wrap the visual rows of every line
+// from the first visible one. -1 = the point is not on a labelled row of the column.
+static int GutterLineAt(int x, int y)
+{
+    if (hEdit == nullptr || cbFile == 0 || iHexLineH <= 0 || g_tv.pText == nullptr || g_tv.cLines <= 0)
+    {
+        return -1;
+    }
+    const bool bHex = (iView == VIEW_HEX);
+    if (!bHex && !g_bLineNums)
+    {
+        return -1;
+    }
+    const int iW = GutterWidth();
+    if (iW <= 0 || x < 0 || x >= iW)
+    {
+        return -1;
+    }
+    RECT rcEdit;
+    if (!GetClientRect(hEdit, &rcEdit))
+    {
+        return -1;
+    }
+    const int iRulerH = (g_bRuler && iHexLineH > 0) ? iHexLineH : 0;      // the view starts one row down when the ruler is on
+    const int yRel = y - iRulerH;
+    if (yRel < 0 || yRel >= rcEdit.bottom)
+    {
+        return -1;
+    }
+    int cLines = g_tv.cLines;
+    if (bHex)
+    {
+        const DWORD cbUse = (cbFile > (DWORD)CB_HEX_MAX) ? (DWORD)CB_HEX_MAX : cbFile;
+        const int cRows = (int)((cbUse + 15) / 16);                         // the notice line has no offset
+        if (cRows < cLines) cLines = cRows;
+    }
+    const int iRow = yRel / iHexLineH;
+    int iLine = -1;
+    if (!bHex && g_tv.bWrap)
+    {
+        const int iMaxChars = TV_WrapChars(g_tv.iWrapWidth, rcEdit.right);
+        const int cVisRows = (rcEdit.bottom + iHexLineH - 1) / iHexLineH;
+        int iRowTop = 0;
+        for (int l = g_tv.iFirstVisible; l < cLines && iRowTop <= iRow; l++)
+        {
+            const int r = TV_WrapRowsOfLine(l, iMaxChars, cVisRows);
+            if (iRow < iRowTop + r)
+            {
+                iLine = l;
+                break;
+            }
+            iRowTop += r;
+        }
+    }
+    else
+    {
+        iLine = g_tv.iFirstVisible + iRow;
+    }
+    return (iLine >= 0 && iLine < cLines) ? iLine : -1;
+}
+
+static bool GutterClick(int x, int y, bool bShift)
+{
+    const int iLine = GutterLineAt(x, y);
+    if (iLine < 0)
+    {
+        return false;
+    }
+    const int iPos = TV_LineIndex(iLine);
+    if (iPos < 0)
+    {
+        return false;
+    }
+    TV_SetSel(bShift ? g_tv.iSelStart : iPos, iPos);
+    g_iCaretCol = -1;
+    TV_ScrollCaret();
+    SetFocus(hEdit);
+    return true;
 }
 
 
@@ -10260,6 +11579,7 @@ void LoadSettings(void)
     g_iFreezeCols = (int)ProfileLong(L"FreezeCols", 0);
     if (g_iFreezeCols < 0) g_iFreezeCols = 0;
     if (g_iFreezeCols > 200) g_iFreezeCols = 200;
+    g_bPrefetch = (ProfileLong(L"Prefetch", 1) != 0);                        // 6.14
     g_iTabWidth = (int)ProfileLong(L"TabWidth", 8);
     if (g_iTabWidth < 1 || g_iTabWidth > 16) g_iTabWidth = 8;
     g_bRegexFind = (ProfileLong(L"RegexFind", 0) != 0);
@@ -10338,6 +11658,7 @@ void SaveSettings(void)
     p += wsprintfW(p, L"EscExit=%d", g_bEscExit ? 1 : 0) + 1;            // 5.8
     p += wsprintfW(p, L"WrapWidth=%d", g_iWrapWidth) + 1;
     p += wsprintfW(p, L"FreezeCols=%d", g_iFreezeCols) + 1;
+    p += wsprintfW(p, L"Prefetch=%d", g_bPrefetch ? 1 : 0) + 1;              // 6.14
     p += wsprintfW(p, L"TabWidth=%d", g_iTabWidth) + 1;                   // 6.08
     p += wsprintfW(p, L"RegexFind=%d", g_bRegexFind ? 1 : 0) + 1;
     if (g_clrWindow != 0xFFFFFFFF) p += wsprintfW(p, L"ColorWindow=%d", (int)g_clrWindow) + 1;

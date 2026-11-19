@@ -1,4 +1,8 @@
-﻿// 4More.rc — recursos del visor (Build 6.16)
+﻿// 4More.rc — recursos del visor (Build 6.17)
+//
+// 6.17: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Menú contextual, Buscar anterior,
+// palabras con Ctrl, estado ampliado, Ir a con % y relativo, recordar posición.
+// Manifest 6.17.0.0. Compilar junto al 4More.cpp 6.17.
 //
 // 6.16: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Clic en la columna de línea/offset,
 // hex<->texto/CSV y colores hex/ASCII. Manifest 6.16.0.0. Compilar junto al 4More.cpp 6.16.

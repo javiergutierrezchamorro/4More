@@ -1,6 +1,19 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.16
+   Build 6.17
+
+   Version 6.17 (usability round):
+   - Right-click menu on the view: Copy, Select All, Find / Next / Previous, Go To, Bookmark, Word Wrap,
+     Line Numbers, Copy file path, Show in Explorer (also from the menu key / Shift+F10).
+   - Find: Shift+F3 = Find Previous (wraps), Ctrl+F3 = find the selection or the word under the caret,
+     Ctrl+F opens the box with the selection already typed in; on texts over 2 M characters the incremental
+     find waits 200 ms after the last keystroke.
+   - Navigation: Ctrl+Left / Ctrl+Right move by words (Shift extends); Shift+wheel scrolls sideways.
+   - Go To accepts a percentage of the file ("50%") and relative lines ("+10", "-5").
+   - Status bar: selection length, position in the file (%), the encoding / CSV next to the size, and in the
+     hex view the FILE offset of the byte under the caret (hex and decimal).
+   - Remember where I was: reopening a file goes back to the line that was first on screen when it was
+     closed (INI [Positions], 24 files; RememberPosition=0 turns it off).
 
    Version 6.16 (gutter click, hex <-> text / CSV, hex colours):
    - NEW: click on the offset / line-number column to go to that line (hex and text, wrapped or not);
@@ -305,7 +318,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.16"
+#define APP_VERSION L"6.17"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -377,6 +390,7 @@ bool g_bHiliteLine = true;                      // 5.8: View > Highlight Current
 bool g_bEscExit = true;                         // 5.8: View > ESC to Exit (default ON): ESC closes 4More when idle
 int g_iWrapWidth = 0;                            // V4: 0 = wrap to window; >0 = wrap to N chars (View > Wrap to Fixed Width)
 static volatile LONG g_lPrefetchSeq = 0;         // 6.14: bumped by every load: a running neighbour-page prefetch stops
+bool g_bRememberPos = true;                    // 6.17: INI RememberPosition=0: do not reopen files where they were left
 bool g_bPrefetch = true;                        // 6.14: INI Prefetch=0 turns the neighbour-page read-ahead off
 int g_iTabWidth = 8;                            // 6.08: tab stop distance in columns (INI TabWidth, 1..16)
 int g_iFreezeCols = 0;                          // 6.00: columns kept fixed while scrolling horizontally (0 = off)
@@ -702,6 +716,10 @@ bool LoadPage(ULONGLONG qwBase, bool bTailJump); // 3.02: read [qwBase, +cap); F
 void ChangePage(int iDir);                      // PgDn / PgUp (plain or with Ctrl): next / previous page
 void RefreshPage(bool bTailJump);              // F5: reload the page on screen
 void ToggleTail(void);
+bool TV_SelectionOrWordToFind(bool bWordFallback);   // 6.17: szFind <- selection / word under the caret
+void SearchPrev(bool bShowError);                    // 6.17: Shift+F3
+static bool PosLookup(const WCHAR* pszPath, ULONGLONG* pqwOff);   // 6.17: where this file was left
+static void SaveFilePosition(void);                  // 6.17: remember it
 static int GutterLineAt(int x, int y);          // 6.16: logical line under a point of the offset / line-number column, -1 = none
 static bool GutterClick(int x, int y, bool bShift);   // 6.16: click on that column: caret to the line
 static void StartPagePrefetch(void);            // 6.14: read the neighbour pages into the file cache in the background
@@ -1734,6 +1752,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         return(DefWindowProc(hWnd, message, wParam, lParam));
     case WM_DESTROY:
+        SaveFilePosition();                 // 6.17: while the view still exists
         SaveSettings();                     // 2.94: while the window still exists
         KillTimer(hWnd, 1);            // tail watcher: never fire into a dying window
         KillTimer(hWnd, IDT_LOADPROG);      // 3.12: the load-bar poll dies with the window
@@ -2133,6 +2152,7 @@ WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown
 // while the status bar reports a different file.
 void ResetViewer(void)
 {
+    SaveFilePosition();          // 6.17: the file about to be replaced: remember where it was left
     delete[] pFileBytes;
     pFileBytes = nullptr;
     cbFile = 0;
@@ -3306,6 +3326,9 @@ void RunLoadJob(LoadJob* pJob)
 // report anything the user must know. Takes ownership of pJob (frees it).
 void ApplyLoadResult(LoadJob* pJob)
 {
+    // 6.17: a file opened from the start (no /goto, no tail, not a page change or reload) goes back to where it was left
+    const bool bRestorePos = (!pJob->bKeepView && !pJob->bStdin && !pJob->bOpenFailed && !g_bTail &&
+        g_qwPendingGoto == (ULONGLONG)-1 && pJob->qwBase == 0 && pJob->szPath[0] != L'\0');
     pFileBytes = pJob->pBytes;              // raw bytes for the View menu (may be nullptr)
     pJob->pBytes = nullptr;
     cbFile = pJob->cbFile;                  // bytes actually loaded (bounded by the caps)
@@ -3463,6 +3486,14 @@ void ApplyLoadResult(LoadJob* pJob)
         else if (g_bCsvMode)
         {
             ApplyCsvMode(true);         // 6.00: /csv or menu — format after first delivery
+        }
+    }
+    if (bRestorePos)
+    {
+        ULONGLONG qwSaved = 0;
+        if (PosLookup(pJob->szPath, &qwSaved) && qwSaved > 0 && qwSaved < g_cbFileTotal)
+        {
+            GoToOffset(qwSaved);
         }
     }
     if (!pJob->bStdin && !pJob->bOpenFailed)
@@ -6386,6 +6417,424 @@ static bool TV_MoveCaretLines(TextViewState* pState, int iDelta, bool bShift)
     return true;
 }
 
+// ============================================================================================
+// 6.17: SMALL HELPERS for the usability round (pure: no window state, each one fuzzed against a brute-force model)
+// ============================================================================================
+
+// 0 = space / line break, 1 = word character (letter, digit, '_'), 2 = anything else
+static int TvCharClass(WCHAR c)
+{
+    if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == 0x00A0)
+    {
+        return 0;
+    }
+    return (c == L'_' || IsCharAlphaNumericW(c)) ? 1 : 2;
+}
+
+// Ctrl+Left / Ctrl+Right: where the caret lands. Right: finish the current run, then skip the spaces (it stops
+// at the START of the next word). Left: skip the spaces behind the caret, then back over the run before them.
+static int TV_WordBoundary(const WCHAR* p, int cch, int iPos, int iDir)
+{
+    int i = iPos;
+    if (iDir < 0)
+    {
+        while (i > 0 && TvCharClass(p[i - 1]) == 0) i--;
+        if (i > 0)
+        {
+            const int c = TvCharClass(p[i - 1]);
+            while (i > 0 && TvCharClass(p[i - 1]) == c) i--;
+        }
+        return i;
+    }
+    if (i < cch)
+    {
+        const int c = TvCharClass(p[i]);
+        if (c != 0)
+        {
+            while (i < cch && TvCharClass(p[i]) == c) i++;
+        }
+    }
+    while (i < cch && TvCharClass(p[i]) == 0) i++;
+    return i;
+}
+
+static bool TvEqualAt(const WCHAR* p, const WCHAR* pat, int n, bool bCase)
+{
+    if (bCase)
+    {
+        return memcmp(p, pat, (size_t)n * sizeof(WCHAR)) == 0;
+    }
+    return CompareStringOrdinal(p, n, pat, n, TRUE) == CSTR_EQUAL;
+}
+
+// Shift+F3, plain text: the LAST match that starts before iLimit (-1 = none). A reverse scan with a first-character
+// filter (an ASCII letter has two spellings; a non-ASCII text character falls through to the full comparison).
+static int FindPlainBefore(const WCHAR* pText, int cch, const WCHAR* pat, int n, int iLimit, bool bCase)
+{
+    if (n <= 0 || n > cch)
+    {
+        return -1;
+    }
+    int i = iLimit - 1;
+    if (i > cch - n)
+    {
+        i = cch - n;
+    }
+    const WCHAR c0 = pat[0];
+    WCHAR lo = c0, up = c0;
+    if (!bCase && c0 < 128 && ((c0 >= L'a' && c0 <= L'z') || (c0 >= L'A' && c0 <= L'Z')))
+    {
+        lo = (WCHAR)(c0 | 0x20);
+        up = (WCHAR)(c0 & ~0x20);
+    }
+    for (; i >= 0; i--)
+    {
+        const WCHAR t = pText[i];
+        if (bCase)
+        {
+            if (t != c0) continue;
+        }
+        else if (c0 < 128)
+        {
+            if (t < 128 && t != lo && t != up) continue;
+        }
+        if (TvEqualAt(pText + i, pat, n, bCase))
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Go To: "123" / "0x7B" absolute (1), "50%" percent of the file (2), "+10" / "-5" relative lines (3 / 4); 0 = not a number.
+static int ParseGotoText(WCHAR* psz, ULONGLONG* pqw)
+{
+    while (*psz == L' ' || *psz == L'\t') psz++;
+    int n = lstrlenW(psz);
+    while (n > 0 && (psz[n - 1] == L' ' || psz[n - 1] == L'\t')) psz[--n] = L'\0';
+    if (n == 0)
+    {
+        return 0;
+    }
+    if (psz[n - 1] == L'%')
+    {
+        psz[n - 1] = L'\0';
+        ULONGLONG q = 0;
+        if (n > 1 && ParseU64(psz, q) && q <= 100)
+        {
+            *pqw = q;
+            return 2;
+        }
+        return 0;
+    }
+    if (psz[0] == L'+' || psz[0] == L'-')
+    {
+        ULONGLONG q = 0;
+        if (n > 1 && ParseU64(psz + 1, q))
+        {
+            *pqw = (q > 0x7FFFFFFFULL) ? 0x7FFFFFFFULL : q;
+            return (psz[0] == L'+') ? 3 : 4;
+        }
+        return 0;
+    }
+    return ParseU64(psz, *pqw) ? 1 : 0;
+}
+
+static ULONGLONG PercentOffset(ULONGLONG qwTotal, ULONGLONG qwPct)
+{
+    return qwTotal / 100 * qwPct + (qwTotal % 100) * qwPct / 100;
+}
+
+// Hex view: the byte (0-15) of a row that a text column belongs to. Layout of a row: 8 bytes "XX " , one extra space,
+// 8 bytes, one space, then the 16 ASCII characters from column TV_HEX_ASCII_COL.
+static int HexByteOfCol(int col)
+{
+    if (col < 0)
+    {
+        return 0;
+    }
+    if (col >= TV_HEX_ASCII_COL)
+    {
+        const int b = col - TV_HEX_ASCII_COL;
+        return (b > 15) ? 15 : b;
+    }
+    const int b = (col <= 24) ? col / 3 : (col - 1) / 3;
+    return (b > 15) ? 15 : b;
+}
+
+static void U64ToHex(WCHAR* d, ULONGLONG v)          // at least 8 digits
+{
+    WCHAR t[20];
+    int n = 0;
+    do
+    {
+        t[n++] = L"0123456789ABCDEF"[v & 15];
+        v >>= 4;
+    } while (v != 0);
+    while (n < 8) t[n++] = L'0';
+    int j = 0;
+    while (n > 0) d[j++] = t[--n];
+    d[j] = L'\0';
+}
+
+// Position in the file, 0..100: the page base plus the caret's share of the page.
+static int StatusPercent(ULONGLONG qwBase, DWORD cbPage, int iChar, int cch, ULONGLONG qwTotal)
+{
+    if (qwTotal == 0)
+    {
+        return 0;
+    }
+    double d = (double)qwBase;
+    if (cch > 0 && iChar > 0)
+    {
+        d += (double)cbPage * (double)iChar / (double)cch;
+    }
+    int p = (int)(d * 100.0 / (double)qwTotal);
+    return (p < 0) ? 0 : (p > 100) ? 100 : p;
+}
+
+static const WCHAR* ViewLabel(int iV)
+{
+    switch (iV)
+    {
+    case VIEW_ANSI:    return L"ANSI";
+    case VIEW_UTF8:    return L"UTF-8";
+    case VIEW_UTF16:   return L"UTF-16 LE";
+    case VIEW_UTF16BE: return L"UTF-16 BE";
+    case VIEW_EBCDIC:  return L"EBCDIC";
+    case VIEW_HEX:     return L"Hex";
+    }
+    return L"";
+}
+
+// "Remember where I was": an MRU list of "offset|path" entries in the INI ([Positions], P1..P24). Pure part:
+// put the new entry first, drop the old entry of the same path (case-insensitive), cap the list.
+#define POS_MAX 24
+static bool PosPathEq(const std::wstring& entry, const std::wstring& path)
+{
+    const size_t iBar = entry.find(L'|');
+    if (iBar == std::wstring::npos)
+    {
+        return false;
+    }
+    return lstrcmpiW(entry.c_str() + iBar + 1, path.c_str()) == 0;
+}
+
+static void PosMruMerge(std::vector<std::wstring>& v, const std::wstring& entry, const std::wstring& path, size_t cMax)
+{
+    for (size_t i = 0; i < v.size(); )
+    {
+        if (PosPathEq(v[i], path))
+        {
+            v.erase(v.begin() + i);
+        }
+        else
+        {
+            i++;
+        }
+    }
+    v.insert(v.begin(), entry);
+    if (v.size() > cMax)
+    {
+        v.resize(cMax);
+    }
+}
+
+// 6.17: Ctrl+F3 and the Find box: the text to search for = the selection (one line, up to 127 characters) or, when
+// asked (bWordFallback), the word under the caret. Fills szFind; false = nothing to search for.
+bool TV_SelectionOrWordToFind(bool bWordFallback)
+{
+    if (g_tv.pText == nullptr || g_tv.cch <= 0)
+    {
+        return false;
+    }
+    int iS = g_tv.iSelStart, iE = g_tv.iSelEnd;
+    if (iS > iE)
+    {
+        const int t = iS;
+        iS = iE;
+        iE = t;
+    }
+    if (iS < 0) iS = 0;
+    if (iE > g_tv.cch) iE = g_tv.cch;
+    if (iE == iS)
+    {
+        if (!bWordFallback)
+        {
+            return false;
+        }
+        while (iS > 0 && TvCharClass(g_tv.pText[iS - 1]) == 1) iS--;
+        while (iE < g_tv.cch && TvCharClass(g_tv.pText[iE]) == 1) iE++;
+        if (iE == iS)
+        {
+            return false;
+        }
+    }
+    int n = 0;
+    for (int i = iS; i < iE && n < (int)_countof(szFind) - 1; i++)
+    {
+        const WCHAR c = g_tv.pText[i];
+        if (c == L'\r' || c == L'\n')
+        {
+            break;                                   // a find is one line
+        }
+        szFind[n++] = c;
+    }
+    szFind[n] = L'\0';
+    return n > 0;
+}
+
+// Ctrl+Left / Ctrl+Right (Shift extends the selection).
+static void TV_MoveCaretWord(TextViewState* pState, int iDir, bool bShift)
+{
+    const int iPos = TV_WordBoundary(pState->pText, pState->cch, pState->iSelEnd, iDir);
+    if (iPos == pState->iSelEnd)
+    {
+        return;
+    }
+    pState->iSelEnd = iPos;
+    if (!bShift) pState->iSelStart = pState->iSelEnd;
+    g_iCaretCol = -1;
+    TV_ScrollCaret();
+}
+
+// ---- remember where I was (INI [Positions]: P1 = "offset|path", most recent first) -------------------------------
+static bool PosLookup(const WCHAR* pszPath, ULONGLONG* pqwOff)
+{
+    if (!g_bRememberPos || g_szIniPath[0] == L'\0')
+    {
+        return false;
+    }
+    for (int i = 1; i <= POS_MAX; i++)
+    {
+        WCHAR szKey[8], szVal[MAX_PATH + 32];
+        wsprintfW(szKey, L"P%d", i);
+        if (GetPrivateProfileStringW(L"Positions", szKey, L"", szVal, _countof(szVal), g_szIniPath) == 0)
+        {
+            break;                                   // the list is contiguous: the first empty key ends it
+        }
+        WCHAR* pBar = wcschr(szVal, L'|');
+        if (pBar != nullptr && lstrcmpiW(pBar + 1, pszPath) == 0)
+        {
+            *pBar = L'\0';
+            ULONGLONG q = 0;
+            if (ParseU64(szVal, q))
+            {
+                *pqwOff = q;
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+static void PosStore(const WCHAR* pszPath, ULONGLONG qwOff)
+{
+    try
+    {
+        std::vector<std::wstring> v;
+        for (int i = 1; i <= POS_MAX; i++)
+        {
+            WCHAR szKey[8], szVal[MAX_PATH + 32];
+            wsprintfW(szKey, L"P%d", i);
+            if (GetPrivateProfileStringW(L"Positions", szKey, L"", szVal, _countof(szVal), g_szIniPath) == 0)
+            {
+                break;
+            }
+            v.push_back(szVal);
+        }
+        WCHAR szOff[32];
+        U64ToWide(szOff, qwOff);
+        PosMruMerge(v, std::wstring(szOff) + L"|" + pszPath, pszPath, POS_MAX);
+        std::wstring sec;
+        for (size_t i = 0; i < v.size(); i++)
+        {
+            WCHAR szKey[8];
+            wsprintfW(szKey, L"P%d=", (int)i + 1);
+            sec += szKey;
+            sec += v[i];
+            sec.push_back(L'\0');
+        }
+        sec.push_back(L'\0');
+        WritePrivateProfileSectionW(L"Positions", sec.c_str(), g_szIniPath);
+    }
+    catch (...)
+    {
+    }
+}
+
+// Called when the file on screen is about to be replaced and when the window closes: the first VISIBLE line's
+// file offset. (Not for the clipboard / pipe entries, vanished files, or tail mode.)
+static void SaveFilePosition(void)
+{
+    if (!g_bRememberPos || g_szIniPath[0] == L'\0' || g_szCurrentFile[0] == L'\0' || g_cbFileTotal == 0 ||
+        g_tv.pText == nullptr || g_tv.cLines <= 0 || g_bTail)
+    {
+        return;
+    }
+    if (GetFileAttributesW(g_szCurrentFile) == INVALID_FILE_ATTRIBUTES)
+    {
+        return;
+    }
+    ULONGLONG qwOff = 0;
+    if (g_tv.iFirstVisible > 0 && !OffsetOfLine((DWORD)g_tv.iFirstVisible, qwOff))
+    {
+        return;
+    }
+    PosStore(g_szCurrentFile, qwOff);
+}
+
+// ---- right-click menu of the view -----------------------------------------------------------------------------
+#define CTX_FINDPREV   50003
+#define CTX_COPYPATH   50004
+#define CTX_EXPLORER   50005
+
+static void TV_ShowContextMenu(HWND hWnd, int x, int y)
+{
+    HMENU hMenu = CreatePopupMenu();
+    if (hMenu == nullptr)
+    {
+        return;
+    }
+    const bool bSel = (g_tv.iSelStart != g_tv.iSelEnd);
+    const bool bFile = (g_szCurrentFile[0] != L'\0' && GetFileAttributesW(g_szCurrentFile) != INVALID_FILE_ATTRIBUTES);
+    AppendMenuW(hMenu, MF_STRING | (bSel ? 0 : MF_GRAYED), ID_COPY, L"&Copy\tCtrl+C");
+    AppendMenuW(hMenu, MF_STRING, ID_SELECTALL, L"Select &All\tCtrl+A");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING, ID_FIND, L"&Find...\tCtrl+F");
+    AppendMenuW(hMenu, MF_STRING, ID_FINDNEXT, L"Find &Next\tF3");
+    AppendMenuW(hMenu, MF_STRING, CTX_FINDPREV, L"Find &Previous\tShift+F3");
+    AppendMenuW(hMenu, MF_STRING, ID_SEARCH_GOTO, L"&Go To...\tCtrl+G");
+    AppendMenuW(hMenu, MF_STRING, ID_EDIT_BOOKMARK, L"Toggle &Bookmark\tF2");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING | (g_tv.bWrap ? MF_CHECKED : 0), ID_VIEW_WRAP, L"&Word Wrap");
+    AppendMenuW(hMenu, MF_STRING | (g_bLineNums ? MF_CHECKED : 0), ID_VIEW_LINENUMS, L"&Line Numbers");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING | (bFile ? 0 : MF_GRAYED), CTX_COPYPATH, L"Copy file pat&h");
+    AppendMenuW(hMenu, MF_STRING | (bFile ? 0 : MF_GRAYED), CTX_EXPLORER, L"Show in &Explorer");
+    const int iCmd = (int)TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hWnd, nullptr);
+    DestroyMenu(hMenu);
+    if (iCmd == CTX_FINDPREV)
+    {
+        SearchPrev(true);
+    }
+    else if (iCmd == CTX_COPYPATH)
+    {
+        ClipboardSetText(hWndMain, g_szCurrentFile, lstrlenW(g_szCurrentFile), false);
+    }
+    else if (iCmd == CTX_EXPLORER)
+    {
+        WCHAR szArg[MAX_PATH + 16];
+        wsprintfW(szArg, L"/select,\"%s\"", g_szCurrentFile);
+        ShellExecuteW(hWndMain, L"open", L"explorer.exe", szArg, nullptr, SW_SHOWNORMAL);
+    }
+    else if (iCmd != 0)
+    {
+        SendMessage(hWndMain, WM_COMMAND, MAKEWPARAM(iCmd, 0), 0);
+    }
+}
+
 // 6.13: KEY-REPEAT ACCELERATION. Holding a navigation key moves at the keyboard's repeat rate (about 30
 // steps / s). After 1 s the step grows, again at 2 s and 3.5 s, so crossing a long file does not take
 // minutes; releasing the key (or pressing another) starts over at one step. The hold time is measured
@@ -6787,10 +7236,23 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             else if (g_bEscExit) { PostMessage(hWndMain, WM_CLOSE, 0, 0); }
             return 0;
         case VK_LEFT:
-            TV_MoveCaretChars(pState, -1, kKeyChars[iStage], bShift);
+            if (bCtrl) TV_MoveCaretWord(pState, -1, bShift);                 // 6.17: Ctrl+Left = previous word
+            else TV_MoveCaretChars(pState, -1, kKeyChars[iStage], bShift);
             return 0;
         case VK_RIGHT:
-            TV_MoveCaretChars(pState, 1, kKeyChars[iStage], bShift);
+            if (bCtrl) TV_MoveCaretWord(pState, 1, bShift);                  // 6.17: Ctrl+Right = next word
+            else TV_MoveCaretChars(pState, 1, kKeyChars[iStage], bShift);
+            return 0;
+        case VK_F3:
+            // (plain F3 and Ctrl+Shift+F3 are accelerators: Find Next / Find All)
+            if (bCtrl && !bShift)
+            {
+                if (TV_SelectionOrWordToFind(true)) SearchNext(hWndMain, true);      // 6.17: Ctrl+F3 = find the selection / the word under the caret
+            }
+            else if (bShift && !bCtrl)
+            {
+                SearchPrev(true);                                                    // 6.17: Shift+F3 = Find Previous
+            }
             return 0;
         case VK_UP:
         case VK_DOWN:
@@ -6910,6 +7372,14 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             }
             return 0;
         }
+        if (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT)
+        {
+            if (!pState->bWrap)
+            {
+                TV_ScrollX(hWnd, pState, pState->iScrollX - cScroll * 3 * iHexCharW);   // 6.17: Shift+wheel scrolls sideways
+            }
+            return 0;
+        }
         SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_ALL;
         GetScrollInfo(hWnd, SB_VERT, &si);
         UINT uLines = 3;                // 6.01: the user's "lines per notch" (WHEEL_PAGESCROLL = a page)
@@ -6967,6 +7437,20 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         SetCapture(hWnd);   // V5: enable drag-select
         SetFocus(hWnd);
         UpdateStatusBar();
+        return 0;
+    }
+    case WM_CONTEXTMENU:
+    {
+        int xM = GET_X_LPARAM(lParam), yM = GET_Y_LPARAM(lParam);
+        if (xM == -1 && yM == -1)
+        {
+            POINT ptM = { 0, 0 };                          // the menu key / Shift+F10: at the caret
+            GetCaretPos(&ptM);
+            ClientToScreen(hWnd, &ptM);
+            xM = ptM.x;
+            yM = ptM.y + iHexLineH;
+        }
+        TV_ShowContextMenu(hWnd, xM, yM);                  // 6.17
         return 0;
     }
     case WM_LBUTTONDBLCLK:
@@ -7414,7 +7898,7 @@ void LayoutStatusBar(int iWidth)
         return;
     }
     int piParts[2];
-    piParts[0] = (iWidth > 220) ? iWidth - 220 : 0;
+    piParts[0] = (iWidth > 340) ? iWidth - 340 : 0;           // 6.17: the right part also carries the encoding
     piParts[1] = iWidth;
     SendMessage(hStatusBar, SB_SETPARTS, 2, (LPARAM)piParts);
     PositionProgress();             // 3.08: the load bar rides the size part; track the width
@@ -7732,6 +8216,9 @@ static void EditGetSel(DWORD& rdwStart, DWORD& rdwEnd) { int iS, iE; TV_GetSel(i
 
 void UpdateStatusBar(bool bForce)
 {
+    static DWORD s_dwSelStartShown = (DWORD)-1;      // 6.17: the bar also shows the selection length, the view and CSV
+    static int s_iViewShown = -1;
+    static bool s_bCsvShown = false;
     if (hStatusBar == nullptr || hEdit == nullptr)
     {
         return;
@@ -7739,13 +8226,17 @@ void UpdateStatusBar(bool bForce)
     bool bLoading = (g_pJob != nullptr);
     DWORD dwSelStart = 0, dwSelEnd = 0;
     EditGetSel(dwSelStart, dwSelEnd);   // V5: works for custom control and EDIT
-    if (!bForce && !s_bFlash && dwSelEnd == s_dwCaret && g_cbFileTotal == s_cbTotal && bLoading == s_bLoading)
+    if (!bForce && !s_bFlash && dwSelEnd == s_dwCaret && dwSelStart == s_dwSelStartShown && g_cbFileTotal == s_cbTotal &&
+        bLoading == s_bLoading && iView == s_iViewShown && g_bCsvMode == s_bCsvShown)
     {
         return;                                 // nothing that feeds the bar has changed
     }
     s_dwCaret = dwSelEnd;
     s_cbTotal = g_cbFileTotal;
     s_bLoading = bLoading;
+    s_dwSelStartShown = dwSelStart;
+    s_iViewShown = iView;
+    s_bCsvShown = g_bCsvMode;
     s_bFlash = false;                               // whatever we write now replaces the flash note
 
     if (bLoading)
@@ -7766,13 +8257,37 @@ void UpdateStatusBar(bool bForce)
     int iVisCol = TV_VisCol((int)dwLineStart, (int)dwSelEnd);      // 6.09: tab stops count as columns
     if (iVisCol < 0) iVisCol = 0;
     FormatU64Locale(szCol, _countof(szCol), (ULONGLONG)iVisCol + 1);
-    WCHAR szPos[96];
-    wsprintfW(szPos, L"Line %s, Column %s", szLine, szCol);
+    WCHAR szPos[200];
+    const int iPct = StatusPercent(g_qwBase, cbFile, (int)dwSelEnd, g_tv.cch, g_cbFileTotal);
+    if (iView == VIEW_HEX)
+    {
+        // 6.17: the FILE offset of the byte under the caret (the dump's own line / column say nothing about the file)
+        ULONGLONG qwOff = g_qwBase + (ULONGLONG)iLine * 16 + (ULONGLONG)HexByteOfCol((int)(dwSelEnd - dwLineStart));
+        if (g_cbFileTotal > 0 && qwOff >= g_cbFileTotal)
+        {
+            qwOff = g_cbFileTotal - 1;
+        }
+        WCHAR szHex[24], szDec[40];
+        U64ToHex(szHex, qwOff);
+        FormatU64Locale(szDec, _countof(szDec), qwOff);
+        wsprintfW(szPos, L"Offset 0x%s (%s)  |  %d%%", szHex, szDec, iPct);
+    }
+    else
+    {
+        wsprintfW(szPos, L"Line %s, Column %s", szLine, szCol);
+        if (dwSelStart != dwSelEnd)
+        {
+            WCHAR szSel[32];
+            FormatU64Locale(szSel, _countof(szSel), (ULONGLONG)((dwSelStart > dwSelEnd) ? dwSelStart - dwSelEnd : dwSelEnd - dwSelStart));
+            wsprintfW(szPos + lstrlenW(szPos), L"  |  Sel %s", szSel);        // 6.17: characters selected
+        }
+        wsprintfW(szPos + lstrlenW(szPos), L"  |  %d%%", iPct);               // 6.17: where in the file
+    }
     SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)szPos);
 
-    WCHAR szNum[40], szSize[64];
+    WCHAR szNum[40], szSize[120];
     FormatU64Locale(szNum, _countof(szNum), g_cbFileTotal); // REAL size on disk (64-bit: any file opens now)
-    wsprintfW(szSize, L"%s%s", szNum, (g_cbFileTotal == 1) ? L" byte" : L" bytes");
+    wsprintfW(szSize, L"%s%s  |  %s%s", ViewLabel(iView), g_bCsvMode ? L" (CSV)" : L"", szNum, (g_cbFileTotal == 1) ? L" byte" : L" bytes");   // 6.17: the encoding too
     SendMessage(hStatusBar, SB_SETTEXT, 1, (LPARAM)szSize);
 }
 
@@ -7793,6 +8308,7 @@ void OpenFindDialog(HWND hWnd)
     fr.hwndOwner = hWnd;
     fr.hInstance = hInst;
     fr.Flags = FR_DOWN | FR_HIDEUPDOWN | dwKeepCase;
+    TV_SelectionOrWordToFind(false);                // 6.17: Ctrl+F with a selection searches for it
     fr.lpstrFindWhat = szFind;
     fr.wFindWhatLen = _countof(szFind);
     hDlgFind = FindTextW(&fr);
@@ -8028,6 +8544,90 @@ void SearchNext(HWND hWnd, bool bShowError)
    6.00 high-priority features (V-inspired)
    ============================================================================================ */
 
+// 6.17: Shift+F3 / "Find Previous": the last match that starts before the selection; none before it = wrap to the last
+// one of the text. Plain text scans backwards; a regular expression has no reverse mode, so its matches are walked
+// forward (capped) keeping the last one before the caret and the last one overall.
+void SearchPrev(bool bShowError)
+{
+    if (szFind[0] == L'\0')
+    {
+        OpenFindDialog(hWndMain);
+        return;
+    }
+    if (g_tv.pText == nullptr || g_tv.cch <= 0)
+    {
+        return;
+    }
+    DWORD dwS, dwE;
+    EditGetSel(dwS, dwE);
+    const int iFrom = (int)((dwS < dwE) ? dwS : dwE);
+    int iHit = -1;
+    int cchHit = lstrlenW(szFind);
+    if (g_bRegexFind)
+    {
+        int iBefore = -1, cBefore = 0, iAny = -1, cAny = 0;
+        DWORD dwPos = 0;
+        for (int guard = 0; guard < 4000000; guard++)
+        {
+            const WCHAR* p = FindPatternFrom(g_tv.pText, dwPos);
+            if (p == nullptr)
+            {
+                break;
+            }
+            const int iPos = (int)(p - g_tv.pText);
+            const int c = (g_cchLastRegexMatch > 0) ? g_cchLastRegexMatch : 1;
+            iAny = iPos;
+            cAny = c;
+            if (iPos < iFrom)
+            {
+                iBefore = iPos;
+                cBefore = c;
+            }
+            dwPos = (DWORD)iPos + 1;
+            if (dwPos > (DWORD)g_tv.cch)
+            {
+                break;
+            }
+        }
+        if (iBefore >= 0)
+        {
+            iHit = iBefore;
+            cchHit = cBefore;
+        }
+        else if (iAny >= 0)
+        {
+            iHit = iAny;
+            cchHit = cAny;
+        }
+    }
+    else
+    {
+        const bool bCase = (fr.Flags & FR_MATCHCASE) != 0;
+        iHit = FindPlainBefore(g_tv.pText, g_tv.cch, szFind, cchHit, iFrom, bCase);
+        if (iHit < 0)
+        {
+            iHit = FindPlainBefore(g_tv.pText, g_tv.cch, szFind, cchHit, g_tv.cch, bCase);
+        }
+    }
+    if (iHit < 0)
+    {
+        if (bShowError)
+        {
+            WCHAR szText[160];
+            wsprintfW(szText, L"Cannot find \"%s\".", szFind);
+            MessageBoxW((hDlgFind != nullptr) ? hDlgFind : hWndMain, szText, L"Find", MB_OK | MB_ICONINFORMATION);
+        }
+        return;
+    }
+    TV_SetSel(iHit, iHit + cchHit);
+    TV_ScrollCaret();
+    UpdateStatusBar();
+    if (hDlgFind == nullptr)
+    {
+        SetFocus(hEdit);
+    }
+}
+
 // 6.14: INCREMENTAL FIND. The Find dialog is the system's FindText: it only reports when Find Next is pressed.
 // The dialog is subclassed to hear its edit box (id 0x480): every change searches from the START of the current
 // selection (typing one more letter keeps the same hit, Backspace keeps it too), wrapping once, and selects /
@@ -8036,6 +8636,7 @@ void SearchNext(HWND hWnd, bool bShowError)
 // window): Find Next / Enter still search there.
 #define FINDDLG_EDIT_ID   0x0480      // edt1
 #define FINDDLG_CASE_ID   0x0410      // chx1
+#define FINDDLG_TIMER_ID  0x4D46      // big texts: search 200 ms after the last keystroke
 
 static void IncrementalFind(void)
 {
@@ -8079,7 +8680,20 @@ static LRESULT CALLBACK FindDlgSubclassProc(HWND hDlg, UINT message, WPARAM wPar
         {
             fr.Flags &= ~(DWORD)FR_MATCHCASE;
         }
+        if (g_tv.cch > (2 << 20))
+        {
+            SetTimer(hDlg, FINDDLG_TIMER_ID, 200, nullptr);       // 6.17: do not search on every key of a fast typist
+        }
+        else
+        {
+            IncrementalFind();
+        }
+    }
+    else if (message == WM_TIMER && wParam == FINDDLG_TIMER_ID)
+    {
+        KillTimer(hDlg, FINDDLG_TIMER_ID);
         IncrementalFind();
+        return 0;
     }
     else if (message == WM_NCDESTROY)
     {
@@ -9541,14 +10155,27 @@ INT_PTR CALLBACK GoToProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
             WCHAR szValue[80];
             GetDlgItemTextW(hDlg, IDC_GOTO_EDIT, szValue, _countof(szValue));
             ULONGLONG qwVal = 0;
-            if (!ParseU64(szValue, qwVal))
+            const int iKind = ParseGotoText(szValue, &qwVal);
+            if (iKind == 0)
             {
-                MessageBoxW(hDlg, L"Enter a non-negative number (a 0x prefix means hexadecimal).", L"Go To", MB_OK | MB_ICONWARNING);
+                MessageBoxW(hDlg, L"Enter a number (0x prefix = hexadecimal), a percentage of the file (50%) or a relative line (+10 / -5).", L"Go To", MB_OK | MB_ICONWARNING);
                 return (INT_PTR)TRUE;
             }
             bool bLine = (IsDlgButtonChecked(hDlg, IDC_GOTO_LINE) == BST_CHECKED);
             EndDialog(hDlg, 1);
-            if (bLine)
+            if (iKind == 2)
+            {
+                GoToOffset(PercentOffset(g_cbFileTotal, qwVal));            // 6.17: "50%"
+            }
+            else if (iKind >= 3)
+            {
+                DWORD dwA, dwB;                                             // 6.17: "+10" / "-5" from the caret's line
+                EditGetSel(dwA, dwB);
+                long long llLine = (long long)TV_LineFromChar((int)dwB) + 1 + ((iKind == 3) ? 1 : -1) * (long long)qwVal;
+                if (llLine < 1) llLine = 1;
+                GoToLine((ULONGLONG)llLine);
+            }
+            else if (bLine)
             {
                 GoToLine(qwVal);
             }
@@ -11579,6 +12206,7 @@ void LoadSettings(void)
     g_iFreezeCols = (int)ProfileLong(L"FreezeCols", 0);
     if (g_iFreezeCols < 0) g_iFreezeCols = 0;
     if (g_iFreezeCols > 200) g_iFreezeCols = 200;
+    g_bRememberPos = (ProfileLong(L"RememberPosition", 1) != 0);              // 6.17
     g_bPrefetch = (ProfileLong(L"Prefetch", 1) != 0);                        // 6.14
     g_iTabWidth = (int)ProfileLong(L"TabWidth", 8);
     if (g_iTabWidth < 1 || g_iTabWidth > 16) g_iTabWidth = 8;
@@ -11658,6 +12286,7 @@ void SaveSettings(void)
     p += wsprintfW(p, L"EscExit=%d", g_bEscExit ? 1 : 0) + 1;            // 5.8
     p += wsprintfW(p, L"WrapWidth=%d", g_iWrapWidth) + 1;
     p += wsprintfW(p, L"FreezeCols=%d", g_iFreezeCols) + 1;
+    p += wsprintfW(p, L"RememberPosition=%d", g_bRememberPos ? 1 : 0) + 1;   // 6.17
     p += wsprintfW(p, L"Prefetch=%d", g_bPrefetch ? 1 : 0) + 1;              // 6.14
     p += wsprintfW(p, L"TabWidth=%d", g_iTabWidth) + 1;                   // 6.08
     p += wsprintfW(p, L"RegexFind=%d", g_bRegexFind ? 1 : 0) + 1;

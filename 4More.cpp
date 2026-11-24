@@ -1,6 +1,22 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.17
+   Build 6.18
+
+   Version 6.18 (text views: whitespace, encodings, theme, +N):
+   - NEW: Options > Show Whitespace (/ws, INI ShowWhitespace, also in the right-click menu): spaces as a middle
+     dot, tabs as an arrow (following the tab stops), the end of every line as a pilcrow, in a dim colour
+     drawn in a second transparent pass over the row (only the visible columns are built).
+   - NEW encodings: Encoding > UTF-32 LE / BE (BOM detected automatically; /utf32 /utf32be) and a submenu
+     "More ANSI code pages" (Windows-1250..1257, ISO-8859-1/2/5/7/9/15, KOI8-R, OEM 437/850, Shift-JIS, GBK,
+     CP949, Big5; /cp:N). UTF-32 has its own paging, line <-> offset, CR/LF planning, Find Bytes pattern and
+     preview paths (fuzzed against reference models, 150,000 cases); an ANSI code page is a decoding choice of
+     the existing ANSI view (the status bar names it). A fresh load goes back to the system / command-line one.
+   - NEW: dark theme. Options > Theme: Auto (follows Windows, re-read when it changes), Light, Dark; INI Theme=0/1/2;
+     /dark /light. The view, the offset / line-number column, the ruler, the selection and the band colours
+     follow it (colours set in the INI still win); the title bar and scroll bars go dark where Windows
+     supports it. The menu bar and the status bar stay in the system colours.
+   - NEW: +N on the command line goes to line N after the file is shown (4More +120 app.log).
+   - Removed: /timing and its instrumentation.
 
    Version 6.17 (usability round):
    - Right-click menu on the view: Copy, Select All, Find / Next / Previous, Go To, Bookmark, Word Wrap,
@@ -267,6 +283,7 @@
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "advapi32.lib")                  // 6.18: RegGetValueW (the Windows dark-mode setting)
 #endif
 
 #include <new>                                  // std::bad_alloc, std::nothrow
@@ -318,7 +335,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.17"
+#define APP_VERSION L"6.18"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -390,6 +407,12 @@ bool g_bHiliteLine = true;                      // 5.8: View > Highlight Current
 bool g_bEscExit = true;                         // 5.8: View > ESC to Exit (default ON): ESC closes 4More when idle
 int g_iWrapWidth = 0;                            // V4: 0 = wrap to window; >0 = wrap to N chars (View > Wrap to Fixed Width)
 static volatile LONG g_lPrefetchSeq = 0;         // 6.14: bumped by every load: a running neighbour-page prefetch stops
+UINT g_uAnsiCP = CP_ACP;                        // 6.18: the code page of the ANSI view (CP_ACP = the system's; the menu / /cp:N pick others)
+UINT g_uCliCP = CP_ACP;                         // 6.18: /cp:N from the command line (what every fresh load starts with)
+bool g_bShowWS = false;                         // 6.18: Options > Show Whitespace (INI ShowWhitespace, /ws)
+int g_iTheme = 0;                               // 6.18: 0 = follow Windows, 1 = light, 2 = dark (INI Theme, /dark /light)
+bool g_bDark = false;                           // 6.18: the theme in effect
+ULONGLONG g_qwPendingLine = 0;                  // 6.18: +N on the command line: the line to go to once the first load is shown
 bool g_bRememberPos = true;                    // 6.17: INI RememberPosition=0: do not reopen files where they were left
 bool g_bPrefetch = true;                        // 6.14: INI Prefetch=0 turns the neighbour-page read-ahead off
 int g_iTabWidth = 8;                            // 6.08: tab stop distance in columns (INI TabWidth, 1..16)
@@ -495,15 +518,6 @@ static int g_iCaretCol = -1;
 // hEdit is declared above (line 897). It always points to the custom
 // V5TextView control (5.4: every view, hex included).
 
-// --- Performance instrumentation (/timing switch) ---
-bool g_bTiming = false;                         // CLI /timing: show the per-phase load times
-// 3.08: DWORD, not ULONGLONG. The worker writes them and the UI thread
-// reads them: a volatile 64-bit store is TWO halves on Win32, so a read
-// could catch one half of each. Milliseconds fit a DWORD by a wide margin.
-volatile DWORD g_msRead = 0;                    // worker: raw read phase, ms
-volatile DWORD g_msDecode = 0;                  // worker: decode-to-text phase, ms
-volatile DWORD g_msNormalize = 0;              // UI: CRLF normalization pass, ms
-volatile DWORD g_msDeliver = 0;                // UI: hand the text to the EDIT control, ms
 
 // --- Preferences (4More.ini, written on exit, loaded before the switches) ---
 WCHAR g_szIniPath[MAX_PATH] = {};               // 4More.ini beside the executable ("" = no persistence)
@@ -550,8 +564,135 @@ volatile ULONGLONG g_qwSearchResult = (ULONGLONG)-1;   // found offset, -1 = not
 // View modes for the View menu. The order must match the ID_VIEW_* values in
 // resource.h (they are consecutive there): ID_VIEW_ANSI + iView is the
 // command ID of each view.
-enum { VIEW_ANSI = 0, VIEW_UTF8 = 1, VIEW_UTF16 = 2, VIEW_UTF16BE = 4, VIEW_EBCDIC = 5, VIEW_HEX = 3 };
+enum { VIEW_ANSI = 0, VIEW_UTF8 = 1, VIEW_UTF16 = 2, VIEW_UTF16BE = 4, VIEW_EBCDIC = 5, VIEW_HEX = 3, VIEW_UTF32 = 6, VIEW_UTF32BE = 7 };   // 6.18: the UTF-32 views have their own menu IDs (ID_VIEW_ANSI + iView only spans 0..5)
 int g_iLastTextView = VIEW_ANSI;                // 6.16: the TEXT encoding of the file (detected / last chosen): hex -> text and CSV return to it
+void TV_SyncState(void);
+
+// ============================================================================================
+// 6.18: THEME. Dark theme for the view, the offset / line-number column and the ruler. Auto (default) follows the
+// Windows "apps" mode (HKCU ... Themes\\Personalize\\AppsUseLightTheme, re-read on WM_SETTINGCHANGE), or forced
+// with Options > Theme, INI Theme=0/1/2, /dark and /light. The colours the user set in the INI still win over
+// the theme. The title bar and the scroll bars follow where the OS supports it (looked up at run time); the menu
+// bar and the status bar stay in the system colours (they have no supported dark mode).
+// ============================================================================================
+// ---- ANSI code pages (declared early: the command dispatch and the menu state use the table) ----
+struct CpEntry
+{
+    UINT          cp;
+    const WCHAR*  pszShort;
+};
+static const CpEntry kCodePages[] =                      // the order of the Options > Encoding > More ANSI code pages menu (ID_ENC_CP00..CP20)
+{
+    { 1252, L"Windows-1252" }, { 28591, L"ISO-8859-1" }, { 28605, L"ISO-8859-15" }, { 28592, L"ISO-8859-2" },
+    { 1250, L"Windows-1250" }, { 1251, L"Windows-1251" }, { 28595, L"ISO-8859-5" }, { 20866, L"KOI8-R" },
+    { 1253, L"Windows-1253" }, { 28597, L"ISO-8859-7" }, { 1254, L"Windows-1254" }, { 28599, L"ISO-8859-9" },
+    { 1255, L"Windows-1255" }, { 1256, L"Windows-1256" }, { 1257, L"Windows-1257" }, { 437, L"CP437" },
+    { 850, L"CP850" }, { 932, L"Shift-JIS" }, { 936, L"GBK" }, { 949, L"CP949" }, { 950, L"Big5" }
+};
+#define CP_TABLE_COUNT ((int)(sizeof(kCodePages) / sizeof(kCodePages[0])))
+
+static const WCHAR* AnsiLabel(void)
+{
+    if (g_uAnsiCP != CP_ACP)
+    {
+        for (int i = 0; i < CP_TABLE_COUNT; i++)
+        {
+            if (kCodePages[i].cp == g_uAnsiCP) return kCodePages[i].pszShort;
+        }
+    }
+    return L"ANSI";
+}
+
+static HBRUSH ThBrush(COLORREF c)
+{
+    static COLORREF s_clr[12];
+    static HBRUSH s_hbr[12];
+    static int s_n = 0;
+    for (int i = 0; i < s_n; i++)
+    {
+        if (s_clr[i] == c) return s_hbr[i];
+    }
+    HBRUSH h = CreateSolidBrush(c);
+    if (h != nullptr && s_n < 12)
+    {
+        s_clr[s_n] = c;
+        s_hbr[s_n++] = h;
+    }
+    return h;
+}
+
+static COLORREF ThWindow(void)    { return g_bDark ? RGB(30, 30, 30)    : GetSysColor(COLOR_WINDOW); }
+static COLORREF ThText(void)      { return g_bDark ? RGB(224, 224, 224) : GetSysColor(COLOR_WINDOWTEXT); }
+static COLORREF ThSelBg(void)     { return g_bDark ? RGB(38, 79, 120)   : GetSysColor(COLOR_HIGHLIGHT); }
+static COLORREF ThSelTx(void)     { return g_bDark ? RGB(255, 255, 255) : GetSysColor(COLOR_HIGHLIGHTTEXT); }
+static COLORREF ThGreenbar(void)  { return g_bDark ? RGB(38, 46, 38)    : RGB(0xE8, 0xF0, 0xE8); }
+static COLORREF ThHilite(void)    { return g_bDark ? RGB(60, 60, 30)    : RGB(0xFF, 0xF0, 0xB0); }
+static COLORREF ThBookmark(void)  { return g_bDark ? RGB(31, 58, 92)    : RGB(0xB8, 0xD4, 0xF0); }
+static COLORREF ThWhitespace(void){ return g_bDark ? RGB(100, 100, 100) : RGB(170, 170, 170); }
+static HBRUSH ThBrushWindow(void) { return g_bDark ? ThBrush(RGB(30, 30, 30))    : GetSysColorBrush(COLOR_WINDOW); }
+static HBRUSH ThBrushFace(void)   { return g_bDark ? ThBrush(RGB(45, 45, 48))    : GetSysColorBrush(COLOR_3DFACE); }
+static HBRUSH ThBrushShadow(void) { return g_bDark ? ThBrush(RGB(90, 90, 90))    : GetSysColorBrush(COLOR_3DSHADOW); }
+static HBRUSH ThBrushLight(void)  { return g_bDark ? ThBrush(RGB(62, 62, 62))    : GetSysColorBrush(COLOR_3DLIGHT); }
+
+static bool SystemWantsDark(void)
+{
+    DWORD dwLight = 1;
+    DWORD cb = sizeof(dwLight);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"AppsUseLightTheme",
+        RRF_RT_REG_DWORD, nullptr, &dwLight, &cb) != ERROR_SUCCESS)
+    {
+        return false;                                  // no such value (older Windows): light
+    }
+    return dwLight == 0;
+}
+
+typedef HRESULT (WINAPI* PFN_DWMSETATTR)(HWND, DWORD, LPCVOID, DWORD);
+typedef HRESULT (WINAPI* PFN_SETWINDOWTHEME)(HWND, LPCWSTR, LPCWSTR);
+
+static void ThemeApply(void)
+{
+    g_bDark = (g_iTheme == 2) || (g_iTheme == 0 && SystemWantsDark());
+    // the title bar (Windows 10 20H1+ / 11: attribute 20; 1809-1909: attribute 19) and the scroll bars (DarkMode_Explorer)
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    if (hDwm != nullptr)
+    {
+        PFN_DWMSETATTR pfn = (PFN_DWMSETATTR)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+        if (pfn != nullptr && hWndMain != nullptr)
+        {
+            const BOOL bDark = g_bDark ? TRUE : FALSE;
+            if (FAILED(pfn(hWndMain, 20, &bDark, sizeof(bDark))))
+            {
+                pfn(hWndMain, 19, &bDark, sizeof(bDark));
+            }
+        }
+        FreeLibrary(hDwm);
+    }
+    HMODULE hUx = LoadLibraryW(L"uxtheme.dll");
+    if (hUx != nullptr)
+    {
+        PFN_SETWINDOWTHEME pfn = (PFN_SETWINDOWTHEME)GetProcAddress(hUx, "SetWindowTheme");
+        if (pfn != nullptr && hEdit != nullptr)
+        {
+            pfn(hEdit, g_bDark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+        }
+        FreeLibrary(hUx);
+    }
+    // the band brushes were created with the old colours: drop them, TV_SyncState makes new ones
+    if (g_tv.hbrGreen != nullptr) { DeleteObject(g_tv.hbrGreen); g_tv.hbrGreen = nullptr; }
+    if (g_tv.hbrHilite != nullptr) { DeleteObject(g_tv.hbrHilite); g_tv.hbrHilite = nullptr; }
+    if (g_tv.hbrBookmark != nullptr) { DeleteObject(g_tv.hbrBookmark); g_tv.hbrBookmark = nullptr; }
+    if (hEdit != nullptr)
+    {
+        TV_SyncState();
+        g_tv.bGutterDirty = true;
+        InvalidateRect(hEdit, nullptr, FALSE);
+    }
+    if (hWndMain != nullptr)
+    {
+        InvalidateRect(hWndMain, nullptr, FALSE);
+    }
+}
+
 
 // The one digit table of the hexadecimal dumps, shared by the text builder
 // (BuildHexText) and the bold offset column (PaintGutter).
@@ -720,6 +861,9 @@ bool TV_SelectionOrWordToFind(bool bWordFallback);   // 6.17: szFind <- selectio
 void SearchPrev(bool bShowError);                    // 6.17: Shift+F3
 static bool PosLookup(const WCHAR* pszPath, ULONGLONG* pqwOff);   // 6.17: where this file was left
 static void SaveFilePosition(void);                  // 6.17: remember it
+static const WCHAR* AnsiLabel(void);            // 6.18: "ANSI" or the name of the chosen code page
+static void SetAnsiCodePage(UINT cp);
+static void ChooseView(int iNew);
 static int GutterLineAt(int x, int y);          // 6.16: logical line under a point of the offset / line-number column, -1 = none
 static bool GutterClick(int x, int y, bool bShift);   // 6.16: click on that column: caret to the line
 static void StartPagePrefetch(void);            // 6.14: read the neighbour pages into the file cache in the background
@@ -811,7 +955,6 @@ void LoadSettings(void);                        // INI first: the command line o
 void SaveSettings(void);                         // on exit
 WCHAR* AllocViewText(DWORD cch);                // 5.4: GMEM_FIXED block for the view text
 void FreeViewText(WCHAR* psz);                  // its pair: GlobalFree (the pointer is the handle)
-void TimingFlash(void);                          // /timing: per-phase ms on the status bar
 
 // Every text view is built from at most CB_TEXT_MAX source bytes and the
 // loader stops reading there too: the bytes shown are a PAGE (window) of the
@@ -1027,7 +1170,8 @@ bool InitInstance(HINSTANCE hInstance, int nCmdShow)
     }
     else
     {
-        ShowWindow(hWnd, nCmdShow);
+        ThemeApply();                      // 6.18: the theme in effect (INI / command line / Windows) before the first paint
+    ShowWindow(hWnd, nCmdShow);
     }
     UpdateWindow(hWnd);
 
@@ -1122,6 +1266,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (wmId >= ID_FILE_RECENT_FIRST && wmId <= ID_FILE_RECENT_LAST)
         {
             OpenRecentEntry(wmId - ID_FILE_RECENT_FIRST);
+            break;
+        }
+        if (wmId >= ID_ENC_CP00 && wmId <= ID_ENC_CP20)
+        {
+            SetAnsiCodePage(kCodePages[wmId - ID_ENC_CP00].cp);        // 6.18: Encoding > More ANSI code pages
             break;
         }
         // Parse the menu selections:
@@ -1237,6 +1386,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case ID_VIEW_RULER:                   // V4
             ToggleRuler();
             break;
+        case ID_VIEW_WHITESPACE:              // 6.18
+            g_bShowWS = !g_bShowWS;
+            UpdateViewMenu();
+            if (hEdit != nullptr) InvalidateRect(hEdit, nullptr, FALSE);
+            break;
+        case ID_THEME_AUTO:                   // 6.18
+        case ID_THEME_LIGHT:
+        case ID_THEME_DARK:
+            g_iTheme = wmId - ID_THEME_AUTO;
+            ThemeApply();
+            UpdateViewMenu();
+            break;
+        case ID_VIEW_UTF32LE:                 // 6.18
+            ChooseView(VIEW_UTF32);
+            break;
+        case ID_VIEW_UTF32BE:
+            ChooseView(VIEW_UTF32BE);
+            break;
         case ID_VIEW_HILITE:                  // 5.8
             ToggleHiliteLine();
             break;
@@ -1266,6 +1433,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case ID_VIEW_HEX:
             // The six IDs are consecutive in resource.h: they map
             // 1:1 to VIEW_*. SetView rejects anything out of range.
+            if (wmId == ID_VIEW_ANSI && g_uAnsiCP != CP_ACP)
+            {
+                SetAnsiCodePage(CP_ACP);    // 6.18: "ANSI" = the system code page again (iView is already ANSI: SetView would return)
+                break;
+            }
             if (g_bCsvMode)
             {
                 g_bCsvMode = false;         // SetView rebuilds once from bytes...
@@ -1313,6 +1485,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     else if (!lstrcmpiW(pszArg + 1, L"unicode") || !lstrcmpiW(pszArg + 1, L"utf16")) { g_iForcedView = VIEW_UTF16; }
                     else if (!lstrcmpiW(pszArg + 1, L"utf16be")) { g_iForcedView = VIEW_UTF16BE; }
                     else if (!lstrcmpiW(pszArg + 1, L"ebcdic")) { g_iForcedView = VIEW_EBCDIC; }
+                    else if (!lstrcmpiW(pszArg + 1, L"utf32")) { g_iForcedView = VIEW_UTF32; }        // 6.18
+                    else if (!lstrcmpiW(pszArg + 1, L"utf32be")) { g_iForcedView = VIEW_UTF32BE; }
+                    else if (!lstrcmpiW(pszArg + 1, L"dark")) { g_iTheme = 2; }
+                    else if (!lstrcmpiW(pszArg + 1, L"light")) { g_iTheme = 1; }
+                    else if (!lstrcmpiW(pszArg + 1, L"ws")) { g_bShowWS = true; }
+                    else if (!_wcsnicmp(pszArg + 1, L"cp:", 3))
+                    {
+                        ULONGLONG qw = 0;                                       // /cp:1252 /cp:28591 ...: the ANSI view decodes with that code page
+                        if (ParseU64(pszArg + 1 + 3, qw) && qw > 0 && qw < 65536)
+                        {
+                            g_uCliCP = (UINT)qw;
+                            g_uAnsiCP = g_uCliCP;
+                            g_iForcedView = VIEW_ANSI;
+                        }
+                    }
                     else if (!lstrcmpiW(pszArg + 1, L"ansi")) { g_iForcedView = VIEW_ANSI; }
                     else if (!lstrcmpiW(pszArg + 1, L"tail")) { g_bTail = true; }
                     else if (!lstrcmpiW(pszArg + 1, L"wrap")) { g_bWrap = true; }
@@ -1338,8 +1525,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         lstrcpynW(szFind, pszArg + 1 + 5, _countof(szFind));
                     }
                     else if (!lstrcmpiW(pszArg + 1, L"lines")) { g_bLineNums = true; }
-                    else if (!lstrcmpiW(pszArg + 1, L"timing")) { g_bTiming = true; }
                     // unknown switches are ignored: never punish a typo
+                }
+                else if (pszArg[0] == L'+' && pszArg[1] >= L'0' && pszArg[1] <= L'9')
+                {
+                    ULONGLONG qw = 0;                                           // 6.18: +N = go to line N once the file is shown
+                    if (ParseU64(pszArg + 1, qw))
+                        g_qwPendingLine = qw;
                 }
                 else if (pszFileToLoad[0] == L'\0')
                 {
@@ -1685,11 +1877,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     PaintRuler(hdc, rcRuler, iGutter);
                 }
                 RECT rcCorner = { 0, 0, iGutter, iHexLineH };
-                FillRect(hdc, &rcCorner, GetSysColorBrush(COLOR_WINDOW));
+                FillRect(hdc, &rcCorner, ThBrushWindow());
             }
         }
         EndPaint(hWnd, &ps);
         break;
+    }
+    case WM_SETTINGCHANGE:
+    {
+        // 6.18: the user switched Windows between light and dark: follow it (Auto theme only)
+        if (g_iTheme == 0 && lParam != 0 && lstrcmpW((LPCWSTR)lParam, L"ImmersiveColorSet") == 0)
+        {
+            ThemeApply();
+        }
+        return DefWindowProc(hWnd, message, wParam, lParam);
     }
     case WM_LBUTTONDOWN:
         if (GutterClick(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), (wParam & MK_SHIFT) != 0))
@@ -1918,21 +2119,23 @@ void ShowCommandLineHelp(void)
         L"View / encoding (first load only)\r\n"
         L"  /ansi /utf8 /unicode /utf16 /utf16be\r\n"
         L"  /ebcdic /hex      Force the initial view\r\n"
+        L"  /utf32 /utf32be   UTF-32 little / big endian\r\n"
+        L"  /cp:N             ANSI view with code page N (1252, 28591, 28592, 1251...)\r\n"
         L"\r\n"
         L"Display\r\n"
         L"  /wrap             Word wrap on\r\n"
         L"  /tail             Follow file growth (jump to last page)\r\n"
         L"  /csv              Format page as CSV/TSV table after load\r\n"
         L"  /freeze:N         Keep N columns fixed while scrolling (0-200)\r\n"
+        L"  /ws               Show whitespace (spaces, tabs, line ends)\r\n"
+        L"  /dark /light      Force the theme (default: follow Windows)\r\n"
         L"\r\n"
         L"Search / navigation\r\n"
         L"  /find:text        Seed the Find pattern\r\n"
         L"  /regex            Find uses regular expressions\r\n"
         L"  /goto:N           Go to absolute byte offset after load\r\n"
         L"                    (decimal or 0x hex)\r\n"
-        L"\r\n"
-        L"Diagnostics\r\n"
-        L"  /timing           Flash load phase times on the status bar\r\n"
+        L"  +N                Go to line N after load (4More +120 app.log)\r\n"
         L"\r\n"
         L"INI (beside the executable) overrides defaults; an explicit\r\n"
         L"switch on the command line still wins for that session.\r\n"
@@ -2222,6 +2425,7 @@ LoadJob* BeginLoadJob(bool bStdin)
     // Any previous content goes away first: a failed open must not leave the
     // old file on screen with a status bar that says "0 bytes".
     ResetViewer();
+    g_uAnsiCP = g_uCliCP;                  // 6.18: a fresh load starts with the command-line code page (not the last one picked)
 
     LoadJob* pJob = new (std::nothrow) LoadJob();
     if (pJob == nullptr)
@@ -2519,6 +2723,99 @@ static int CountCRLFExpansionUtf16(const BYTE* pBytes, DWORD cb, bool bBE)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// 6.18: UTF-32 (LE / BE). The text is decoded to UTF-16 (an astral code point = a surrogate pair, anything invalid
+// = U+FFFD); the line <-> byte-offset helpers work on the 4-byte units with the SAME break rule as every other
+// view: a LF unit is a break, a CR unit is a break unless the next unit (inside the range) is a LF.
+static inline DWORD U32At(const BYTE* p, bool bBE)
+{
+    return bBE ? (((DWORD)p[0] << 24) | ((DWORD)p[1] << 16) | ((DWORD)p[2] << 8) | (DWORD)p[3])
+               : (((DWORD)p[3] << 24) | ((DWORD)p[2] << 16) | ((DWORD)p[1] << 8) | (DWORD)p[0]);
+}
+
+static int CountCRLFExpansionUtf32(const BYTE* p, DWORD cb, bool bBE)
+{
+    int c = 0;
+    const DWORD n = cb / 4;
+    for (DWORD i = 0; i < n; i++)
+    {
+        const DWORD u = U32At(p + i * 4, bBE);
+        if (u == 0x0D)
+        {
+            if (!(i + 1 < n && U32At(p + (i + 1) * 4, bBE) == 0x0A)) c++;      // lone CR
+        }
+        else if (u == 0x0A)
+        {
+            if (!(i > 0 && U32At(p + (i - 1) * 4, bBE) == 0x0D)) c++;          // lone LF
+        }
+    }
+    return c;
+}
+
+static int Utf32ToUtf16(const BYTE* p, DWORD cb, bool bBE, WCHAR* d)
+{
+    int o = 0;
+    const DWORD n = cb / 4;
+    for (DWORD i = 0; i < n; i++)
+    {
+        const DWORD u = U32At(p + i * 4, bBE);
+        if (u < 0x10000)
+        {
+            d[o++] = (u >= 0xD800 && u <= 0xDFFF) ? (WCHAR)0xFFFD : (WCHAR)u;      // a lone surrogate is not a character
+        }
+        else if (u <= 0x10FFFF)
+        {
+            const DWORD v = u - 0x10000;
+            d[o++] = (WCHAR)(0xD800 + (v >> 10));
+            d[o++] = (WCHAR)(0xDC00 + (v & 0x3FF));
+        }
+        else
+        {
+            d[o++] = (WCHAR)0xFFFD;
+        }
+    }
+    return o;
+}
+
+// line breaks in the first cb bytes (whole units)
+static DWORD Utf32CountBreaks(const BYTE* p, DWORD cb, bool bBE)
+{
+    DWORD nBreaks = 0;
+    const DWORD n = cb / 4;
+    for (DWORD i = 0; i < n; i++)
+    {
+        const DWORD u = U32At(p + i * 4, bBE);
+        if (u == 0x0A)
+        {
+            nBreaks++;
+        }
+        else if (u == 0x0D && !(i + 1 < n && U32At(p + (i + 1) * 4, bBE) == 0x0A))
+        {
+            nBreaks++;
+        }
+    }
+    return nBreaks;
+}
+
+// byte offset of the start of line iLine (>= 1): just after its iLine-th break; the end of the whole units when the text has fewer
+static DWORD Utf32OffsetOfLine(const BYTE* p, DWORD cb, bool bBE, DWORD iLine)
+{
+    const DWORD n = cb / 4;
+    DWORD nBreaks = 0;
+    for (DWORD i = 0; i < n; i++)
+    {
+        const DWORD u = U32At(p + i * 4, bBE);
+        if (u == 0x0A || (u == 0x0D && !(i + 1 < n && U32At(p + (i + 1) * 4, bBE) == 0x0A)))
+        {
+            if (++nBreaks == iLine)
+            {
+                return (i + 1) * 4;
+            }
+        }
+    }
+    return n * 4;
+}
+
+/* -------------------------------------------------------------------------------------------- */
 // 3.05: one plan for the CRLF pass of every view, decided on the RAW BYTES —
 // the shared answer the load worker and the view switches now ask. rbNeed
 // says whether the delivery still needs NormalizeNewlines at all; rcExpand
@@ -2541,6 +2838,15 @@ static void PlanCRLFPass(int iView, const BYTE* pBytes, DWORD dwSrcOff, DWORD dw
         if (dwSrcLen >= 2)
         {
             rcExpand = CountCRLFExpansionUtf16(pBytes + dwSrcOff, dwSrcLen, iView == VIEW_UTF16BE);
+            rbNeed = (rcExpand != 0);
+        }
+        return;
+    }
+    if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+    {
+        if (dwSrcLen >= 4)
+        {
+            rcExpand = CountCRLFExpansionUtf32(pBytes + dwSrcOff, dwSrcLen, iView == VIEW_UTF32BE);     // 6.18
             rbNeed = (rcExpand != 0);
         }
         return;
@@ -2571,6 +2877,10 @@ static ULONGLONG EstBuildChars(int iView, ULONGLONG cb)
     if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
     {
         return cb / 2 + 2;                  // one WCHAR per two source bytes
+    }
+    if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+    {
+        return cb / 4 + 2;                  // 6.18: one WCHAR per 4-byte unit (an astral one takes two)
     }
     return cb + 2;                          // ANSI / UTF-8 / EBCDIC: about one char per byte
 }
@@ -2861,7 +3171,6 @@ void RunLoadJob(LoadJob* pJob)
     bool bReadError = false;
     bool bTruncated = false;
     bool bCancelled = false;
-    ULONGLONG dwT0 = GetTickCount64();      // /timing: the read phase starts here
     // 5.9.6: the allocation granularity MapViewOfFile demands (64 KB on every
     // Windows that runs this; queried, not assumed).
     SYSTEM_INFO siMap;
@@ -2956,7 +3265,7 @@ void RunLoadJob(LoadJob* pJob)
             // mismatch and re-decoded the forced view on the UI thread — a
             // double decode (~100 ms for 32 MB). The forced view is consumed
             // here once; ApplyLoadResult's /hex re-decode path becomes a no-op.
-            if (g_iForcedView >= VIEW_ANSI && g_iForcedView <= VIEW_EBCDIC)
+            if (g_iForcedView >= VIEW_ANSI && g_iForcedView <= VIEW_UTF32BE)
             {
                 iDetected = g_iForcedView;
                 pJob->iDetected = g_iForcedView;   // carry it through to ApplyLoadResult
@@ -3227,7 +3536,6 @@ void RunLoadJob(LoadJob* pJob)
     pJob->cbOnDisk = (!pJob->bStdin && cbOnDisk != 0) ? cbOnDisk : (ULONGLONG)cbTotal;
     pJob->bReadError = bReadError;
     pJob->bStreamTruncated = bTruncated;
-    g_msRead = (DWORD)(GetTickCount64() - dwT0);    // /timing: raw read is done
 
     // Decode the detected view now, on the worker: by the time the result
     // lands, the UI only has to hand the ready text to the edit control.
@@ -3236,7 +3544,6 @@ void RunLoadJob(LoadJob* pJob)
     // 3.00: the CRLF normalization runs HERE too, off the UI thread (the
     // hex text is CRLF-only by construction and adopts directly): the UI
     // thread no longer scans tens of millions of characters, it delivers.
-    ULONGLONG dwT1 = GetTickCount64();      // /timing: the decode phase starts here
     try
     {
         WCHAR* pText = nullptr;
@@ -3247,7 +3554,6 @@ void RunLoadJob(LoadJob* pJob)
         {
             WCHAR* pNorm = pText;
             int cchNorm = (int)cch;
-            g_msNormalize = 0;      // hex and EBCDIC adopt directly: no CRLF pass anywhere
             // 3.05: ONE plan for every view (PlanCRLFPass), decided on
             // the RAW BYTES: hex and EBCDIC never need the pass (the
             // EBCDIC table maps the CR/LF cells to U+FFFD), ANSI/UTF-8
@@ -3262,9 +3568,7 @@ void RunLoadJob(LoadJob* pJob)
             }
             if (bNeedNorm)
             {
-                ULONGLONG dwT2 = GetTickCount64();      // /timing: the CRLF pass runs here
                 pNorm = NormalizeNewlines(pText, (int)cch, &cchNorm, cExpand);
-                g_msNormalize = (DWORD)(GetTickCount64() - dwT2);
             }
             if (pNorm == nullptr)
             {
@@ -3317,7 +3621,6 @@ void RunLoadJob(LoadJob* pJob)
     // deliveries that cannot tick (Word Wrap: the control rewraps the
     // whole text in one call) ApplyLoadResult keeps 3.10's signal — the
     // full bar painted BEFORE the swap.
-    g_msDecode = (DWORD)(GetTickCount64() - dwT1);   // /timing: decode-to-text is done
 }
 
 
@@ -3328,7 +3631,7 @@ void ApplyLoadResult(LoadJob* pJob)
 {
     // 6.17: a file opened from the start (no /goto, no tail, not a page change or reload) goes back to where it was left
     const bool bRestorePos = (!pJob->bKeepView && !pJob->bStdin && !pJob->bOpenFailed && !g_bTail &&
-        g_qwPendingGoto == (ULONGLONG)-1 && pJob->qwBase == 0 && pJob->szPath[0] != L'\0');
+        g_qwPendingGoto == (ULONGLONG)-1 && g_qwPendingLine == 0 && pJob->qwBase == 0 && pJob->szPath[0] != L'\0');
     pFileBytes = pJob->pBytes;              // raw bytes for the View menu (may be nullptr)
     pJob->pBytes = nullptr;
     cbFile = pJob->cbFile;                  // bytes actually loaded (bounded by the caps)
@@ -3477,7 +3780,6 @@ void ApplyLoadResult(LoadJob* pJob)
             g_qwPendingGoto = (ULONGLONG)-1;
             PositionAtOffset(qwGoto);
         }
-        TimingFlash();                  // /timing: the load path is complete
         if (g_bCsvMode && iView == VIEW_HEX)
         {
             g_bCsvMode = false;         // 6.16: a hex page is never formatted as CSV (it showed the dump's bytes as a table)
@@ -3487,6 +3789,12 @@ void ApplyLoadResult(LoadJob* pJob)
         {
             ApplyCsvMode(true);         // 6.00: /csv or menu — format after first delivery
         }
+    }
+    if (g_qwPendingLine != 0 && !pJob->bKeepView && !pJob->bOpenFailed)
+    {
+        const ULONGLONG qwLine = g_qwPendingLine;                 // 6.18: +N
+        g_qwPendingLine = 0;
+        GoToLine(qwLine);
     }
     if (bRestorePos)
     {
@@ -3855,6 +4163,14 @@ int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure)
     if (cb >= 3 && pBytes[0] == 0xEF && pBytes[1] == 0xBB && pBytes[2] == 0xBF)
     {
         return(VIEW_UTF8);                      // UTF-8 con BOM
+    }
+    if (cb >= 4 && pBytes[0] == 0xFF && pBytes[1] == 0xFE && pBytes[2] == 0x00 && pBytes[3] == 0x00)
+    {
+        return(VIEW_UTF32);                     // 6.18: UTF-32 LE con BOM (before UTF-16: FF FE 00 00)
+    }
+    if (cb >= 4 && pBytes[0] == 0x00 && pBytes[1] == 0x00 && pBytes[2] == 0xFE && pBytes[3] == 0xFF)
+    {
+        return(VIEW_UTF32BE);                   // 6.18: UTF-32 BE con BOM
     }
     if (cb >= 2 && pBytes[0] == 0xFF && pBytes[1] == 0xFE)
     {
@@ -4562,6 +4878,37 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
 #endif
         cch = cwch;
     }
+    else if (iViewBuild == VIEW_UTF32 || iViewBuild == VIEW_UTF32BE)    // 6.18: UTF-32, either byte order
+    {
+        const bool bBE = (iViewBuild == VIEW_UTF32BE);
+        const bool bBom = (qwBase == 0 && cb >= 4 && (bBE ? (pBytes[0] == 0x00 && pBytes[1] == 0x00 && pBytes[2] == 0xFE && pBytes[3] == 0xFF)
+                                                          : (pBytes[0] == 0xFF && pBytes[1] == 0xFE && pBytes[2] == 0x00 && pBytes[3] == 0x00)));
+        const DWORD off = bBom ? 4 : 0;                 // the BOM is a marker, not text (only at file offset 0)
+        int cunits = (int)((cb - off) / 4);             // whole 4-byte units only
+        if (cunits > (int)(CB_TEXT_MAX / 4))
+        {
+            cunits = (int)(CB_TEXT_MAX / 4);
+        }
+        if (qwBase + (ULONGLONG)(cunits * 4 + off) < cbAll)
+        {
+            bTruncated = true;
+        }
+        cbShown = (DWORD)(cunits * 4 + off);
+        if (pdwSrcOff != nullptr)
+        {
+            *pdwSrcOff = off;
+        }
+        if (pdwSrcLen != nullptr)
+        {
+            *pdwSrcLen = (DWORD)(cunits * 4);
+        }
+        pText = AllocViewText((DWORD)cunits * 2 + 1 + 160 + ((DWORD)cunits >> 3));    // an astral character takes two WCHAR
+        if (pText == nullptr)
+        {
+            return(false);
+        }
+        cch = Utf32ToUtf16(pBytes + off, (DWORD)cunits * 4, bBE, pText);
+    }
     else if (iViewBuild == VIEW_EBCDIC)             // IBM mainframe text (CP37/500 graphic set)
     {
         // The classic EBCDIC tables (code pages 37 and 500 share the
@@ -4688,7 +5035,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         if (pbNormalized != nullptr && cbSrc >= (int)PAR_DECODE_MIN)
         {
             int cchPar = 0;
-            if (ParallelDecodeText(CP_ACP, pBytes, (DWORD)cbSrc, 160, &pText, &cchPar))
+            if (ParallelDecodeText(g_uAnsiCP, pBytes, (DWORD)cbSrc, 160, &pText, &cchPar))
             {
                 bParDone = true;
                 cch = cchPar;
@@ -4709,7 +5056,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         }
         if (cbSrc > 0 && !bParDone)                 // defensive symmetry with the UTF-8 path
         {
-            cch = MultiByteToWideChar(CP_ACP, 0, (LPCCH)pBytes, cbSrc, pText, cbSrc);
+            cch = MultiByteToWideChar(g_uAnsiCP, 0, (LPCCH)pBytes, cbSrc, pText, cbSrc);   // 6.18: the chosen code page
             if (cch < 0 || cch > cbSrc)
             {
                 cch = 0;
@@ -5393,18 +5740,18 @@ void TV_SyncState(void)
     // la PRIMERA carga sin franjas (hbrGreen quedaba null) hasta que el
     // usuario alternaba la opcion dos veces.
     g_tv.bGreenbar = g_bGreenbar;
-    TV_SyncBrush(g_tv.bGreenbar, g_tv.hbrGreen, ColorOrDefault(g_clrGreenbar, RGB(0xE8, 0xF0, 0xE8)));
+    TV_SyncBrush(g_tv.bGreenbar, g_tv.hbrGreen, ColorOrDefault(g_clrGreenbar, ThGreenbar()));
     // 5.8: the current-line band brush lives and dies here too, with the
     // flag that uses it (same lifecycle as the greenbar brush).
     g_tv.bHilite = g_bHiliteLine;
-    TV_SyncBrush(g_tv.bHilite, g_tv.hbrHilite, RGB(0xFF, 0xF0, 0xB0));   // soft yellow: readable under both text colors
+    TV_SyncBrush(g_tv.bHilite, g_tv.hbrHilite, ThHilite());   // soft yellow: readable under both text colors
     // 5.9: the bookmarked-line brush is created once and lives for the
     // session: bookmarks come and go OUTSIDE TV_SyncState (F2, page loads,
     // view switches), so unlike the greenbar brush it cannot be tied to a
     // flag here. One small GDI object, released by the OS at exit.
     if (g_tv.hbrBookmark == nullptr)
     {
-        g_tv.hbrBookmark = CreateSolidBrush(RGB(0xB8, 0xD4, 0xF0));   // soft blue, readable under black text
+        g_tv.hbrBookmark = CreateSolidBrush(ThBookmark());   // soft blue, readable under black text
     }
     // 5.9.9: the frame change above (SWP_FRAMECHANGED with SWP_NOSIZE) does
     // NOT fire WM_SIZE, so the SB_VERT page kept the client height measured
@@ -6292,6 +6639,124 @@ static void TV_PaintChunkTabs(HDC hdc, const TextViewState* pState, int xBase, i
     TV_PaintChunkText(hdc, ex, xBase + colA * iHexCharW, y, 0, nEx, iExLo, iExHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);
 }
 
+// ============================================================================================
+// 6.18: ANSI CODE PAGES (the "ANSI" view decodes with g_uAnsiCP: the system code page, or one of these), SHOW WHITESPACE
+// ============================================================================================
+static void SetAnsiCodePage(UINT cp)
+{
+    if (cp != CP_ACP && !IsValidCodePage(cp))
+    {
+        MessageBoxW(hWndMain, L"This code page is not installed on this system.", szTitle, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    g_bCsvMode = false;                                  // a table of the old decoding makes no sense
+    g_uAnsiCP = cp;
+    if (iView == VIEW_ANSI)
+    {
+        if (pFileBytes != nullptr && cbFile > 0)
+        {
+            ShowViewSafely();                            // the same view, decoded another way: SetView would return at once
+        }
+    }
+    else
+    {
+        SetView(VIEW_ANSI);
+    }
+    UpdateViewMenu();
+}
+
+// a view picked from the menu: CSV off, and the SAME view is rebuilt (SetView returns at once for it)
+static void ChooseView(int iNew)
+{
+    if (g_bCsvMode)
+    {
+        g_bCsvMode = false;
+        if (iNew == iView)
+        {
+            ShowViewSafely();
+            UpdateViewMenu();
+        }
+    }
+    SetView(iNew);
+}
+
+// Show whitespace: a second, transparent pass over the row painted just before. Spaces become a middle dot, a tab
+// an arrow in its first cell, the end of each line a pilcrow (the text is normalized to CRLF, so one mark serves
+// CR, LF and CRLF alike); every other character is a blank, so the text underneath shows through untouched.
+// Only the visible columns are built (a minified 100 MB line stays cheap); tabs follow the view's tab stops.
+// the overlay cells (one WCHAR per visible column, starting at column colA) of the row [iPos, iChunkEnd): pure, tested
+static int TvBuildWsOverlay(const WCHAR* p, int cch, int iPos, int iChunkEnd, int colA, int colB, bool bTabs, int iTabW, WCHAR* ov, bool* pbAny)
+{
+    int nOv = 0;
+    int col = 0;
+    int i = iPos;
+    *pbAny = false;
+    if (!bTabs)
+    {
+        int iSkip = colA;                                // one cell per character: jump straight to the first visible one
+        if (iSkip > iChunkEnd - iPos) iSkip = iChunkEnd - iPos;
+        i = iPos + iSkip;
+        col = iSkip;
+    }
+    for (; i < iChunkEnd && col < colB; i++)
+    {
+        const WCHAR c = p[i];
+        if (c == L'\t' && bTabs)
+        {
+            const int iNext = col + iTabW - (col % iTabW);
+            for (bool bFirst = true; col < iNext && col < colB; col++, bFirst = false)
+            {
+                if (col >= colA)
+                {
+                    ov[nOv++] = bFirst ? (WCHAR)0x2192 : L' ';
+                    if (bFirst) *pbAny = true;
+                }
+            }
+        }
+        else
+        {
+            if (col >= colA)
+            {
+                if (c == L' ' || c == 0x00A0) { ov[nOv++] = (WCHAR)0x00B7; *pbAny = true; }
+                else if (c == L'\t') { ov[nOv++] = (WCHAR)0x2192; *pbAny = true; }
+                else ov[nOv++] = L' ';
+            }
+            col++;
+        }
+    }
+    if (i >= iChunkEnd && col >= colA && col < colB && iChunkEnd < cch &&
+        (p[iChunkEnd] == L'\r' || p[iChunkEnd] == L'\n'))
+    {
+        ov[nOv++] = (WCHAR)0x00B6;                       // the line break
+        *pbAny = true;
+    }
+    return nOv;
+}
+
+static void TV_PaintWhitespace(HDC hdc, const TextViewState* pState, int xBase, int y, int iPos, int iChunkEnd, int cxClient)
+{
+    if (iHexCharW <= 0)
+    {
+        return;
+    }
+    const int colA = (xBase < 0) ? (-xBase) / iHexCharW : 0;
+    int colB = colA + cxClient / iHexCharW + 3;
+    enum { OV_MAX = 4096 };
+    if (colB - colA > OV_MAX) colB = colA + OV_MAX;
+    WCHAR ov[OV_MAX + 2];
+    bool bAny = false;
+    const int nOv = TvBuildWsOverlay(pState->pText, pState->cch, iPos, iChunkEnd, colA, colB, TV_TabsOn(), g_iTabWidth, ov, &bAny);
+    if (!bAny || nOv == 0)
+    {
+        return;
+    }
+    const int iSaved = SaveDC(hdc);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, ThWhitespace());
+    ExtTextOutW(hdc, xBase + colA * iHexCharW, y, 0, nullptr, ov, (UINT)nOv, nullptr);
+    RestoreDC(hdc, iSaved);
+}
+
 // 6.16: HEX vs ASCII. The dump's two blocks looked alike; the ASCII block (from column 50: 16 bytes x 3 + the
 // mid gap + one space) now has its own text colour and a slightly shaded background, so the eye can follow a
 // row across the two. The shade follows whatever background the row has (plain, green bar, current line,
@@ -6346,6 +6811,10 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
         pState->pText[iPos] == L'[')
     {
         TV_PaintChunkTabs(hdc, pState, xBase, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);
+        if (g_bShowWS && iView != VIEW_HEX)
+        {
+            TV_PaintWhitespace(hdc, pState, xBase, y, iPos, iChunkEnd, cxClient);       // 6.18
+        }
         return;
     }
     const COLORREF clrAscBg = TV_HexAsciiBg(clrBg);
@@ -6597,10 +7066,12 @@ static const WCHAR* ViewLabel(int iV)
 {
     switch (iV)
     {
-    case VIEW_ANSI:    return L"ANSI";
+    case VIEW_ANSI:    return AnsiLabel();
     case VIEW_UTF8:    return L"UTF-8";
     case VIEW_UTF16:   return L"UTF-16 LE";
     case VIEW_UTF16BE: return L"UTF-16 BE";
+    case VIEW_UTF32:   return L"UTF-32 LE";
+    case VIEW_UTF32BE: return L"UTF-32 BE";
     case VIEW_EBCDIC:  return L"EBCDIC";
     case VIEW_HEX:     return L"Hex";
     }
@@ -6810,6 +7281,7 @@ static void TV_ShowContextMenu(HWND hWnd, int x, int y)
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING | (g_tv.bWrap ? MF_CHECKED : 0), ID_VIEW_WRAP, L"&Word Wrap");
     AppendMenuW(hMenu, MF_STRING | (g_bLineNums ? MF_CHECKED : 0), ID_VIEW_LINENUMS, L"&Line Numbers");
+    AppendMenuW(hMenu, MF_STRING | (g_bShowWS ? MF_CHECKED : 0), ID_VIEW_WHITESPACE, L"Show White&space");      // 6.18
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING | (bFile ? 0 : MF_GRAYED), CTX_COPYPATH, L"Copy file pat&h");
     AppendMenuW(hMenu, MF_STRING | (bFile ? 0 : MF_GRAYED), CTX_EXPLORER, L"Show in &Explorer");
@@ -6919,7 +7391,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             RECT rc;
             if (hdc != nullptr && GetClientRect(hWnd, &rc))
             {
-                FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
+                FillRect(hdc, &rc, ThBrushWindow());
             }
             EndPaint(hWnd, &ps);
             return 0;
@@ -6966,11 +7438,11 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
 
         // V5: use cached brushes (no CreateSolidBrush per paint)
         HBRUSH hbrGreen = pState->hbrGreen;   // cached in TV_SyncState
-        HBRUSH hbrWhite = GetSysColorBrush(COLOR_WINDOW);
-        COLORREF clrWindow = ColorOrDefault(g_clrWindow, GetSysColor(COLOR_WINDOW));
-        COLORREF clrText = ColorOrDefault(g_clrText, GetSysColor(COLOR_WINDOWTEXT));
-        COLORREF clrSelBg = GetSysColor(COLOR_HIGHLIGHT);
-        COLORREF clrSelTx = GetSysColor(COLOR_HIGHLIGHTTEXT);
+        HBRUSH hbrWhite = ThBrushWindow();
+        COLORREF clrWindow = ColorOrDefault(g_clrWindow, ThWindow());
+        COLORREF clrText = ColorOrDefault(g_clrText, ThText());
+        COLORREF clrSelBg = ThSelBg();
+        COLORREF clrSelTx = ThSelTx();
 
         // V5: compute wrap width once
         int iMaxChars = 0;
@@ -7053,15 +7525,15 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             COLORREF clrBg;
             if (bBmLine && pState->hbrBookmark != nullptr)
             {
-                hbrBg = pState->hbrBookmark;  clrBg = RGB(0xB8, 0xD4, 0xF0);
+                hbrBg = pState->hbrBookmark;  clrBg = ThBookmark();
             }
             else if (iLine == iCurLine && pState->hbrHilite != nullptr)
             {
-                hbrBg = pState->hbrHilite;    clrBg = RGB(0xFF, 0xF0, 0xB0);
+                hbrBg = pState->hbrHilite;    clrBg = ThHilite();
             }
             else if (pState->bGreenbar && (iLine & 1))
             {
-                hbrBg = hbrGreen;             clrBg = RGB(0xE8, 0xF0, 0xE8);
+                hbrBg = hbrGreen;             clrBg = ThGreenbar();
             }
             else
             {
@@ -7541,7 +8013,6 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
         FreeViewText(pText);
         return;
     }
-    ULONGLONG dwT0 = GetTickCount64();      // /timing: normalize + deliver start here
     WCHAR* pNorm = pText;
     int cchNorm = cch;   // V5: track the normalized length (may differ from cch)
     if (pText != nullptr && cch > 0 && !bPreNormalized)
@@ -7554,7 +8025,6 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
             return;
         }
         cch = cchNorm;   // V5: use the normalized length from here on
-        g_msNormalize = (DWORD)(GetTickCount64() - dwT0);
     }
 
     // 5.4: ONE path for every view, hex included — the custom control takes
@@ -7578,7 +8048,6 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
     LayoutEdit();
     SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(hEdit, nullptr, FALSE);   // V5: FALSE = no erase background (WM_PAINT handles it)
-    g_msDeliver = (DWORD)(GetTickCount64() - dwT0);
     UpdateStatusBar();
     // 5.9.2: paint NOW. The delivery only invalidates: the first frame
     // waited for the message pump, behind whatever input was already
@@ -7665,9 +8134,16 @@ void UpdateViewMenu(void)
     HMENU hViewMenu = FindSubMenuWithCommand(hWndMain, ID_VIEW_ANSI);
     if (hViewMenu != nullptr)
     {
-        // Encoding radio: Hex is under Mode only; do not radio-check it here.
-        if (iView != VIEW_HEX)
+        // Encoding radio: the five classic encodings. Hex (under Mode) and the UTF-32 views (their own items) are outside
+        // the ID_VIEW_ANSI.. range, so for them the five marks are all cleared.
+        if (iView != VIEW_HEX && iView <= VIEW_EBCDIC)
+        {
             CheckMenuRadioItem(hViewMenu, ID_VIEW_ANSI, ID_VIEW_EBCDIC, ID_VIEW_ANSI + iView, MF_BYCOMMAND);
+            if (iView == VIEW_ANSI && g_uAnsiCP != CP_ACP)
+            {
+                CheckMenuItem(hViewMenu, ID_VIEW_ANSI, MF_BYCOMMAND | MF_UNCHECKED);   // 6.18: a chosen code page, not "ANSI"
+            }
+        }
         else
         {
             CheckMenuItem(hViewMenu, ID_VIEW_ANSI, MF_BYCOMMAND | MF_UNCHECKED);
@@ -7675,6 +8151,17 @@ void UpdateViewMenu(void)
             CheckMenuItem(hViewMenu, ID_VIEW_UNICODE, MF_BYCOMMAND | MF_UNCHECKED);
             CheckMenuItem(hViewMenu, ID_VIEW_UTF16BE, MF_BYCOMMAND | MF_UNCHECKED);
             CheckMenuItem(hViewMenu, ID_VIEW_EBCDIC, MF_BYCOMMAND | MF_UNCHECKED);
+        }
+        CheckMenuItem(hViewMenu, ID_VIEW_UTF32LE, MF_BYCOMMAND | ((iView == VIEW_UTF32) ? MF_CHECKED : MF_UNCHECKED));      // 6.18
+        CheckMenuItem(hViewMenu, ID_VIEW_UTF32BE, MF_BYCOMMAND | ((iView == VIEW_UTF32BE) ? MF_CHECKED : MF_UNCHECKED));
+        HMENU hCpMenu = FindSubMenuWithCommand(hWndMain, ID_ENC_CP00);
+        if (hCpMenu != nullptr)
+        {
+            for (int k = 0; k < CP_TABLE_COUNT; k++)
+            {
+                CheckMenuItem(hCpMenu, ID_ENC_CP00 + k, MF_BYCOMMAND |
+                    ((iView == VIEW_ANSI && g_uAnsiCP == kCodePages[k].cp) ? MF_CHECKED : MF_UNCHECKED));
+            }
         }
         CheckMenuItem(hViewMenu, ID_VIEW_TAIL, MF_BYCOMMAND | (g_bTail ? MF_CHECKED : MF_UNCHECKED));
     }
@@ -7699,6 +8186,12 @@ void UpdateViewMenu(void)
         CheckMenuItem(hBar, ID_VIEW_HILITE, MF_BYCOMMAND | (g_bHiliteLine ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hBar, ID_VIEW_ESCEXIT, MF_BYCOMMAND | (g_bEscExit ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hBar, ID_FIND_REGEX, MF_BYCOMMAND | (g_bRegexFind ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(hBar, ID_VIEW_WHITESPACE, MF_BYCOMMAND | (g_bShowWS ? MF_CHECKED : MF_UNCHECKED));                 // 6.18
+        HMENU hThemeMenu = FindSubMenuWithCommand(hWndMain, ID_THEME_AUTO);
+        if (hThemeMenu != nullptr)
+        {
+            CheckMenuRadioItem(hThemeMenu, ID_THEME_AUTO, ID_THEME_DARK, ID_THEME_AUTO + g_iTheme, MF_BYCOMMAND);
+        }
     }
 }
 
@@ -7707,7 +8200,7 @@ void UpdateViewMenu(void)
 // Switches the active view, updates the menu mark and rebuilds the content.
 void SetView(int iNewView)
 {
-    if (iNewView < VIEW_ANSI || iNewView > VIEW_EBCDIC)
+    if (iNewView < VIEW_ANSI || iNewView > VIEW_UTF32BE)
     {
         return;                                 // never trust an out-of-range command ID
     }
@@ -7833,7 +8326,6 @@ void ApplyView(void)
             PlanCRLFPass(iView, pFileBytes, dwSrcOff, dwSrcLen, bNeedNorm, cExpand);
         }
         DeliverTextToEdit(pText, (int)cch, !bNeedNorm, cExpand); // takes ownership of pText
-        TimingFlash();          // /timing: view switches are measured too
         SetCursor(hcurOld);
     }
     catch (const std::bad_alloc&)
@@ -9203,6 +9695,10 @@ ULONGLONG LastPageBase(ULONGLONG cbSize)
         // whole last page decoded shifted by one byte (garbage). Rounding UP keeps the end on screen.
         qwBase = (qwBase + 1) & ~((ULONGLONG)1);
     }
+    else if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+    {
+        qwBase = (qwBase + 3) & ~((ULONGLONG)3);                    // 6.18: a UTF-32 page starts on a 4-byte unit
+    }
     return(qwBase);
 }
 
@@ -9616,7 +10112,7 @@ static bool TailAppend(ULONGLONG cbSize)
     int cchNew = 0;
     if (pTmp != nullptr)
     {
-        cchNew = MultiByteToWideChar((iView == VIEW_UTF8) ? CP_UTF8 : CP_ACP, 0, (LPCCH)pTail, (int)nTail, pTmp, (int)nTail);
+        cchNew = MultiByteToWideChar((iView == VIEW_UTF8) ? CP_UTF8 : g_uAnsiCP, 0, (LPCCH)pTail, (int)nTail, pTmp, (int)nTail);
         if (cchNew <= 0 && iView == VIEW_UTF8)
         {
             cchNew = MultiByteToWideChar(CP_ACP, 0, (LPCCH)pTail, (int)nTail, pTmp, (int)nTail);   // same fallback as BuildViewText
@@ -9778,6 +10274,12 @@ void ClearBookmarks(void)
 // asks for it).
 bool OffsetOfLine(DWORD iLine, ULONGLONG& rqw)
 {
+    if (pFileBytes != nullptr && (iView == VIEW_UTF32 || iView == VIEW_UTF32BE))
+    {
+        // 6.18: UTF-32: break units, 4 bytes each
+        rqw = g_qwBase + ((iLine == 0) ? 0 : Utf32OffsetOfLine(pFileBytes, cbFile, iView == VIEW_UTF32BE, iLine));
+        return true;
+    }
     if (pFileBytes == nullptr || cbFile == 0)
     {
         return(false);
@@ -10301,7 +10803,11 @@ bool LineAtOffset(ULONGLONG qwOff, int& riLine)
         cbRel = cbFile;
     }
     int iLine = 0;
-    if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+    if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+    {
+        iLine = (int)Utf32CountBreaks(pFileBytes, cbRel, iView == VIEW_UTF32BE);        // 6.18
+    }
+    else if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
     {
         // 3.07: the same parity memchr chains the CRLF planner uses
         // (CountCRLFExpansionUtf16) replace the per-unit walk: every Go To
@@ -10556,7 +11062,35 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                 // "n with tilde" is one byte there, two in UTF-8), the
                 // rest search UTF-8 (the ANSI code page is the fallback).
                 int cb = 0;
-                if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+                if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+                {
+                    // 6.18: each code point (a surrogate pair is one) as a 4-byte unit in the view's byte order
+                    const int nW = lstrlenW(szPat);
+                    for (int k = 0; k < nW; k++)
+                    {
+                        DWORD uc = szPat[k];
+                        if (uc >= 0xD800 && uc <= 0xDBFF && k + 1 < nW && szPat[k + 1] >= 0xDC00 && szPat[k + 1] <= 0xDFFF)
+                        {
+                            uc = 0x10000 + ((uc - 0xD800) << 10) + (DWORD)(szPat[k + 1] - 0xDC00);
+                            k++;
+                        }
+                        if (cbPat + 4 > sizeof(bPat))
+                        {
+                            MessageBoxW(hDlg, L"The pattern is too long (32 characters maximum in UTF-32).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                            return (INT_PTR)TRUE;
+                        }
+                        if (iView == VIEW_UTF32BE)
+                        {
+                            bPat[cbPat++] = (BYTE)(uc >> 24); bPat[cbPat++] = (BYTE)(uc >> 16); bPat[cbPat++] = (BYTE)(uc >> 8); bPat[cbPat++] = (BYTE)uc;
+                        }
+                        else
+                        {
+                            bPat[cbPat++] = (BYTE)uc; bPat[cbPat++] = (BYTE)(uc >> 8); bPat[cbPat++] = (BYTE)(uc >> 16); bPat[cbPat++] = (BYTE)(uc >> 24);
+                        }
+                    }
+                    cb = (int)cbPat + 1;
+                }
+                else if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
                 {
                     const int nUnits = lstrlenW(szPat);
                     if ((size_t)nUnits * 2 > sizeof(bPat))
@@ -10578,7 +11112,7 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                     if (iView == VIEW_ANSI)
                     {
                         BOOL bDefUsed = FALSE;
-                        cb = WideCharToMultiByte(CP_ACP, 0, szPat, -1, (LPSTR)bPat, (int)sizeof(bPat) - 1, nullptr, &bDefUsed);
+                        cb = WideCharToMultiByte(g_uAnsiCP, 0, szPat, -1, (LPSTR)bPat, (int)sizeof(bPat) - 1, nullptr, &bDefUsed);
                         if (bDefUsed)
                         {
                             cb = 0;                      // a character has no ANSI form: UTF-8 below
@@ -11403,12 +11937,12 @@ void PaintGutter(void)
     rcGutter.top = iRulerH;
     rcGutter.right = iW;
     rcGutter.bottom = iRulerH + rcEdit.bottom;
-    FillRect(hdc, &rcGutter, GetSysColorBrush(COLOR_WINDOW));
+    FillRect(hdc, &rcGutter, ThBrushWindow());
     // 5.9.6: a hairline closes the column on its right edge: the strip reads
     // as a rail between the labels and the text instead of a no-man's land.
     // COLOR_3DLIGHT: the system's own light gray, no brush to manage.
     RECT rcSep = { iW - 1, rcGutter.top, iW, rcGutter.bottom };
-    FillRect(hdc, &rcSep, GetSysColorBrush(COLOR_3DLIGHT));
+    FillRect(hdc, &rcSep, ThBrushLight());
     // 5.5: clip to the column. The last visible row can be partial (the text
     // view paints it: its loop runs while y < bottom), and it gets its label
     // too; without the clip the label's glyph bottom would cross into the
@@ -11753,7 +12287,7 @@ void ToggleRuler(void)
 // restores the font.
 static HGDIOBJ RulerStripBegin(HDC hdc, RECT rcRuler, HFONT hFontLabels)
 {
-    FillRect(hdc, &rcRuler, GetSysColorBrush(COLOR_3DFACE));
+    FillRect(hdc, &rcRuler, ThBrushFace());
     HRGN hRgnClip = CreateRectRgnIndirect(&rcRuler);
     if (hRgnClip != nullptr)
     {
@@ -11769,7 +12303,7 @@ static HGDIOBJ RulerStripBegin(HDC hdc, RECT rcRuler, HFONT hFontLabels)
 static void RulerStripEnd(HDC hdc, RECT rcRuler, HGDIOBJ hOldFont)
 {
     RECT rcLine = { rcRuler.left, rcRuler.bottom - 1, rcRuler.right, rcRuler.bottom };
-    FillRect(hdc, &rcLine, GetSysColorBrush(COLOR_3DSHADOW));
+    FillRect(hdc, &rcLine, ThBrushShadow());
     SelectClipRgn(hdc, nullptr);   // restore the default clip before unselecting
     SelectObject(hdc, hOldFont);
 }
@@ -11820,7 +12354,7 @@ void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin)
             else
             {
                 RECT rcTick = { x, y + iRulerH - 4, x + 1, y + iRulerH };
-                FillRect(hdc, &rcTick, GetSysColorBrush(COLOR_3DSHADOW));
+                FillRect(hdc, &rcTick, ThBrushShadow());
             }
         }
     }
@@ -12089,29 +12623,6 @@ void FreeViewText(WCHAR* psz)
 }
 
 
-/* -------------------------------------------------------------------------------------------- */
-// /timing (2.98): one status-bar flash with the four phases of the last
-// load. The point is not the absolute numbers but their SHAPE: if "deliver"
-// still dominates after the EM_SETHANDLE change, the remaining cost is the
-// EDIT control's own line indexing, and the next step is an on-demand pane
-// (2.99 candidate) instead of more memcpy tuning. U64ToWide writes the
-// digits (wsprintfW's 64-bit support varies by toolchain, so no %I64u here).
-void TimingFlash(void)
-{
-    if (!g_bTiming)
-    {
-        return;
-    }
-    WCHAR szRead[24], szDecode[24], szNorm[24], szDeliver[24];
-    U64ToWide(szRead, g_msRead);
-    U64ToWide(szDecode, g_msDecode);
-    U64ToWide(szNorm, g_msNormalize);
-    U64ToWide(szDeliver, g_msDeliver);
-    WCHAR szStatus[160];
-    wsprintfW(szStatus, L"read %s | decode %s | CRLF %s | deliver %s ms", szRead, szDecode, szNorm, szDeliver);
-    StatusFlash(szStatus);
-}
-
 
 /* -------------------------------------------------------------------------------------------- */
 // Private profile helpers: the INI keeps every durable setting in plain
@@ -12207,6 +12718,9 @@ void LoadSettings(void)
     if (g_iFreezeCols < 0) g_iFreezeCols = 0;
     if (g_iFreezeCols > 200) g_iFreezeCols = 200;
     g_bRememberPos = (ProfileLong(L"RememberPosition", 1) != 0);              // 6.17
+    g_iTheme = (int)ProfileLong(L"Theme", 0);                                 // 6.18
+    if (g_iTheme < 0 || g_iTheme > 2) g_iTheme = 0;
+    g_bShowWS = (ProfileLong(L"ShowWhitespace", 0) != 0);
     g_bPrefetch = (ProfileLong(L"Prefetch", 1) != 0);                        // 6.14
     g_iTabWidth = (int)ProfileLong(L"TabWidth", 8);
     if (g_iTabWidth < 1 || g_iTabWidth > 16) g_iTabWidth = 8;
@@ -12287,6 +12801,8 @@ void SaveSettings(void)
     p += wsprintfW(p, L"WrapWidth=%d", g_iWrapWidth) + 1;
     p += wsprintfW(p, L"FreezeCols=%d", g_iFreezeCols) + 1;
     p += wsprintfW(p, L"RememberPosition=%d", g_bRememberPos ? 1 : 0) + 1;   // 6.17
+    p += wsprintfW(p, L"Theme=%d", g_iTheme) + 1;                            // 6.18
+    p += wsprintfW(p, L"ShowWhitespace=%d", g_bShowWS ? 1 : 0) + 1;
     p += wsprintfW(p, L"Prefetch=%d", g_bPrefetch ? 1 : 0) + 1;              // 6.14
     p += wsprintfW(p, L"TabWidth=%d", g_iTabWidth) + 1;                   // 6.08
     p += wsprintfW(p, L"RegexFind=%d", g_bRegexFind ? 1 : 0) + 1;

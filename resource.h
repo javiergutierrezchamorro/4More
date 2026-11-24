@@ -62,6 +62,35 @@
 // Recent Files (2.96): bloque contiguo de 10 IDs dinámicos, resuelto antes del switch WM_COMMAND (no hay case estático para ellos).
 #define ID_FILE_RECENT_FIRST            32807
 #define ID_FILE_RECENT_LAST             (ID_FILE_RECENT_FIRST + 9)
+// 6.18: UTF-32 views, whitespace, theme, extra ANSI code pages (their own commands: the ID_VIEW_ANSI.. block is full)
+#define ID_VIEW_UTF32LE                 32832
+#define ID_VIEW_UTF32BE                 32833
+#define ID_VIEW_WHITESPACE              32834
+#define ID_THEME_AUTO                   32835
+#define ID_THEME_LIGHT                  32836
+#define ID_THEME_DARK                   32837
+// the code page items are consecutive: ID_ENC_CP00 + k = kCodePages[k] in 4More.cpp
+#define ID_ENC_CP00                      32840
+#define ID_ENC_CP01                      32841
+#define ID_ENC_CP02                      32842
+#define ID_ENC_CP03                      32843
+#define ID_ENC_CP04                      32844
+#define ID_ENC_CP05                      32845
+#define ID_ENC_CP06                      32846
+#define ID_ENC_CP07                      32847
+#define ID_ENC_CP08                      32848
+#define ID_ENC_CP09                      32849
+#define ID_ENC_CP10                      32850
+#define ID_ENC_CP11                      32851
+#define ID_ENC_CP12                      32852
+#define ID_ENC_CP13                      32853
+#define ID_ENC_CP14                      32854
+#define ID_ENC_CP15                      32855
+#define ID_ENC_CP16                      32856
+#define ID_ENC_CP17                      32857
+#define ID_ENC_CP18                      32858
+#define ID_ENC_CP19                      32859
+#define ID_ENC_CP20                      32860
 #define IDC_ABOUT_VERSION               1101
 #define IDC_ABOUT_BUILD                 1102
 #define IDC_ABOUT_COMPILER              1103
@@ -83,7 +112,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
 #define _APS_NEXT_RESOURCE_VALUE        133
-#define _APS_NEXT_COMMAND_VALUE         32832
+#define _APS_NEXT_COMMAND_VALUE         32861
 #define _APS_NEXT_CONTROL_VALUE         1111
 #define _APS_NEXT_SYMED_VALUE           110
 #endif

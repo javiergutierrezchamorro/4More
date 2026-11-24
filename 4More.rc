@@ -1,4 +1,7 @@
-﻿// 4More.rc — recursos del visor (Build 6.17)
+﻿// 4More.rc — recursos del visor (Build 6.18)
+//
+// 6.18: MENÚ: Encoding (UTF-32, More ANSI code pages) y Options (Show Whitespace, Theme) ganan
+// entradas; resource.h trae sus IDs. Manifest 6.18.0.0. Compilar junto al 4More.cpp 6.18.
 //
 // 6.17: NI MENÚ NI ACELERADORES NI DIÁLOGOS CAMBIAN. Menú contextual, Buscar anterior,
 // palabras con Ctrl, estado ampliado, Ir a con % y relativo, recordar posición.
@@ -316,6 +319,33 @@ BEGIN
             MENUITEM "&Unicode (UTF-16 LE)",                ID_VIEW_UNICODE
             MENUITEM "UTF-16 &BE",                          ID_VIEW_UTF16BE
             MENUITEM "&EBCDIC",                             ID_VIEW_EBCDIC
+            MENUITEM SEPARATOR
+            MENUITEM "UTF-&32 LE",                      ID_VIEW_UTF32LE
+            MENUITEM "UTF-32 &BE",                      ID_VIEW_UTF32BE
+            POPUP "&More ANSI code pages"
+            BEGIN
+                MENUITEM "Windows-&1252 (Western European)",    ID_ENC_CP00
+                MENUITEM "ISO-8859-&1 (Latin-1)",    ID_ENC_CP01
+                MENUITEM "ISO-8859-1&5 (Latin-9, euro)",    ID_ENC_CP02
+                MENUITEM "ISO-8859-&2 (Central European)",    ID_ENC_CP03
+                MENUITEM "Windows-125&0 (Central European)",    ID_ENC_CP04
+                MENUITEM "Windows-1251 (&Cyrillic)",    ID_ENC_CP05
+                MENUITEM "ISO-8859-&5 (Cyrillic)",    ID_ENC_CP06
+                MENUITEM "&KOI8-R (Russian)",    ID_ENC_CP07
+                MENUITEM "Windows-125&3 (Greek)",    ID_ENC_CP08
+                MENUITEM "ISO-8859-&7 (Greek)",    ID_ENC_CP09
+                MENUITEM "Windows-125&4 (Turkish)",    ID_ENC_CP10
+                MENUITEM "ISO-8859-&9 (Turkish)",    ID_ENC_CP11
+                MENUITEM "Windows-1255 (&Hebrew)",    ID_ENC_CP12
+                MENUITEM "Windows-125&6 (Arabic)",    ID_ENC_CP13
+                MENUITEM "Windows-125&7 (Baltic)",    ID_ENC_CP14
+                MENUITEM "OEM &437 (DOS, US)",    ID_ENC_CP15
+                MENUITEM "OEM 85&0 (DOS, Western European)",    ID_ENC_CP16
+                MENUITEM "Shift-&JIS (Japanese)",    ID_ENC_CP17
+                MENUITEM "&GBK (Simplified Chinese)",    ID_ENC_CP18
+                MENUITEM "&Korean (CP949)",    ID_ENC_CP19
+                MENUITEM "Big&5 (Traditional Chinese)",    ID_ENC_CP20
+            END
         END
         MENUITEM SEPARATOR
         MENUITEM "&Next Page\tPgDn",                    ID_VIEW_NEXTPAGE
@@ -335,6 +365,13 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "&Greenbar",                            ID_VIEW_GREENBAR
         MENUITEM "&Ruler",                              ID_VIEW_RULER
+        MENUITEM "Show White&space",                  ID_VIEW_WHITESPACE
+        POPUP "&Theme"
+        BEGIN
+            MENUITEM "&Auto (follow Windows)",       ID_THEME_AUTO
+            MENUITEM "&Light",                       ID_THEME_LIGHT
+            MENUITEM "&Dark",                        ID_THEME_DARK
+        END
         MENUITEM "&Highlight Current Line",              ID_VIEW_HILITE
         MENUITEM "ESC to E&xit",                         ID_VIEW_ESCEXIT
     END

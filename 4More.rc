@@ -1,4 +1,7 @@
-﻿// 4More.rc — recursos del visor (Build 6.18)
+﻿// 4More.rc — recursos del visor (Build 6.19)
+//
+// 6.19: SIN CAMBIOS DE MENÚS NI DIÁLOGOS (UTF-32 sin BOM se detecta solo; revisión interna).
+// Manifest 6.19.0.0. Compilar junto al 4More.cpp 6.19.
 //
 // 6.18: MENÚ: Encoding (UTF-32, More ANSI code pages) y Options (Show Whitespace, Theme) ganan
 // entradas; resource.h trae sus IDs. Manifest 6.18.0.0. Compilar junto al 4More.cpp 6.18.

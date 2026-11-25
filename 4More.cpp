@@ -1,6 +1,12 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.18
+   Build 6.19
+
+   Version 6.19 (review round):
+   - NEW: UTF-32 WITHOUT a BOM is detected (a BMP-only text has two zero bytes in 85% of its 4-byte units, which
+     no UTF-16, UTF-8, ANSI or zero padding has); before, such a file was taken for UTF-16 or ANSI.
+   - Simplification / fix: one brush cache (ThBrush) serves the theme and the hex ASCII tints; the theme's own
+     12-slot table leaked a brush per call once full, the shared one recycles. A dead macro removed.
 
    Version 6.18 (text views: whitespace, encodings, theme, +N):
    - NEW: Options > Show Whitespace (/ws, INI ShowWhitespace, also in the right-click menu): spaces as a middle
@@ -335,7 +341,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.18"
+#define APP_VERSION L"6.19"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -372,7 +378,6 @@
 // que un TXT de 30 MB tardara ~8 segundos sólo en la entrega). Por
 // debajo de este tamaño la entrega es instantánea y la barra no llega a
 // verse: no hay nada que pre-pintar.
-#define CB_SLICE_CHARS (1 << 20)
 
 
 /* -------------------------------------------------------------------------------------------- */
@@ -605,19 +610,28 @@ static const WCHAR* AnsiLabel(void)
 
 static HBRUSH ThBrush(COLORREF c)
 {
-    static COLORREF s_clr[12];
-    static HBRUSH s_hbr[12];
+    // one small cache of solid brushes for the theme palette and the hex ASCII tints; a full table recycles
+    // its slots in turn (a brush is only held for the paint that asked for it)
+    static COLORREF s_clr[24];
+    static HBRUSH s_hbr[24];
     static int s_n = 0;
+    static int s_next = 0;
     for (int i = 0; i < s_n; i++)
     {
         if (s_clr[i] == c) return s_hbr[i];
     }
     HBRUSH h = CreateSolidBrush(c);
-    if (h != nullptr && s_n < 12)
+    if (h == nullptr) return nullptr;
+    if (s_n < 24)
     {
         s_clr[s_n] = c;
         s_hbr[s_n++] = h;
+        return h;
     }
+    DeleteObject(s_hbr[s_next]);
+    s_clr[s_next] = c;
+    s_hbr[s_next] = h;
+    s_next = (s_next + 1) % 24;
     return h;
 }
 
@@ -4005,6 +4019,41 @@ void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull)
 }
 
 
+// 6.19: UTF-32 without a BOM. A BMP-only UTF-32 text has two zero bytes in every unit (LE: the top two, BE: the
+// first two) around a non-zero payload, which no UTF-16, UTF-8 or ANSI text has; 85% of the units must look so
+// (a few astral characters or stray bytes are tolerated). All-zero padding does not count.
+static bool LooksLikeUTF32Text(const BYTE* p, DWORD cb, bool* pbBE)
+{
+    const DWORD n = cb / 4;
+    if (n < 8)
+    {
+        return false;
+    }
+    DWORD nLE = 0, nBE = 0;
+    for (DWORD i = 0; i < n; i++, p += 4)
+    {
+        if (p[2] == 0 && p[3] == 0 && (p[0] | p[1]) != 0)
+        {
+            nLE++;
+        }
+        else if (p[0] == 0 && p[1] == 0 && (p[2] | p[3]) != 0)
+        {
+            nBE++;
+        }
+    }
+    if (nLE * 100 >= n * 85)
+    {
+        *pbBE = false;
+        return true;
+    }
+    if (nBE * 100 >= n * 85)
+    {
+        *pbBE = true;
+        return true;
+    }
+    return false;
+}
+
 /* -------------------------------------------------------------------------------------------- */
 // TRUE when the bytes look like UTF-16 LE text WITHOUT a BOM. One pass over
 // the NUL bytes, one pass over the decoded words, two rules in order:
@@ -4181,6 +4230,11 @@ int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure)
         return(VIEW_UTF16BE);                   // UTF-16 BE con BOM
     }
     const DWORD cbWin = (cb < DETECT_WINDOW_BYTES) ? cb : DETECT_WINDOW_BYTES;
+    bool bBE32 = false;
+    if (LooksLikeUTF32Text(pBytes, cbWin, &bBE32))
+    {
+        return(bBE32 ? VIEW_UTF32BE : VIEW_UTF32);      // 6.19: UTF-32 sin BOM
+    }
     if (LooksLikeUTF16Text(pBytes, cbWin))
     {
         return(VIEW_UTF16);                     // UTF-16 sin BOM
@@ -6780,29 +6834,6 @@ static COLORREF TV_HexAsciiText(COLORREF clrBg)
     return ((r * 299 + g * 587 + b * 114) / 1000 >= 128) ? RGB(0x1F, 0x5F, 0x9F) : RGB(0x8F, 0xD0, 0xFF);
 }
 
-static HBRUSH TV_HexAsciiBrush(COLORREF clr)
-{
-    static COLORREF s_clr[8];
-    static HBRUSH s_hbr[8];
-    static int s_n = 0;
-    for (int i = 0; i < s_n; i++)
-    {
-        if (s_clr[i] == clr) return s_hbr[i];
-    }
-    HBRUSH h = CreateSolidBrush(clr);
-    if (h == nullptr) return nullptr;
-    if (s_n < 8)
-    {
-        s_clr[s_n] = clr;
-        s_hbr[s_n++] = h;
-        return h;
-    }
-    DeleteObject(s_hbr[0]);                    // the user changed the colours many times: recycle the first slot
-    s_clr[0] = clr;
-    s_hbr[0] = h;
-    return h;
-}
-
 static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y, int iPos, int iChunkEnd,
     int iSelLo, int iSelHi, HBRUSH hbrBg, COLORREF clrBg, COLORREF clrText, COLORREF clrSelBg, COLORREF clrSelTx, int cxClient)
 {
@@ -6818,7 +6849,7 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
         return;
     }
     const COLORREF clrAscBg = TV_HexAsciiBg(clrBg);
-    HBRUSH hbrAsc = TV_HexAsciiBrush(clrAscBg);
+    HBRUSH hbrAsc = ThBrush(clrAscBg);
     if (hbrAsc == nullptr)
     {
         TV_PaintChunkTabs(hdc, pState, xBase, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);

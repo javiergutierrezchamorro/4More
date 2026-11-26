@@ -1,4 +1,7 @@
-﻿// 4More.rc — recursos del visor (Build 6.19)
+// 4More.rc — recursos del visor (Build 6.20)
+//
+// 6.20: SIN CAMBIOS DE MENÚS NI DIÁLOGOS. Caché de APIs de tema y formato de status bar en el .cpp.
+// Manifest 6.20.0.0. Compilar junto al 4More.cpp 6.20.
 //
 // 6.19: SIN CAMBIOS DE MENÚS NI DIÁLOGOS (UTF-32 sin BOM se detecta solo; revisión interna).
 // Manifest 6.19.0.0. Compilar junto al 4More.cpp 6.19.

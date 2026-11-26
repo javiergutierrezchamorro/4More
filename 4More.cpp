@@ -1,6 +1,15 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.19
+   Build 6.20
+
+   Version 6.20 (review round):
+   - SPEED / simplification: ThemeApply caches the DwmSetWindowAttribute and SetWindowTheme entry points
+     (and keeps the modules loaded). A theme switch or WM_SETTINGCHANGE (Auto) no longer does
+     LoadLibrary + FreeLibrary on every call; the first invocation pays, the rest are direct GetProcAddress
+     results. Same pattern already used for PrefetchVirtualMemory.
+   - Minor: status-bar position string is built with a single wsprintfW where the selection length is known,
+     avoiding two sequential appends and a second strlen walk.
+   - No functional changes to load, encodings, find, paging or the custom TextView.
 
    Version 6.19 (review round):
    - NEW: UTF-32 WITHOUT a BOM is detected (a BMP-only text has two zero bytes in 85% of its 4-byte units, which
@@ -341,7 +350,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.19"
+#define APP_VERSION L"6.20"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -663,33 +672,50 @@ static bool SystemWantsDark(void)
 typedef HRESULT (WINAPI* PFN_DWMSETATTR)(HWND, DWORD, LPCVOID, DWORD);
 typedef HRESULT (WINAPI* PFN_SETWINDOWTHEME)(HWND, LPCWSTR, LPCWSTR);
 
-static void ThemeApply(void)
+// 6.20: resolve once, keep the modules loaded (same pattern as PrefetchVirtualMemory).
+// ThemeApply can run on every menu pick and on WM_SETTINGCHANGE; LoadLibrary/FreeLibrary
+// on each call was pure overhead.
+static PFN_DWMSETATTR s_pfnDwmSetAttr = nullptr;
+static PFN_SETWINDOWTHEME s_pfnSetWindowTheme = nullptr;
+static bool s_bThemeApisResolved = false;
+
+static void ResolveThemeApis(void)
 {
-    g_bDark = (g_iTheme == 2) || (g_iTheme == 0 && SystemWantsDark());
-    // the title bar (Windows 10 20H1+ / 11: attribute 20; 1809-1909: attribute 19) and the scroll bars (DarkMode_Explorer)
+    if (s_bThemeApisResolved)
+    {
+        return;
+    }
+    s_bThemeApisResolved = true;
     HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
     if (hDwm != nullptr)
     {
-        PFN_DWMSETATTR pfn = (PFN_DWMSETATTR)GetProcAddress(hDwm, "DwmSetWindowAttribute");
-        if (pfn != nullptr && hWndMain != nullptr)
-        {
-            const BOOL bDark = g_bDark ? TRUE : FALSE;
-            if (FAILED(pfn(hWndMain, 20, &bDark, sizeof(bDark))))
-            {
-                pfn(hWndMain, 19, &bDark, sizeof(bDark));
-            }
-        }
-        FreeLibrary(hDwm);
+        s_pfnDwmSetAttr = (PFN_DWMSETATTR)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+        // keep the module loaded for the process lifetime
     }
     HMODULE hUx = LoadLibraryW(L"uxtheme.dll");
     if (hUx != nullptr)
     {
-        PFN_SETWINDOWTHEME pfn = (PFN_SETWINDOWTHEME)GetProcAddress(hUx, "SetWindowTheme");
-        if (pfn != nullptr && hEdit != nullptr)
+        s_pfnSetWindowTheme = (PFN_SETWINDOWTHEME)GetProcAddress(hUx, "SetWindowTheme");
+        // keep the module loaded
+    }
+}
+
+static void ThemeApply(void)
+{
+    g_bDark = (g_iTheme == 2) || (g_iTheme == 0 && SystemWantsDark());
+    // the title bar (Windows 10 20H1+ / 11: attribute 20; 1809-1909: attribute 19) and the scroll bars (DarkMode_Explorer)
+    ResolveThemeApis();
+    if (s_pfnDwmSetAttr != nullptr && hWndMain != nullptr)
+    {
+        const BOOL bDark = g_bDark ? TRUE : FALSE;
+        if (FAILED(s_pfnDwmSetAttr(hWndMain, 20, &bDark, sizeof(bDark))))
         {
-            pfn(hEdit, g_bDark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+            s_pfnDwmSetAttr(hWndMain, 19, &bDark, sizeof(bDark));
         }
-        FreeLibrary(hUx);
+    }
+    if (s_pfnSetWindowTheme != nullptr && hEdit != nullptr)
+    {
+        s_pfnSetWindowTheme(hEdit, g_bDark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
     }
     // the band brushes were created with the old colours: drop them, TV_SyncState makes new ones
     if (g_tv.hbrGreen != nullptr) { DeleteObject(g_tv.hbrGreen); g_tv.hbrGreen = nullptr; }
@@ -8797,14 +8823,17 @@ void UpdateStatusBar(bool bForce)
     }
     else
     {
-        wsprintfW(szPos, L"Line %s, Column %s", szLine, szCol);
+        // 6.20: one format when a selection is present (avoids two append + strlen walks)
         if (dwSelStart != dwSelEnd)
         {
             WCHAR szSel[32];
             FormatU64Locale(szSel, _countof(szSel), (ULONGLONG)((dwSelStart > dwSelEnd) ? dwSelStart - dwSelEnd : dwSelEnd - dwSelStart));
-            wsprintfW(szPos + lstrlenW(szPos), L"  |  Sel %s", szSel);        // 6.17: characters selected
+            wsprintfW(szPos, L"Line %s, Column %s  |  Sel %s  |  %d%%", szLine, szCol, szSel, iPct);
         }
-        wsprintfW(szPos + lstrlenW(szPos), L"  |  %d%%", iPct);               // 6.17: where in the file
+        else
+        {
+            wsprintfW(szPos, L"Line %s, Column %s  |  %d%%", szLine, szCol, iPct);
+        }
     }
     SendMessage(hStatusBar, SB_SETTEXT, 0, (LPARAM)szPos);
 

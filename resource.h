@@ -2,7 +2,6 @@
 // Microsoft Visual C++ generated include file.
 // Used by 4More.rc
 //
-#define IDD_MY4MORE_DIALOG              102
 #define IDS_APP_TITLE                   103
 #define IDD_ABOUTBOX                    103
 #define IDD_GOTO                        129
@@ -13,7 +12,6 @@
 #define IDI_MY4MORE                     107
 #define IDI_SMALL                       108
 #define IDC_MY4MORE                     109
-#define IDR_MAINFRAME                   128
 #define ID_COPY                         32771
 #define ID_SELECTALL                    32774
 #define ID_FIND                         32783
@@ -106,14 +104,62 @@
 #define IDD_FREEZECOLS                  132
 #define IDC_STATIC                      -1
 
+// 6.22: whole-file find, filter, highlight-all, export, hash, properties,
+// statistics, character inspector, copy-as (hex), jump list
+#define ID_FILE_EXPORT                  32861   // File > Export View... (Ctrl+E)
+#define ID_FILE_HASH                    32862   // File > File Hash (SHA-256)...
+#define ID_FILE_PROPERTIES              32863   // File > Properties
+#define ID_SEARCH_STATS                 32864   // Search > Statistics...
+#define ID_INSPECT_CHAR                 32865   // Search > Character at Caret (Ctrl+Q)
+#define ID_OPTIONS_FILTER               32866   // Options > Filter Lines (Ctrl+Shift+G)
+#define ID_OPTIONS_HILITEALL            32867   // Options > Highlight Matches
+#define ID_COPY_CARRAY                  32868   // hex: Copy as C array
+#define ID_COPY_B64                     32869   // hex: Copy as Base64
+#define IDD_EXPORT                      133
+#define IDC_EXPORT_PAGE                 1111
+#define IDC_EXPORT_ALL                  1112
+// 6.23: more hex "Copy as" formats
+#define ID_COPY_ASMARRAY                32870   // hex: Copy as ASM db
+#define ID_COPY_PHPARRAY                32871   // hex: Copy as PHP array
+#define ID_COPY_JSARRAY                 32872   // hex: Copy as JS Uint8Array
+#define ID_COPY_PYARRAY                 32873   // hex: Copy as Python bytes
+// 6.24
+#define ID_SEARCH_FINDINFILES           32874   // Search > Find in Files...
+#define ID_HEX_BPL8                     32876
+#define ID_HEX_BPL16                    32877
+#define ID_HEX_BPL32                    32878
+#define ID_HEX_GRP1                     32879
+#define ID_HEX_GRP2                     32880
+#define ID_HEX_GRP4                     32881
+#define ID_HEX_GRP8                     32882
+#define ID_VIEW_SPLIT                   32883   // View > Split View
+#define ID_FILE_EXPORTSEL               32884   // File > Export Selection (also radio in export dlg)
+#define ID_FILE_COMPARE                 32885   // File > Compare with...
+#define ID_COMPARE_NEXT                 32886   // Next difference
+#define ID_COMPARE_PREV                 32887   // Previous difference
+#define IDD_FINDINFILES                 134
+#define IDD_COMPARE                     135
+#define IDC_CMP_LIST                    1118
+#define IDC_CMP_PREVIEW                 1119
+#define IDC_CMP_GO                      1120
+#define IDC_CMP_NEXT                    1121
+#define IDC_CMP_PREV                    1122
+#define IDC_CMP_MODE_BYTES              1123
+#define IDC_CMP_MODE_LINES              1124
+#define IDC_FIF_PATTERN                 1113
+#define IDC_FIF_FOLDER                  1114
+#define IDC_FIF_SUBDIRS                 1115
+#define IDC_FIF_BROWSE                  1116
+#define IDC_EXPORT_SEL                  1117
+
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
-#define _APS_NEXT_RESOURCE_VALUE        133
-#define _APS_NEXT_COMMAND_VALUE         32861
-#define _APS_NEXT_CONTROL_VALUE         1111
+#define _APS_NEXT_RESOURCE_VALUE        136
+#define _APS_NEXT_COMMAND_VALUE         32888
+#define _APS_NEXT_CONTROL_VALUE         1125
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

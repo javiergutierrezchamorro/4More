@@ -1,6 +1,113 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.21
+   Build 7.01
+
+   Version 7.01 (review round):
+   - FIX: File > Compare never showed its result: the worker posted WM_APP+11 but no window
+     procedure case existed, so the results dialog (IDD_COMPARE) was never opened and the thread
+     handle was never released ("a compare is already running" forever after the first run).
+     WM_APP_COMPAREDONE now closes the handle and opens the dialog. F4 / Shift+F4 (announced by
+     the menu) had no accelerators: added to the .rc.
+   - FIX: Compare, byte mode: a difference spanning a 1 MB chunk border was split in two hits;
+     the cancel flag was consumed by the first poll; two full CRC-32 passes ran before the real
+     compare (identical = no hit now, half the I/O); the chunk compare is memcmp-first.
+   - FIX: Compare, line mode: offsets were char indices of the DECODED text, so Go / the preview
+     landed in the wrong place (BOM, UTF-8, UTF-16). Lines are compared as raw bytes (UTF-16 as
+     units) with exact offsets; a trailing CR is ignored (CRLF vs LF files compare equal); an empty
+     file no longer fails the compare; ESC returns "cancelled" instead of half a result.
+   - FIX: Find in Files: ESC cancelled a single file (the flag was CONSUMED by InterlockedExchange);
+     one interlocked op per LINE; wsprintfW into MAX_PATH buffers (overflow on long paths) and a
+     result buffer written without a real bound; UTF-8 without BOM was decoded as ANSI, UTF-16 and
+     binary files produced garbage hits; junctions could loop. One shared 2 MB buffer per scan.
+   - FIX: the 6.24 hex layout (8/16/32 bytes per line, grouping) was only half wired: Copy as C
+     array / Base64 / ASM..., bookmarks, Go To offset, the gutter row count and the byte ruler still
+     assumed 16 bytes per row. One HexBpl() / HexGrp() pair serves every site now.
+   - FIX: the hash worker's ESC flag was consumed by its first poll too (same pattern).
+   - SPEED: CRC-32 slicing (by 8 on x64, by 4 on Win32: CRC_SLICES); Properties hashes with it.
+   - MENU: Edit > "Find More" (Find Next, Find with Regex, Find All) and Edit > "Bookmarks"
+     (Next / Previous Bookmark) are submenus now (.rc only; the commands and accelerators are unchanged).
+   - Dead code: empty progress block in BuildHexText, empty branch in CmpGoCurrent, unused IDs
+     (IDD_MY4MORE_DIALOG, IDR_MAINFRAME, ID_VIEW_HEXCOLS), CmpFileCrc, the identical-CRC path.
+   - Project: /Zp16 and /GT removed (no effect but risk), Debug links the static debug CRT like
+     Release links the static one, bcrypt.dll and ole32.dll are delay-loaded, /utf-8 added.
+
+   7.01, second pass:
+   - FIX: Export > Whole file reported SUCCESS (an empty file with just the BOM) when the source could
+     not be sized or mapped; the ReadFile fallback was unreachable (cbSize stayed 0) and WfChunkEnd needs the
+     mapped bytes. It is an error now. A 250+ character file name overflowed szFile (".export.txt" appended
+     with no room). The hex-whole-file refusal comes BEFORE the file box.
+   - FIX: the Data Inspector's Float / Double lines used wsprintfW("%g"), which has no floating-point
+     support: they went through swprintf_s.
+   - SPEED: the line filter tested every line twice (once to size, once to copy; costly with a regex).
+     Hex dump: full rows take a path without the per-byte tests (the 6.24 layout generalisation had
+     dropped the fast loop); the 768 KB HexPairs table (65536 iterations on the first hex build) was
+     unused since 6.24 and is gone.
+   - Dead code: bTruncated (BuildHexText), the pProgJob parameter of BuildHexText / BuildViewText (its
+     only use, an empty block, went in the first 7.01 pass), iMaxLine in the filter.
+
+   Version 7.00:
+   - Cleanup release: drop dead ShowFileHash (Properties owns hashing); confirm
+     g_szPropText/g_bPropPending file-scope globals; menus Export/Compare/Copy Advanced;
+     AppMsgBox (TaskDialogIndirect with MessageBoxW fallback); Compare, Find in Files,
+     data inspector, CRC-32, hex layout 8/16/32.
+   - Build identity 7.00.0.0.
+
+   Version 6.26:
+   - AppMsgBox: TaskDialogIndirect loaded dynamically from comctl32; MessageBoxW fallback on
+     older systems or if the call fails. All former MessageBox/MessageBoxW UI prompts go through it.
+
+   Version 6.25:
+   - Compare with... (File): byte and line diff of two files; identical short-circuit (size+CRC);
+     result list with Go / Next / Prev; mini hex preview of both sides at the current hit.
+   - FIX: StatusFlash forward-declared before Find in Files / Split (C2065).
+
+   Version 6.24:
+   - Properties+hashes/CRC-32, Export Selection, data inspector, hex layout, Find in Files, split instance.
+
+   Version 6.23:
+   - FILE HASH multi-digest via BCrypt; Copy as ASM/PHP/JS/Python; SEH/UTF-32/shlobj fixes.
+
+   Version 6.22 (features round; the twelve "what could be added" picks):
+   - FIND IN THE WHOLE FILE: Find Next that fails on the page continues in a worker
+     that decodes the rest of the file with the ACTIVE view's rules (progress ~10 Hz,
+     ESC cancels, it wraps past EOF). Chunks end right after a line break, so a
+     multi-byte sequence is never cut; the plain case-sensitive / ASCII-fold scan
+     runs on the RAW BYTES (memchr + memcmp), regex / whole-word / non-ASCII
+     case-insensitive run on the decoded chunk with an exact char->byte walk. The
+     hit's page is loaded and the hit itself SELECTED on landing (text views).
+   - FILTER LINES (Options, Ctrl+Shift+G): the page shows only the lines matching
+     the Find pattern (plain or regex, Match case / Whole word apply). The gutter
+     keeps the ORIGINAL line numbers (g_pFilterOrig), the status bar shows
+     "FILTER n/m", bookmarks pause while it is on, TailAppend falls back to a full
+     reload, and leaving the filter rebuilds the page from the raw bytes.
+   - HIGHLIGHT MATCHES (Options, ON by default): every hit of the Find pattern on
+     the visible rows gets a soft fill + its text redrawn (two GDI calls per span,
+     visible rows only, hex excluded, frozen columns and tabs respected).
+   - EXPORT VIEW (File, Ctrl+E): the page on screen or the WHOLE file (worker,
+     ESC cancels, UTF-8 with BOM) written through a Save dialog; the page export
+     takes a private copy so a page load landing mid-export cannot free its text.
+   - Copy as C Array / Copy as Base64 (Edit, hex view only): the selected byte
+     range (up to 1 MB), Base64 per RFC 4648.
+   - FILE HASH (File, Ctrl+Shift+H): SHA-256 through BCrypt in a worker, result
+     boxed and copied to the clipboard; ESC cancels.
+   - PROPERTIES (File): sizes, dates, attributes, what is on screen, bookmarks.
+   - STATISTICS (Search): page + file numbers (lines, longest line, words, chars).
+   - CHARACTER AT CARET (Search, Ctrl+Q): code point, UTF-8 / UTF-16 bytes, line /
+     column and the FILE offset (exact char<->byte walks per view, shared with the
+     whole-file find). The hex view reports the byte under the caret.
+   - WHOLE WORD in Find: the dialog's own FR_WHOLEWORD flag is honored by
+     FindPatternFrom, FindPlainBefore and the overlay; it survives reopening the
+     dialog and the session (INI WholeWord).
+   - SESSION: ReopenLastFile=1 restarts on the last file (no argument, no pipe);
+     [Positions] entries grew to offset|view|cp|font|bookmarks|path — the way a
+     file was SHOWN comes back with the place (old entries still work).
+   - WATCHER: outside tail, a changed file flashes "File changed on disk - F5
+     reloads it" (2 s tick, INI WatchChanges=0 turns it off); the tail timer id
+     carries it, so ToggleTail no longer kills the timer.
+   - JUMP LIST: every successful open feeds SHAddToRecentDocs (the taskbar's
+     Recent mirrors the MRU).
+   - INI keys: HighlightAll, WatchChanges, ReopenLastFile, WholeWord; [Session]
+     LastFile; the [4More] section buffer grew to 768.
 
    Version 6.21 (review round):
    - FIX: a start that restores a MAXIMIZED window skipped ThemeApply entirely (it lived in the
@@ -347,7 +454,9 @@
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")                    // 6.24: CoTaskMemFree (Find in Files browse)
 #pragma comment(lib, "advapi32.lib")                  // 6.18: RegGetValueW (the Windows dark-mode setting)
+#pragma comment(lib, "bcrypt.lib")                    // 6.22: BCrypt* (SHA-256)
 #endif
 
 #include <new>                                  // std::bad_alloc, std::nothrow
@@ -356,6 +465,8 @@
 #include <regex>
 #include <string>
 #include <vector>
+#include <bcrypt.h>                             // 6.22+: BCrypt hashes (MD5, SHA-1/256/512)
+#include <shlobj.h>                             // 6.22: SHAddToRecentDocs / SHARD_PATHW (Jump List)
 
 #ifdef _WIN32
 #include <process.h>                            // _beginthreadex
@@ -392,6 +503,208 @@
 
 
 /* -------------------------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------------------------- */
+// 6.26: AppMsgBox — TaskDialog when available (Vista+ via dynamic comctl32), else MessageBoxW.
+// Same signature as MessageBoxW so call sites stay readable. Common-controls 6 is already
+// in the manifest; the dynamic load only avoids a hard import on down-level toolchains.
+/* -------------------------------------------------------------------------------------------- */
+
+#ifndef TD_WARNING_ICON
+#define TD_WARNING_ICON      ((PCWSTR)-1)
+#define TD_ERROR_ICON        ((PCWSTR)-2)
+#define TD_INFORMATION_ICON  ((PCWSTR)-3)
+#define TD_SHIELD_ICON       ((PCWSTR)-4)
+#endif
+#ifndef TDCBF_OK_BUTTON
+#define TDCBF_OK_BUTTON      0x0001
+#define TDCBF_YES_BUTTON     0x0002
+#define TDCBF_NO_BUTTON      0x0004
+#define TDCBF_CANCEL_BUTTON  0x0008
+#define TDCBF_RETRY_BUTTON   0x0010
+#define TDCBF_CLOSE_BUTTON   0x0020
+#endif
+#ifndef TDF_SIZE_TO_CONTENT
+#define TDF_ALLOW_DIALOG_CANCELLATION 0x0008
+#define TDF_SIZE_TO_CONTENT           0x01000000
+#endif
+// Layout must match TASKDIALOGCONFIG (commctrl.h). Default packing — never #pragma pack(1).
+typedef struct APP_TASKDIALOG_BUTTON {
+    int     nButtonID;
+    PCWSTR  pszButtonText;
+} APP_TASKDIALOG_BUTTON;
+
+typedef HRESULT (CALLBACK *APP_PFTASKDIALOGCALLBACK)(HWND, UINT, WPARAM, LPARAM, LONG_PTR);
+
+typedef struct APP_TASKDIALOGCONFIG {
+    UINT                           cbSize;
+    HWND                           hwndParent;
+    HINSTANCE                      hInstance;
+    DWORD                          dwFlags;
+    DWORD                          dwCommonButtons;
+    PCWSTR                         pszWindowTitle;
+    union {
+        HICON  hMainIcon;
+        PCWSTR pszMainIcon;
+    } uMain;                                  // not DUMMYUNIONNAME: that Win32 macro expands to empty
+    PCWSTR                         pszMainInstruction;
+    PCWSTR                         pszContent;
+    UINT                           cButtons;
+    const APP_TASKDIALOG_BUTTON*   pButtons;
+    int                            nDefaultButton;
+    UINT                           cRadioButtons;
+    const APP_TASKDIALOG_BUTTON*   pRadioButtons;
+    int                            nDefaultRadioButton;
+    PCWSTR                         pszVerificationText;
+    PCWSTR                         pszExpandedInformation;
+    PCWSTR                         pszExpandedControlText;
+    PCWSTR                         pszCollapsedControlText;
+    union {
+        HICON  hFooterIcon;
+        PCWSTR pszFooterIcon;
+    } uFooter;
+    PCWSTR                         pszFooter;
+    APP_PFTASKDIALOGCALLBACK       pfCallback;
+    LONG_PTR                       lpCallbackData;
+    UINT                           cxWidth;
+} APP_TASKDIALOGCONFIG;
+
+typedef HRESULT (WINAPI *PFN_TaskDialogIndirect)(const APP_TASKDIALOGCONFIG*, int*, int*, BOOL*);
+
+static PFN_TaskDialogIndirect AppGetTaskDialogIndirect(void)
+{
+    static PFN_TaskDialogIndirect s_pfn = nullptr;
+    static int s_once = 0;
+    if (s_once == 0)
+    {
+        s_once = 1;
+        HMODULE h = GetModuleHandleW(L"comctl32.dll");
+        if (h == nullptr)
+        {
+            h = LoadLibraryW(L"comctl32.dll");
+        }
+        if (h != nullptr)
+        {
+            s_pfn = (PFN_TaskDialogIndirect)GetProcAddress(h, "TaskDialogIndirect");
+        }
+    }
+    return s_pfn;
+}
+
+// Drop-in for MessageBoxW: maps the usual MB_* flags to TaskDialogIndirect.
+int AppMsgBox(HWND hWnd, LPCWSTR pszText, LPCWSTR pszTitle, UINT uType)
+{
+    if (pszText == nullptr)
+    {
+        pszText = L"";
+    }
+    if (pszTitle == nullptr)
+    {
+        pszTitle = L"4More";
+    }
+
+    const UINT uBtn = uType & 0x0000000Fu;
+    const UINT uIcon = uType & 0x000000F0u;
+
+    PFN_TaskDialogIndirect pfn = AppGetTaskDialogIndirect();
+    if (pfn != nullptr)
+    {
+        APP_TASKDIALOGCONFIG cfg;
+        ZeroMemory(&cfg, sizeof(cfg));
+        cfg.cbSize = sizeof(cfg);
+        cfg.hwndParent = hWnd;
+        cfg.pszWindowTitle = pszTitle;
+        cfg.pszContent = pszText;
+        cfg.dwFlags = TDF_SIZE_TO_CONTENT | TDF_ALLOW_DIALOG_CANCELLATION;
+
+        // Optional: first paragraph (up to blank line) as main instruction
+        WCHAR szInstr[240];
+        szInstr[0] = 0;
+        {
+            const WCHAR* p = pszText;
+            int n = 0;
+            while (p[n] != 0 && n < 200)
+            {
+                // blank line: \r\n\r\n or \n\n
+                if (p[n] == 13 && p[n + 1] == 10 && p[n + 2] == 13 && p[n + 3] == 10)
+                {
+                    break;
+                }
+                if (p[n] == 10 && p[n + 1] == 10)
+                {
+                    break;
+                }
+                n++;
+            }
+            if (n > 0 && n < 200 && p[n] != 0)
+            {
+                int k;
+                for (k = 0; k < n && k < 239; k++)
+                {
+                    szInstr[k] = p[k];
+                }
+                szInstr[k] = 0;
+                cfg.pszMainInstruction = szInstr;
+                p += n;
+                while (*p == 13 || *p == 10)
+                {
+                    p++;
+                }
+                cfg.pszContent = p;
+            }
+        }
+
+        switch (uIcon)
+        {
+        case MB_ICONERROR:
+            cfg.uMain.pszMainIcon = TD_ERROR_ICON;
+            break;
+        case MB_ICONWARNING:
+            cfg.uMain.pszMainIcon = TD_WARNING_ICON;
+            break;
+        case MB_ICONINFORMATION:
+            cfg.uMain.pszMainIcon = TD_INFORMATION_ICON;
+            break;
+        case MB_ICONQUESTION:
+            cfg.uMain.pszMainIcon = TD_INFORMATION_ICON;
+            break;
+        default:
+            break;
+        }
+
+        switch (uBtn)
+        {
+        case MB_OKCANCEL:
+            cfg.dwCommonButtons = TDCBF_OK_BUTTON | TDCBF_CANCEL_BUTTON;
+            cfg.nDefaultButton = IDOK;
+            break;
+        case MB_YESNO:
+            cfg.dwCommonButtons = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON;
+            cfg.nDefaultButton = IDYES;
+            break;
+        case MB_YESNOCANCEL:
+            cfg.dwCommonButtons = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON | TDCBF_CANCEL_BUTTON;
+            cfg.nDefaultButton = IDYES;
+            break;
+        case MB_RETRYCANCEL:
+            cfg.dwCommonButtons = TDCBF_RETRY_BUTTON | TDCBF_CANCEL_BUTTON;
+            cfg.nDefaultButton = IDRETRY;
+            break;
+        default:
+            cfg.dwCommonButtons = TDCBF_OK_BUTTON;
+            cfg.nDefaultButton = IDOK;
+            break;
+        }
+
+        int nButton = IDOK;
+        if (SUCCEEDED(pfn(&cfg, &nButton, nullptr, nullptr)) && nButton != 0)
+        {
+            return nButton;
+        }
+    }
+    return MessageBoxW(hWnd, pszText, pszTitle, uType);
+}
+
 #define MAX_LOADSTRING 100
 
 #ifndef WM_COPYGLOBALDATA
@@ -399,7 +712,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.21"
+#define APP_VERSION L"7.01"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -423,6 +736,17 @@
 // race against the queue. The worker now publishes the permille in the
 // ATOMIC LoadJob::pmProgress and the UI polls it with IDT_LOADPROG.
 #define WM_APP_LOADPREVIEW (WM_APP + 5)
+// 6.22: the whole-file export worker. Progress = low/high halves of the bytes
+// written so far (same encoding as WM_APP_SEARCHPROGRESS); done = wParam 1
+// (ok), 0xFFFFFFFF (failed), 0 (cancelled).
+#define WM_APP_EXPORTPROG (WM_APP + 7)
+#define WM_APP_EXPORTDONE (WM_APP + 8)
+// 6.22: the SHA-256 worker: wParam 1 = ok, 0xFFFFFFFF = failed, 0 = cancelled.
+// The hash text travels in g_szHashResult (one hash at a time).
+#define WM_APP_HASHDONE (WM_APP + 9)
+// 6.24 / 6.25: the Find in Files and Compare workers' done messages.
+#define WM_APP_FIFDONE (WM_APP + 10)
+#define WM_APP_COMPAREDONE (WM_APP + 11)
 
 // 3.12: the load-bar poll timer (the tail watcher keeps timer id 1).
 // 3.13: 16 ms (~60 samples/s) — the worker now publishes EVERY chunk tick
@@ -477,6 +801,60 @@ int g_iTheme = 0;                               // 6.18: 0 = follow Windows, 1 =
 bool g_bDark = false;                           // 6.18: the theme in effect
 ULONGLONG g_qwPendingLine = 0;                  // 6.18: +N on the command line: the line to go to once the first load is shown
 bool g_bRememberPos = true;                    // 6.17: INI RememberPosition=0: do not reopen files where they were left
+// --- 6.22: highlight-all, filter, whole-file find, hash, watcher, session ---
+bool g_bHiliteAll = true;                      // Options > Highlight Matches: paint every hit of the Find pattern (INI HighlightAll)
+bool g_bFilter = false;                        // Options > Filter Lines: the page shows ONLY the lines matching the Find pattern
+int* g_pFilterOrig = nullptr;                  // while filtered: original line number of each shown line (gutter labels + status)
+int g_cFilterShown = 0;                        // lines the filter kept ("n of m")
+int g_cFilterTotal = 0;                        // lines the filter looked at
+bool g_bWFActive = false;                      // WM_APP_SEARCHDONE / PROGRESS belong to the whole-file find worker, not Find Bytes
+ULONGLONG g_qwWFHit = (ULONGLONG)-1;           // whole-file find result: file offset of the hit
+int g_cchWFHit = 0;                            // hit length in characters (the selection width)
+ULONGLONG g_qwWFRange = (ULONGLONG)-1;         // where the scan started (caret offset): the wrap pass stops there
+ULONGLONG g_qwPendingHitLen = 0;               // selection length once the hit's page lands (0 = nothing pending)
+// 6.22: the [Positions] bookmark offsets waiting for their page: a restore's
+// GoToOffset lands a NEW page and every landing clears the page-scoped
+// bookmarks, so the restored offsets ride along and rebind on that landing.
+ULONGLONG g_qwPendingBm[16] = {};
+int g_cPendingBm = 0;
+HANDLE g_hHashThread = nullptr;                // File > File Hash worker (multi-hash)
+volatile LONG g_bHashCancel = 0;
+bool g_bExportBusy = false;                    // whole-file export worker in flight
+HANDLE g_hExportThread = nullptr;
+volatile LONG g_bExportCancel = 0;
+WCHAR g_szExportPath[MAX_PATH] = {};           // the file the export worker writes
+WCHAR g_szExportSrc[MAX_PATH] = {};            // 6.22: the worker's own snapshot of the SOURCE path (a load may land mid-export)
+WCHAR g_szHashFile[MAX_PATH] = {};             // 6.22: the hash worker's own snapshot of the path (5.2's g_szSearchFile rule)
+WCHAR g_szWFFile[MAX_PATH] = {};               // 6.22: the whole-file find worker's own snapshot of the path
+bool g_bWatch = true;                          // INI WatchChanges=0: no "file changed" notice outside tail
+FILETIME g_ftWatch = {};                       // last write time the screen was built from (watcher baseline)
+ULONGLONG g_cbWatchSize = 0;                   // size the screen was built from
+bool g_bWatchDirty = false;                    // a change was noticed: re-flash until F5 / reload
+bool g_bReopenLast = false;                    // INI ReopenLastFile=1: start on the last file when no argument
+WCHAR g_szLastSession[MAX_PATH] = {};          // INI [Session] LastFile: the file of the previous run
+
+// 6.22: the per-file position record of [Positions] (defined early: ApplyLoadResult
+// builds one and the prototype of PosLookup references the type).
+#define POS_BM_MAX 16
+struct PosEntry
+{
+    ULONGLONG qwOff = 0;
+    int iView = -1;                             // -1: the entry predates 6.22 (or garbage)
+    UINT uCP = CP_ACP;
+    int iFont = -1;
+    ULONGLONG qwbm[POS_BM_MAX] = {};
+    int cBm = 0;
+};
+WCHAR g_szHashResult[768] = {};                // 6.23: multi-hash result (MD5 + SHA-1/256/512 labels + hex)
+static WCHAR g_szPropText[1100];
+static bool g_bPropPending;
+
+int g_iHexBpl = 16;                             // 6.24: hex bytes per dump line (8/16/32)
+int g_iHexGroup = 8;                            // 6.24: extra space every N bytes (1/2/4/8)
+static inline int HexBpl(void) { return (g_iHexBpl == 8 || g_iHexBpl == 32) ? g_iHexBpl : 16; }   // 7.01: THE bytes per row (every site uses it)
+static inline int HexGrp(void) { return (g_iHexGroup == 1 || g_iHexGroup == 2 || g_iHexGroup == 4 || g_iHexGroup == 8) ? g_iHexGroup : 8; }
+WCHAR* g_pExportCopy = nullptr;                // 6.22: the export worker's private copy of the page text
+int g_cchExportCopy = 0;
 bool g_bPrefetch = true;                        // 6.14: INI Prefetch=0 turns the neighbour-page read-ahead off
 int g_iTabWidth = 8;                            // 6.08: tab stop distance in columns (INI TabWidth, 1..16)
 int g_iFreezeCols = 0;                          // 6.00: columns kept fixed while scrolling horizontally (0 = off)
@@ -958,11 +1336,11 @@ HMENU FindSubMenuWithCommand(HWND hWnd, UINT uCommand);   // the bar popup ownin
 void UpdateViewMenu(void);
 void SetView(int iNewView);
 void ApplyView(void);
-bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, LoadJob* pProgJob = nullptr, bool* pbNormalized = nullptr);   // 3.02: los dos últimos responden la ventana de BYTES que se decodificó; 3.10: pProgJob, solo el worker manda tics
+bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, bool* pbNormalized = nullptr);   // 3.02: pdwSrcOff/pdwSrcLen responden la ventana de BYTES que se decodificó (7.01: pProgJob eliminado, no hacía nada)
 int DetectDefaultView(const BYTE* pBytes, DWORD cb);
 void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // deliver + own/free the buffer
 BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // DeliverTextToEdit wrapped in SEH
-WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch, LoadJob* pProgJob = nullptr);    // 3.10: pProgJob activa los tics de construcción (solo el worker la pasa)
+WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch);
 bool IsBinaryData(const BYTE* pBytes, DWORD cb);
 bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb);
 int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure = nullptr);   // 6.16: the text encoding, without the binary test
@@ -980,8 +1358,990 @@ void RefreshPage(bool bTailJump);              // F5: reload the page on screen
 void ToggleTail(void);
 bool TV_SelectionOrWordToFind(bool bWordFallback);   // 6.17: szFind <- selection / word under the caret
 void SearchPrev(bool bShowError);                    // 6.17: Shift+F3
-static bool PosLookup(const WCHAR* pszPath, ULONGLONG* pqwOff);   // 6.17: where this file was left
+static bool PosLookup(const WCHAR* pszPath, PosEntry* pE);   // 6.17/6.22: where and HOW this file was left
 static void SaveFilePosition(void);                  // 6.17: remember it
+// 6.22: new commands and helpers (definitions live in the 6.22 block, below About)
+void ExportViewDialog(HWND hWnd);
+void ShowFileProperties(void);
+void ShowStatistics(void);
+void StatusFlash(LPCWSTR pszText);              // 6.24: must be visible to FindInFiles / Split / Compare (def later)
+void CompareWithFile(HWND hWnd);                // 6.25: File > Compare with...
+void CompareGotoHit(int iDir);                  // 6.25: Next/Prev difference (iDir +1/-1)
+static DWORD Crc32Update(DWORD crc, const BYTE* p, DWORD cb);  // 6.24/6.25
+static DWORD Crc32Of(const BYTE* p, DWORD cb);
+static void U64ToHex(WCHAR* d, ULONGLONG v);
+void GoToOffset(ULONGLONG qwOff);
+
+// --------------------------------------------------------------------------------------------
+// 6.24: Find in Files — plain case-sensitive/insensitive scan of a folder tree.
+// Results are capped and shown in a scrollable message box (path:line:snippet).
+// --------------------------------------------------------------------------------------------
+static WCHAR g_szFifPattern[256] = {};
+static WCHAR g_szFifFolder[MAX_PATH] = {};
+static bool g_bFifSubdirs = true;
+static volatile LONG g_bFifCancel = 0;
+static HANDLE g_hFifThread = nullptr;
+static WCHAR g_szFifResult[32000] = {};
+static int g_cchFif = 0;                            // 7.01: used part of g_szFifResult (no lstrlenW per hit)
+static bool g_bFifMatchCase = false;                // 7.01: snapshot of the Find dialog flag, read by the worker
+static BYTE* g_pFifBuf = nullptr;                   // 7.01: ONE scan buffer for the whole walk (was new[]/delete[] per file)
+#define FIF_CAP (2 * 1024 * 1024)                   // bytes read per file
+
+INT_PTR CALLBACK FindInFilesDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        SetDlgItemTextW(hDlg, IDC_FIF_PATTERN, g_szFifPattern[0] ? g_szFifPattern : szFind);
+        SetDlgItemTextW(hDlg, IDC_FIF_FOLDER, g_szFifFolder);
+        CheckDlgButton(hDlg, IDC_FIF_SUBDIRS, g_bFifSubdirs ? BST_CHECKED : BST_UNCHECKED);
+        return (INT_PTR)TRUE;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_FIF_BROWSE)
+        {
+            BROWSEINFOW bi = {};
+            bi.hwndOwner = hDlg;
+            bi.lpszTitle = L"Folder to search";
+            bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+            // 7.01: BIF_NEWDIALOGSTYLE needs COM on the calling thread (the program never initialised it)
+            const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+            if (pidl != nullptr)
+            {
+                WCHAR sz[MAX_PATH];
+                if (SHGetPathFromIDListW(pidl, sz))
+                {
+                    SetDlgItemTextW(hDlg, IDC_FIF_FOLDER, sz);
+                }
+                CoTaskMemFree(pidl);
+            }
+            if (SUCCEEDED(hrCo))
+            {
+                CoUninitialize();
+            }
+            return (INT_PTR)TRUE;
+        }
+        if (LOWORD(wParam) == IDOK)
+        {
+            GetDlgItemTextW(hDlg, IDC_FIF_PATTERN, g_szFifPattern, (int)_countof(g_szFifPattern));
+            GetDlgItemTextW(hDlg, IDC_FIF_FOLDER, g_szFifFolder, (int)_countof(g_szFifFolder));
+            g_bFifSubdirs = (IsDlgButtonChecked(hDlg, IDC_FIF_SUBDIRS) == BST_CHECKED);
+            EndDialog(hDlg, 1);
+            return (INT_PTR)TRUE;
+        }
+        if (LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, 0);
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}
+
+// Scan buffer -> new[] WCHAR (NUL-terminated, *pcch chars). UTF-16 with BOM and UTF-8 with BOM are
+// honoured; without a BOM the bytes are UTF-8 when they are valid UTF-8 (a sequence cut by the read cap
+// is tolerated), else ANSI. nullptr = binary data (a NUL byte in the head) or no memory.
+static WCHAR* FifDecode(const BYTE* p, DWORD n, bool bTruncated, int* pcch)
+{
+    *pcch = 0;
+    if (n >= 2 && ((p[0] == 0xFF && p[1] == 0xFE) || (p[0] == 0xFE && p[1] == 0xFF)))
+    {
+        const bool bBE = (p[0] == 0xFE);
+        const int cch = (int)((n - 2) / 2);
+        WCHAR* w = new (std::nothrow) WCHAR[(size_t)cch + 1];
+        if (w == nullptr)
+        {
+            return nullptr;
+        }
+        for (int i = 0; i < cch; i++)
+        {
+            const DWORD b0 = p[2 + 2 * i], b1 = p[3 + 2 * i];
+            w[i] = (WCHAR)(bBE ? ((b0 << 8) | b1) : ((b1 << 8) | b0));
+        }
+        w[cch] = L'\0';
+        *pcch = cch;
+        return w;
+    }
+    if (memchr(p, 0, (n < 4096) ? n : 4096) != nullptr)
+    {
+        return nullptr;                             // binary
+    }
+    UINT cp = CP_ACP;
+    DWORD off = 0;
+    if (n >= 3 && p[0] == 0xEF && p[1] == 0xBB && p[2] == 0xBF)
+    {
+        cp = CP_UTF8;
+        off = 3;
+    }
+    else
+    {
+        for (DWORD cut = 0; cut <= (bTruncated ? 3u : 0u) && cut < n; cut++)
+        {
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCSTR)p, (int)(n - cut), nullptr, 0) > 0)
+            {
+                cp = CP_UTF8;
+                n -= cut;
+                break;
+            }
+        }
+    }
+    const int cch = (n > off) ? MultiByteToWideChar(cp, 0, (LPCSTR)(p + off), (int)(n - off), nullptr, 0) : 0;
+    WCHAR* w = new (std::nothrow) WCHAR[(size_t)((cch > 0) ? cch : 0) + 1];
+    if (w == nullptr)
+    {
+        return nullptr;
+    }
+    if (cch > 0)
+    {
+        MultiByteToWideChar(cp, 0, (LPCSTR)(p + off), (int)(n - off), w, cch);
+    }
+    w[(cch > 0) ? cch : 0] = L'\0';
+    *pcch = (cch > 0) ? cch : 0;
+    return w;
+}
+
+static void FifAppendHit(const WCHAR* pszPath, int iLine, const WCHAR* pszLine, int cchLine)
+{
+    WCHAR* p = g_szFifResult + g_cchFif;
+    const WCHAR* pEnd = g_szFifResult + (_countof(g_szFifResult) - 8);
+    if (p + lstrlenW(pszPath) + 112 >= pEnd)        // path + ":123456789: " + 80 snippet chars + CRLF
+    {
+        return;
+    }
+    int n = (cchLine > 80) ? 80 : cchLine;
+    while (n > 0 && (pszLine[n - 1] == L'\r' || pszLine[n - 1] == L'\n' || pszLine[n - 1] == L' '))
+    {
+        n--;
+    }
+    wnsprintfW(p, (int)(pEnd - p), L"%s:%d: ", pszPath, iLine);
+    p += lstrlenW(p);
+    for (int i = 0; i < n && p < pEnd - 4; i++)
+    {
+        const WCHAR c = pszLine[i];
+        *p++ = (c >= 0x20) ? c : L' ';
+    }
+    *p++ = L'\r';
+    *p++ = L'\n';
+    *p = L'\0';
+    g_cchFif = (int)(p - g_szFifResult);
+}
+
+static inline WCHAR FifLower(WCHAR c)
+{
+    return (c >= L'A' && c <= L'Z') ? (WCHAR)(c + 32) : c;
+}
+
+static bool FifLineHas(const WCHAR* p, int n, const WCHAR* pat, int m, bool bMatchCase)
+{
+    if (m > n)
+    {
+        return false;
+    }
+    const WCHAR* const pLast = p + (n - m);         // last possible start
+    if (bMatchCase)
+    {
+        for (const WCHAR* q = p; q <= pLast; q++)
+        {
+            q = (const WCHAR*)wmemchr(q, pat[0], (size_t)(pLast - q) + 1);
+            if (q == nullptr)
+            {
+                return false;
+            }
+            if (wmemcmp(q, pat, (size_t)m) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    const WCHAR c0 = FifLower(pat[0]);
+    for (const WCHAR* q = p; q <= pLast; q++)
+    {
+        if (FifLower(*q) != c0)
+        {
+            continue;
+        }
+        int k = 1;
+        while (k < m && FifLower(q[k]) == FifLower(pat[k]))
+        {
+            k++;
+        }
+        if (k == m)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void FifScanFile(const WCHAR* pszPath, const WCHAR* pszPat, int cchPat, bool bMatchCase)
+{
+    if (InterlockedCompareExchange(&g_bFifCancel, 0, 0) != 0)
+    {
+        return;
+    }
+    HANDLE h = CreateFileW(pszPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+    DWORD cb = 0;
+    const BOOL bRead = ReadFile(h, g_pFifBuf, FIF_CAP, &cb, nullptr);
+    CloseHandle(h);
+    if (!bRead || cb == 0)
+    {
+        return;
+    }
+    int cch = 0;
+    WCHAR* pW = FifDecode(g_pFifBuf, cb, cb == (DWORD)FIF_CAP, &cch);
+    if (pW == nullptr)
+    {
+        return;
+    }
+    int iLine = 1;
+    const WCHAR* pLine = pW;
+    for (int i = 0; i <= cch; i++)
+    {
+        if (i == cch || pW[i] == L'\n')
+        {
+            const int cchLine = (int)(&pW[i] - pLine);
+            if (FifLineHas(pLine, cchLine, pszPat, cchPat, bMatchCase))
+            {
+                FifAppendHit(pszPath, iLine, pLine, cchLine);   // one hit per line
+            }
+            iLine++;
+            pLine = &pW[i] + 1;
+            if ((iLine & 0x1FFF) == 0 && InterlockedCompareExchange(&g_bFifCancel, 0, 0) != 0)
+            {
+                break;
+            }
+        }
+    }
+    delete[] pW;
+}
+
+static void FifWalk(const WCHAR* pszDir, const WCHAR* pszPat, int cchPat, bool bMatchCase, bool bSub, int depth)
+{
+    if (depth > 16 || InterlockedCompareExchange(&g_bFifCancel, 0, 0) != 0)
+    {
+        return;
+    }
+    WCHAR szSpec[MAX_PATH];
+    wnsprintfW(szSpec, (int)_countof(szSpec), L"%s\\*", pszDir);
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(szSpec, &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+    {
+        return;
+    }
+    do
+    {
+        if (g_cchFif > 30000 || InterlockedCompareExchange(&g_bFifCancel, 0, 0) != 0)
+        {
+            break;                              // soft cap / ESC
+        }
+        if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == L'\0' || (fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0')))
+        {
+            continue;
+        }
+        WCHAR szPath[MAX_PATH];
+        wnsprintfW(szPath, (int)_countof(szPath), L"%s\\%s", pszDir, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            if (bSub && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))   // 7.01: junctions / symlinks can loop
+            {
+                FifWalk(szPath, pszPat, cchPat, bMatchCase, bSub, depth + 1);
+            }
+        }
+        else
+        {
+            FifScanFile(szPath, pszPat, cchPat, bMatchCase);
+        }
+    } while (FindNextFileW(hFind, &fd));
+    FindClose(hFind);
+}
+
+unsigned __stdcall FifThreadProc(void* pParameter)
+{
+    UNREFERENCED_PARAMETER(pParameter);
+    g_szFifResult[0] = L'\0';
+    g_cchFif = 0;
+    const int cchPat = lstrlenW(g_szFifPattern);
+    g_pFifBuf = new (std::nothrow) BYTE[FIF_CAP];
+    if (g_pFifBuf != nullptr && cchPat > 0 && g_szFifFolder[0] != L'\0')
+    {
+        FifWalk(g_szFifFolder, g_szFifPattern, cchPat, g_bFifMatchCase, g_bFifSubdirs, 0);
+    }
+    delete[] g_pFifBuf;
+    g_pFifBuf = nullptr;
+    if (InterlockedCompareExchange(&g_bFifCancel, 0, 0) != 0)
+    {
+        lstrcpynW(g_szFifResult + g_cchFif, L"(cancelled)", (int)_countof(g_szFifResult) - g_cchFif);
+    }
+    else if (g_cchFif == 0)
+    {
+        lstrcpynW(g_szFifResult, L"(no matches)", (int)_countof(g_szFifResult));
+    }
+    PostMessage(hWndMain, WM_APP_FIFDONE, 0, 0);
+    return 0;
+}
+
+void FindInFilesDialog(HWND hWnd)
+{
+    if (g_hFifThread != nullptr)
+    {
+        StatusFlash(L"A Find in Files is already running (ESC cancels).");
+        return;
+    }
+    if (g_szFifFolder[0] == L'\0' && g_szCurrentFile[0] != L'\0')
+    {
+        lstrcpynW(g_szFifFolder, g_szCurrentFile, MAX_PATH);
+        PathRemoveFileSpecW(g_szFifFolder);
+    }
+    if (DialogBox(hInst, MAKEINTRESOURCE(IDD_FINDINFILES), hWnd, FindInFilesDlgProc) != 1)
+    {
+        return;
+    }
+    if (g_szFifPattern[0] == L'\0' || g_szFifFolder[0] == L'\0')
+    {
+        return;
+    }
+    g_bFifMatchCase = (fr.Flags & FR_MATCHCASE) != 0;
+    StatusFlash(L"Find in Files... (ESC cancels)");
+    InterlockedExchange(&g_bFifCancel, 0);
+    uintptr_t u = _beginthreadex(nullptr, 0, FifThreadProc, nullptr, 0, nullptr);
+    if (u == 0)
+    {
+        StatusFlash(L"Not enough memory to start Find in Files.");
+    }
+    else
+    {
+        g_hFifThread = (HANDLE)u;
+    }
+}
+
+// 6.24: Split View — launch a second 4More instance on the same file (independent
+// process: full dual-pane inside one process needs two TextView states).
+void ToggleSplitView(void)
+{
+    WCHAR szExe[MAX_PATH];
+    if (GetModuleFileNameW(nullptr, szExe, MAX_PATH) == 0)
+    {
+        return;
+    }
+    WCHAR szCmd[MAX_PATH * 2 + 32];
+    if (g_szCurrentFile[0] != L'\0')
+    {
+        wsprintfW(szCmd, L"\"%s\" \"%s\"", szExe, g_szCurrentFile);
+    }
+    else
+    {
+        wsprintfW(szCmd, L"\"%s\"", szExe);
+    }
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    if (CreateProcessW(nullptr, szCmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+    {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        StatusFlash(L"Split: second window opened.");
+    }
+    else
+    {
+        StatusFlash(L"Could not open a second window.");
+    }
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.25: File > Compare with... — single-view diff (no split pane).
+//   1) Byte mode: chunked memcmp, runs of differing bytes (cap CMP_MAX).
+//   2) Identical short-circuit: same size + same CRC-32 → one message.
+//   3) Line mode: UTF-8/ANSI line-by-line (first 4 MB of each file).
+//   4) Result dialog: list + mini hex preview of both sides; Go/Next/Prev.
+// --------------------------------------------------------------------------------------------
+#define CMP_MAX 10000
+#define CMP_CHUNK (1 * 1024 * 1024)
+
+struct CmpHit
+{
+    ULONGLONG offA;
+    ULONGLONG offB;
+    DWORD len;
+    int kind;           // 0 = differ, 1 = only in A, 2 = only in B
+    int lineA;          // 1-based in line mode; 0 in byte mode
+};
+
+static CmpHit g_cmpHits[CMP_MAX];
+static int g_cCmpHits = 0;
+static int g_iCmpCur = -1;
+static WCHAR g_szCmpA[MAX_PATH] = {};               // 7.01: the A side as it was when the compare started
+static WCHAR g_szCmpB[MAX_PATH] = {};
+static bool g_bCmpLines = false;
+static volatile LONG g_bCmpCancel = 0;
+static HANDLE g_hCmpThread = nullptr;
+static HWND g_hCmpDlg = nullptr;
+static BYTE g_cmpPrevA[16], g_cmpPrevB[16];
+static DWORD g_cbCmpPrevA = 0, g_cbCmpPrevB = 0;
+
+static void CmpFormatHit(int i, WCHAR* psz, int cch)
+{
+    if (i < 0 || i >= g_cCmpHits)
+    {
+        psz[0] = L'\0';
+        return;
+    }
+    const CmpHit& h = g_cmpHits[i];
+    WCHAR szA[32], szB[32];
+    U64ToHex(szA, h.offA);
+    U64ToHex(szB, h.offB);
+    if (h.kind == 1)
+    {
+        wnsprintfW(psz, cch, L"#%d  only in A  @0x%s  (%u bytes)", i + 1, szA, h.len);
+    }
+    else if (h.kind == 2)
+    {
+        wnsprintfW(psz, cch, L"#%d  only in B  @0x%s  (%u bytes)", i + 1, szB, h.len);
+    }
+    else if (h.lineA > 0)
+    {
+        wnsprintfW(psz, cch, L"#%d  line %d  A@0x%s  B@0x%s  (%u)", i + 1, h.lineA, szA, szB, h.len);
+    }
+    else
+    {
+        wnsprintfW(psz, cch, L"#%d  A@0x%s  B@0x%s  (%u bytes)", i + 1, szA, szB, h.len);
+    }
+}
+
+static void CmpLoadPreview(int i)
+{
+    g_cbCmpPrevA = g_cbCmpPrevB = 0;
+    if (i < 0 || i >= g_cCmpHits)
+    {
+        return;
+    }
+    const CmpHit& h = g_cmpHits[i];
+    auto readAt = [](LPCWSTR path, ULONGLONG off, BYTE* dst, DWORD cbWant, DWORD* pcb) {
+        *pcb = 0;
+        HANDLE hf = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (hf == INVALID_HANDLE_VALUE)
+        {
+            return;
+        }
+        LARGE_INTEGER li;
+        li.QuadPart = (LONGLONG)off;
+        if (SetFilePointerEx(hf, li, nullptr, FILE_BEGIN))
+        {
+            DWORD n = 0;
+            if (ReadFile(hf, dst, cbWant, &n, nullptr))
+            {
+                *pcb = n;
+            }
+        }
+        CloseHandle(hf);
+    };
+    const DWORD want = (h.len > 0 && h.len < 16) ? h.len : 16;
+    if (h.kind != 2)
+    {
+        readAt(g_szCmpA, h.offA, g_cmpPrevA, want, &g_cbCmpPrevA);
+    }
+    if (h.kind != 1)
+    {
+        readAt(g_szCmpB, h.offB, g_cmpPrevB, want, &g_cbCmpPrevB);
+    }
+}
+
+static void CmpPreviewText(WCHAR* psz, int cch)
+{
+    psz[0] = L'\0';
+    if (g_iCmpCur < 0 || g_iCmpCur >= g_cCmpHits)
+    {
+        return;
+    }
+    WCHAR* p = psz;
+    const WCHAR* pEnd = psz + cch - 1;
+    auto emit = [&](const BYTE* b, DWORD n, LPCWSTR label) {
+        if (p + 40 >= pEnd)
+        {
+            return;
+        }
+        p += wsprintfW(p, L"%s:", label);
+        for (DWORD i = 0; i < n && p + 4 < pEnd; i++)
+        {
+            p += wsprintfW(p, L" %02X", b[i]);
+        }
+        if (p + 4 < pEnd)
+        {
+            *p++ = L'\r';
+            *p++ = L'\n';
+            *p = L'\0';
+        }
+    };
+    emit(g_cmpPrevA, g_cbCmpPrevA, L"A");
+    emit(g_cmpPrevB, g_cbCmpPrevB, L"B");
+}
+
+static void CmpRefillList(HWND hDlg)
+{
+    HWND hList = GetDlgItem(hDlg, IDC_CMP_LIST);
+    if (hList == nullptr)
+    {
+        return;
+    }
+    SendMessageW(hList, LB_RESETCONTENT, 0, 0);
+    WCHAR sz[160];
+    for (int i = 0; i < g_cCmpHits; i++)
+    {
+        CmpFormatHit(i, sz, (int)_countof(sz));
+        SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)sz);
+    }
+    if (g_cCmpHits > 0)
+    {
+        if (g_iCmpCur < 0 || g_iCmpCur >= g_cCmpHits)
+        {
+            g_iCmpCur = 0;
+        }
+        SendMessageW(hList, LB_SETCURSEL, (WPARAM)g_iCmpCur, 0);
+        CmpLoadPreview(g_iCmpCur);
+        WCHAR szPrev[200];
+        CmpPreviewText(szPrev, (int)_countof(szPrev));
+        SetDlgItemTextW(hDlg, IDC_CMP_PREVIEW, szPrev);
+    }
+    else
+    {
+        SetDlgItemTextW(hDlg, IDC_CMP_PREVIEW, L"(no differences)");
+    }
+}
+
+static void CmpGoCurrent(void)
+{
+    if (g_iCmpCur < 0 || g_iCmpCur >= g_cCmpHits)
+    {
+        return;
+    }
+    const CmpHit& h = g_cmpHits[g_iCmpCur];
+    if (h.kind == 2)
+    {
+        StatusFlash(L"Difference only in B (not in the open file).");
+        return;
+    }
+    if (lstrcmpiW(g_szCmpA, g_szCurrentFile) != 0)
+    {
+        StatusFlash(L"The compared file is no longer the open one.");
+        return;
+    }
+    GoToOffset(h.offA);                             // 7.01: exact byte offsets in both modes
+    WCHAR sz[96];
+    CmpFormatHit(g_iCmpCur, sz, (int)_countof(sz));
+    StatusFlash(sz);
+}
+
+void CompareGotoHit(int iDir)
+{
+    if (g_cCmpHits <= 0)
+    {
+        StatusFlash(L"No compare results. Use File > Compare with...");
+        return;
+    }
+    if (g_iCmpCur < 0)
+    {
+        g_iCmpCur = 0;
+    }
+    else
+    {
+        g_iCmpCur += iDir;
+        if (g_iCmpCur < 0)
+        {
+            g_iCmpCur = g_cCmpHits - 1;
+        }
+        if (g_iCmpCur >= g_cCmpHits)
+        {
+            g_iCmpCur = 0;
+        }
+    }
+    CmpGoCurrent();
+    if (g_hCmpDlg != nullptr)
+    {
+        HWND hList = GetDlgItem(g_hCmpDlg, IDC_CMP_LIST);
+        if (hList != nullptr)
+        {
+            SendMessageW(hList, LB_SETCURSEL, (WPARAM)g_iCmpCur, 0);
+        }
+        CmpLoadPreview(g_iCmpCur);
+        WCHAR szPrev[200];
+        CmpPreviewText(szPrev, (int)_countof(szPrev));
+        SetDlgItemTextW(g_hCmpDlg, IDC_CMP_PREVIEW, szPrev);
+    }
+}
+
+INT_PTR CALLBACK CompareDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        g_hCmpDlg = hDlg;
+        CheckRadioButton(hDlg, IDC_CMP_MODE_BYTES, IDC_CMP_MODE_LINES,
+            g_bCmpLines ? IDC_CMP_MODE_LINES : IDC_CMP_MODE_BYTES);
+        EnableWindow(GetDlgItem(hDlg, IDC_CMP_MODE_BYTES), FALSE);     // 7.01: they show the mode the compare ran in
+        EnableWindow(GetDlgItem(hDlg, IDC_CMP_MODE_LINES), FALSE);     // (the mode is picked before the run)
+        CmpRefillList(hDlg);
+        return (INT_PTR)TRUE;
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case IDC_CMP_LIST:
+            if (HIWORD(wParam) == LBN_SELCHANGE || HIWORD(wParam) == LBN_DBLCLK)
+            {
+                const int i = (int)SendDlgItemMessageW(hDlg, IDC_CMP_LIST, LB_GETCURSEL, 0, 0);
+                if (i >= 0 && i < g_cCmpHits)
+                {
+                    g_iCmpCur = i;
+                    CmpLoadPreview(i);
+                    WCHAR szPrev[200];
+                    CmpPreviewText(szPrev, (int)_countof(szPrev));
+                    SetDlgItemTextW(hDlg, IDC_CMP_PREVIEW, szPrev);
+                    if (HIWORD(wParam) == LBN_DBLCLK)
+                    {
+                        CmpGoCurrent();
+                    }
+                }
+            }
+            return (INT_PTR)TRUE;
+        case IDC_CMP_GO:
+            CmpGoCurrent();
+            return (INT_PTR)TRUE;
+        case IDC_CMP_NEXT:
+            CompareGotoHit(+1);
+            return (INT_PTR)TRUE;
+        case IDC_CMP_PREV:
+            CompareGotoHit(-1);
+            return (INT_PTR)TRUE;
+        case IDCANCEL:
+            g_hCmpDlg = nullptr;
+            EndDialog(hDlg, 0);
+            return (INT_PTR)TRUE;
+        }
+        break;
+    case WM_CLOSE:
+        g_hCmpDlg = nullptr;
+        EndDialog(hDlg, 0);
+        return (INT_PTR)TRUE;
+    }
+    return (INT_PTR)FALSE;
+}
+
+static void CmpAdd(ULONGLONG a, ULONGLONG b, DWORD len, int kind, int lineA)
+{
+    if (g_cCmpHits >= CMP_MAX || len == 0)
+    {
+        return;
+    }
+    CmpHit& h = g_cmpHits[g_cCmpHits++];
+    h.offA = a;
+    h.offB = b;
+    h.len = len;
+    h.kind = kind;
+    h.lineA = lineA;
+}
+
+// One run of differing bytes [qwStart, qwEnd) -> one hit (the length is a DWORD: capped).
+static void CmpAddRun(ULONGLONG qwStart, ULONGLONG qwEnd)
+{
+    const ULONGLONG len = qwEnd - qwStart;
+    CmpAdd(qwStart, qwStart, (DWORD)((len > 0xFFFFFFFFull) ? 0xFFFFFFFFull : len), 0, 0);
+}
+
+static bool CmpByteFiles(HANDLE hA, HANDLE hB, ULONGLONG cbA, ULONGLONG cbB)
+{
+    BYTE* pA = new (std::nothrow) BYTE[2 * (size_t)CMP_CHUNK];
+    if (pA == nullptr)
+    {
+        return false;
+    }
+    BYTE* pB = pA + CMP_CHUNK;
+    const ULONGLONG cbMin = (cbA < cbB) ? cbA : cbB;
+    ULONGLONG off = 0, qwRun = 0;
+    bool bRun = false, bOk = true;
+    while (off < cbMin && g_cCmpHits < CMP_MAX)
+    {
+        if (InterlockedCompareExchange(&g_bCmpCancel, 0, 0) != 0)
+        {
+            bOk = false;
+            break;
+        }
+        const DWORD want = (DWORD)((cbMin - off > CMP_CHUNK) ? CMP_CHUNK : (cbMin - off));
+        DWORD nA = 0, nB = 0;
+        if (!ReadFile(hA, pA, want, &nA, nullptr) || !ReadFile(hB, pB, want, &nB, nullptr) || nA != want || nB != want)
+        {
+            bOk = false;
+            break;
+        }
+        // memcmp (vectorised) decides whether the chunk needs the byte walk; a run that is open at the
+        // chunk border continues into the next chunk instead of being split in two hits.
+        if (bRun || memcmp(pA, pB, want) != 0)
+        {
+            for (DWORD i = 0; i < want && g_cCmpHits < CMP_MAX; i++)
+            {
+                if ((pA[i] != pB[i]) == bRun)
+                {
+                    continue;
+                }
+                if (bRun)
+                {
+                    CmpAddRun(qwRun, off + i);
+                    bRun = false;
+                }
+                else
+                {
+                    qwRun = off + i;
+                    bRun = true;
+                }
+            }
+        }
+        off += want;
+    }
+    if (bOk && bRun && g_cCmpHits < CMP_MAX)
+    {
+        CmpAddRun(qwRun, off);
+    }
+    if (bOk)
+    {
+        if (cbA > cbMin)
+        {
+            CmpAdd(cbMin, cbMin, (DWORD)((cbA - cbMin > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (cbA - cbMin)), 1, 0);
+        }
+        else if (cbB > cbMin)
+        {
+            CmpAdd(cbMin, cbMin, (DWORD)((cbB - cbMin > 0xFFFFFFFFu) ? 0xFFFFFFFFu : (cbB - cbMin)), 2, 0);
+        }
+    }
+    delete[] pA;
+    return bOk;
+}
+
+// Line mode compares the LINES of two buffers of units T (BYTE: ANSI / UTF-8, '\n' is 0x0A in both;
+// WCHAR: UTF-16 normalised to the host byte order). Offsets are exact: base + unit index * sizeof(T).
+// A trailing CR is ignored, so a CRLF file and its LF twin compare equal. False = cancelled.
+template <class T>
+static bool CmpLinesT(const T* a, int na, const T* b, int nb, ULONGLONG baseA, ULONGLONG baseB)
+{
+    int iA = 0, iB = 0, iLine = 1;
+    while (iA < na || iB < nb)
+    {
+        if ((iLine & 0xFFF) == 0 && InterlockedCompareExchange(&g_bCmpCancel, 0, 0) != 0)
+        {
+            return false;
+        }
+        const int a0 = iA, b0 = iB;
+        while (iA < na && a[iA] != (T)'\n')
+        {
+            iA++;
+        }
+        while (iB < nb && b[iB] != (T)'\n')
+        {
+            iB++;
+        }
+        const bool noA = (a0 >= na), noB = (b0 >= nb);      // this side has no line here any more
+        if (noA && noB)
+        {
+            break;
+        }
+        int lenA = iA - a0, lenB = iB - b0;
+        if (lenA > 0 && a[a0 + lenA - 1] == (T)'\r') lenA--;
+        if (lenB > 0 && b[b0 + lenB - 1] == (T)'\r') lenB--;
+        if (noA || noB || lenA != lenB || memcmp(a + a0, b + b0, (size_t)lenA * sizeof(T)) != 0)
+        {
+            int kind = 0, len = (lenA > lenB) ? lenA : lenB;
+            if (noA)
+            {
+                kind = 2;
+                len = lenB;
+            }
+            else if (noB)
+            {
+                kind = 1;
+                len = lenA;
+            }
+            CmpAdd(baseA + (ULONGLONG)a0 * sizeof(T), baseB + (ULONGLONG)b0 * sizeof(T), (DWORD)((len > 0) ? len : 1), kind, iLine);
+            if (g_cCmpHits >= CMP_MAX)
+            {
+                break;
+            }
+        }
+        if (iA < na) iA++;                                  // the '\n'
+        if (iB < nb) iB++;
+        iLine++;
+    }
+    return true;
+}
+
+// Line mode: the first 4 MB of each file.
+static bool CmpLineFiles(HANDLE hA, HANDLE hB)
+{
+    const DWORD cbCap = 4 * 1024 * 1024;
+    BYTE* pA = new (std::nothrow) BYTE[2 * ((size_t)cbCap + 2)];
+    if (pA == nullptr)
+    {
+        return false;
+    }
+    BYTE* pB = pA + cbCap + 2;
+    DWORD nA = 0, nB = 0;
+    bool bOk = false;
+    if (ReadFile(hA, pA, cbCap, &nA, nullptr) && ReadFile(hB, pB, cbCap, &nB, nullptr))
+    {
+        const bool bU16A = nA >= 2 && ((pA[0] == 0xFF && pA[1] == 0xFE) || (pA[0] == 0xFE && pA[1] == 0xFF));
+        const bool bU16B = nB >= 2 && ((pB[0] == 0xFF && pB[1] == 0xFE) || (pB[0] == 0xFE && pB[1] == 0xFF));
+        if (bU16A && bU16B)
+        {
+            const int cA = (int)((nA - 2) / 2), cB = (int)((nB - 2) / 2);
+            WCHAR* wA = new (std::nothrow) WCHAR[(size_t)cA + (size_t)cB + 2];
+            if (wA != nullptr)
+            {
+                WCHAR* wB = wA + cA + 1;
+                for (int i = 0; i < cA; i++)
+                {
+                    wA[i] = (WCHAR)((pA[0] == 0xFE) ? ((pA[2 + 2 * i] << 8) | pA[3 + 2 * i]) : ((pA[3 + 2 * i] << 8) | pA[2 + 2 * i]));
+                }
+                for (int i = 0; i < cB; i++)
+                {
+                    wB[i] = (WCHAR)((pB[0] == 0xFE) ? ((pB[2 + 2 * i] << 8) | pB[3 + 2 * i]) : ((pB[3 + 2 * i] << 8) | pB[2 + 2 * i]));
+                }
+                bOk = CmpLinesT<WCHAR>(wA, cA, wB, cB, 2, 2);
+                delete[] wA;
+            }
+        }
+        else
+        {
+            const DWORD oA = (nA >= 3 && pA[0] == 0xEF && pA[1] == 0xBB && pA[2] == 0xBF) ? 3 : 0;   // a UTF-8 BOM is not a difference
+            const DWORD oB = (nB >= 3 && pB[0] == 0xEF && pB[1] == 0xBB && pB[2] == 0xBF) ? 3 : 0;
+            bOk = CmpLinesT<BYTE>(pA + oA, (int)(nA - oA), pB + oB, (int)(nB - oB), oA, oB);
+        }
+    }
+    delete[] pA;
+    return bOk;
+}
+
+unsigned __stdcall CompareThreadProc(void* pParameter)
+{
+    const bool bLines = (pParameter != nullptr);
+    g_cCmpHits = 0;
+    g_iCmpCur = -1;
+    HANDLE hA = CreateFileW(g_szCmpA, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    HANDLE hB = CreateFileW(g_szCmpB, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    bool bOk = false;
+    LARGE_INTEGER sa, sb;
+    if (hA != INVALID_HANDLE_VALUE && hB != INVALID_HANDLE_VALUE && GetFileSizeEx(hA, &sa) && GetFileSizeEx(hB, &sb))
+    {
+        bOk = bLines ? CmpLineFiles(hA, hB)
+                     : CmpByteFiles(hA, hB, (ULONGLONG)sa.QuadPart, (ULONGLONG)sb.QuadPart);
+    }
+    if (hA != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(hA);
+    }
+    if (hB != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(hB);
+    }
+    // wParam: 1 = finished (0 hits = identical), 0 = cancelled / unreadable
+    PostMessage(hWndMain, WM_APP_COMPAREDONE, bOk ? 1 : 0, 0);
+    return 0;
+}
+
+void CompareWithFile(HWND hWnd)
+{
+    if (g_szCurrentFile[0] == L'\0')
+    {
+        AppMsgBox(hWnd, L"Open a file first (the left / A side).", szTitle, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (g_hCmpThread != nullptr)
+    {
+        StatusFlash(L"A compare is already running (ESC cancels).");
+        return;
+    }
+    WCHAR szFile[MAX_PATH] = {};
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hWnd;
+    ofn.lpstrFilter = L"All files (*.*)\0*.*\0";
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrTitle = L"Compare with...";
+    if (!GetOpenFileNameW(&ofn))
+    {
+        return;
+    }
+    if (lstrcmpiW(szFile, g_szCurrentFile) == 0)
+    {
+        AppMsgBox(hWnd, L"Pick a different file to compare against.", szTitle, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    // mode: Yes = bytes, No = lines (the results dialog shows which one ran)
+    const int mode = AppMsgBox(hWnd,
+        L"Compare mode:\n\nYes = Bytes (hex / dumps)\nNo = Lines (text / logs)\nCancel = abort",
+        L"4More - Compare", MB_YESNOCANCEL | MB_ICONQUESTION);
+    if (mode == IDCANCEL)
+    {
+        return;
+    }
+    g_bCmpLines = (mode == IDNO);
+    lstrcpynW(g_szCmpA, g_szCurrentFile, MAX_PATH);
+    lstrcpynW(g_szCmpB, szFile, MAX_PATH);
+    StatusFlash(g_bCmpLines ? L"Comparing lines... (ESC cancels)" : L"Comparing bytes... (ESC cancels)");
+    InterlockedExchange(&g_bCmpCancel, 0);
+    uintptr_t u = _beginthreadex(nullptr, 0, CompareThreadProc, (void*)(INT_PTR)(g_bCmpLines ? 1 : 0), 0, nullptr);
+    if (u == 0)
+    {
+        StatusFlash(L"Not enough memory to start the compare.");
+    }
+    else
+    {
+        g_hCmpThread = (HANDLE)u;
+    }
+}
+
+
+
+void ShowCharInspector(void);
+void ToggleFilter(void);
+void ToggleHiliteAll(void);
+// 6.23: format selectors for hex "Copy as ..." (must be visible to WM_COMMAND)
+enum CopyFmt
+{
+    COPYFMT_C = 0,
+    COPYFMT_ASM,
+    COPYFMT_PHP,
+    COPYFMT_JS,
+    COPYFMT_PYTHON,
+    COPYFMT_BASE64
+};
+
+void CopyHexAs(int iFmt);
+static int HexAsciiCol(void);                   // 6.24
+static int HexLineChars(void);
+static DWORD Crc32Of(const BYTE* p, DWORD cb);
+void FindInFilesDialog(HWND hWnd);
+void ToggleSplitView(void);
+
+void WatchTick(void);
+static bool OffsetToCharPos(ULONGLONG qwOff, int* piChar);       // file offset -> char of the page text (hit selection)
+static bool CharToFileOffset(int iChar, ULONGLONG* pqwOff);      // char of the page text -> file offset (inspector)
+static bool FilterIsLineMatch(const WCHAR* p, int cch);          // the Find pattern against one line
+static void ApplyFilterToPage(void);                             // rebuild the view with the matching lines only
+static void FilterClear(bool bRebuild);                          // leave filter mode (bRebuild: restore the full page)
+static int TvCollectMatches(const WCHAR* pText, int iLS, int iLE, int* pOutLo, int* pOutHi, int cMax);  // paint overlay data
+static void WfWorkerCancelAll(void);                             // stop every 6.22 worker
+static void ApplyPendingBookmarks(void);                         // rebind the [Positions] bookmark offsets on their landing
+static void TV_GutterRepaint(void);                              // 5.8: one repaint door for bookmark/gutter changes
 static const WCHAR* AnsiLabel(void);            // 6.18: "ANSI" or the name of the chosen code page
 static void SetAnsiCodePage(UINT cp);
 static void ChooseView(int iNew);
@@ -1161,7 +2521,7 @@ int g_iFontIndex = 4;                           // -12, the shipped default
 LONG WINAPI UnexpectedFilter(EXCEPTION_POINTERS* pPointers)
 {
     UNREFERENCED_PARAMETER(pPointers);
-    MessageBoxW(nullptr, L"An unexpected error occurred and 4More must close.\nPlease report what you were doing when this happened.", L"4More", MB_OK | MB_ICONERROR);
+    AppMsgBox(nullptr, L"An unexpected error occurred and 4More must close.\nPlease report what you were doing when this happened.", L"4More", MB_OK | MB_ICONERROR);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -1328,6 +2688,10 @@ void ReapSearchThread(void)
         CloseHandle(g_hSearchThread);
         g_hSearchThread = nullptr;
         g_bInByteSearch = false;
+        // 6.22: the reaped worker is FINISHED — if it was the whole-file find
+        // (or its done post failed and the flag stuck), the next WM_APP_SEARCHDONE
+        // must reach Find Bytes' own branch again.
+        g_bWFActive = false;
         UpdateStatusBar(true);
     }
 }
@@ -1450,6 +2814,81 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             break;
         case ID_COPY_COLUMN:
             TV_CopyColumn();
+            break;
+        case ID_FILE_EXPORT:                  // 6.22
+            ExportViewDialog(hWnd);
+            break;
+        case ID_FILE_EXPORTSEL:               // 6.24
+            ExportViewDialog(hWnd);
+            break;
+        case ID_SEARCH_FINDINFILES:           // 6.24
+            FindInFilesDialog(hWnd);
+            break;
+        case ID_HEX_BPL8:
+        case ID_HEX_BPL16:
+        case ID_HEX_BPL32:
+            g_iHexBpl = (LOWORD(wParam) == ID_HEX_BPL8) ? 8 : (LOWORD(wParam) == ID_HEX_BPL32) ? 32 : 16;
+            if (iView == VIEW_HEX && pFileBytes != nullptr)
+            {
+                ShowViewSafely();
+            }
+            break;
+        case ID_HEX_GRP1:
+        case ID_HEX_GRP2:
+        case ID_HEX_GRP4:
+        case ID_HEX_GRP8:
+            g_iHexGroup = (LOWORD(wParam) == ID_HEX_GRP1) ? 1 : (LOWORD(wParam) == ID_HEX_GRP2) ? 2
+                        : (LOWORD(wParam) == ID_HEX_GRP4) ? 4 : 8;
+            if (iView == VIEW_HEX && pFileBytes != nullptr)
+            {
+                ShowViewSafely();
+            }
+            break;
+        case ID_VIEW_SPLIT:                   // 6.24
+            ToggleSplitView();
+            break;
+        case ID_FILE_HASH:                    // 7.00: alias of Properties (legacy)
+        case ID_FILE_PROPERTIES:              // 7.00: Properties... (metadata + hashes)
+            ShowFileProperties();
+            break;
+        case ID_FILE_COMPARE:                 // 6.25
+            CompareWithFile(hWnd);
+            break;
+        case ID_COMPARE_NEXT:
+            CompareGotoHit(+1);
+            break;
+        case ID_COMPARE_PREV:
+            CompareGotoHit(-1);
+            break;
+        case ID_SEARCH_STATS:                 // 6.22
+            ShowStatistics();
+            break;
+        case ID_INSPECT_CHAR:                 // 6.22
+            ShowCharInspector();
+            break;
+        case ID_OPTIONS_FILTER:               // 6.22
+            ToggleFilter();
+            break;
+        case ID_OPTIONS_HILITEALL:            // 6.22
+            ToggleHiliteAll();
+            break;
+        case ID_COPY_CARRAY:                  // 6.22/6.23 (hex view only)
+            CopyHexAs(COPYFMT_C);
+            break;
+        case ID_COPY_ASMARRAY:                // 6.23
+            CopyHexAs(COPYFMT_ASM);
+            break;
+        case ID_COPY_PHPARRAY:                // 6.23
+            CopyHexAs(COPYFMT_PHP);
+            break;
+        case ID_COPY_JSARRAY:                 // 6.23
+            CopyHexAs(COPYFMT_JS);
+            break;
+        case ID_COPY_PYARRAY:                 // 6.23
+            CopyHexAs(COPYFMT_PYTHON);
+            break;
+        case ID_COPY_B64:                     // 6.22 (hex view only)
+            CopyHexAs(COPYFMT_BASE64);
             break;
         case ID_FILE_PRINT:
             PrintCurrentView();
@@ -1670,6 +3109,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
         }
         g_bTailJumpFirst = g_bTail;
+        // 6.22: no file argument and no pipe on stdin: the last session's
+        // file comes back when the INI asks for it (ReopenLastFile=1). A
+        // console stdin (GetFileType answers FILE_TYPE_CHAR) proves there
+        // is neither a pipe nor a redirection to wait for.
+        if (pszFileToLoad[0] == L'\0' && g_bReopenLast && g_szLastSession[0] != L'\0')
+        {
+            if (GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR &&
+                GetFileAttributesW(g_szLastSession) != INVALID_FILE_ATTRIBUTES)
+            {
+                pszFileToLoad = g_szLastSession;
+            }
+        }
         // ES_AUTOHSCROLL + WS_HSCROLL disable word wrap (the default).
         // This is the change that most accelerates loading large files in an EDIT
         // control: without them, the control must calculate where each line breaks
@@ -1765,6 +3216,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 InterlockedExchange(&g_bSearchCancel, 1);   // idempotent: worker checks per chunk
                 ReapSearchThread();     // 5.2: a finished worker whose final post failed cannot wedge the gate
             }
+            else if (g_bExportBusy)
+            {
+                InterlockedExchange(&g_bExportCancel, 1);   // 6.22: stop the export at the next chunk
+            }
+            else if (g_hHashThread != nullptr)
+            {
+                InterlockedExchange(&g_bHashCancel, 1);     // 6.22: stop the hash at the next chunk
+            }
+            else if (g_hFifThread != nullptr)
+            {
+                InterlockedExchange(&g_bFifCancel, 1);
+            }
+            else if (g_hCmpThread != nullptr)
+            {
+                InterlockedExchange(&g_bCmpCancel, 1);
+            }
             else if (hDlgFind != nullptr)
             {
                 PostMessage(hDlgFind, WM_CLOSE, 0, 0);   // 5.8: the dialog first
@@ -1785,7 +3252,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             if (!g_bTail)
             {
-                KillTimer(hWnd, 1);
+                // 6.22: the timer also drives the change WATCHER when tail is
+                // off. Tail logic first; the watcher never fights it.
+                WatchTick();
                 break;
             }
             if (g_bInByteSearch || g_pJob != nullptr || g_szCurrentFile[0] == L'\0')
@@ -1838,7 +3307,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         // first and refuse what cannot be represented.
         if (DragQueryFileW(hDrop, 0, nullptr, 0) >= _countof(szFile))
         {
-            MessageBox(hWndMain, L"The file path is too long (the limit is 259 characters).", szTitle, MB_OK | MB_ICONWARNING);
+            AppMsgBox(hWndMain, L"The file path is too long (the limit is 259 characters).", szTitle, MB_OK | MB_ICONWARNING);
         }
         else if (DragQueryFileW(hDrop, 0, szFile, _countof(szFile)) > 0)
         {
@@ -1933,8 +3402,46 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             WCHAR szPos[40];
             FormatU64Locale(szPos, 40, qwPos);
             WCHAR szStatus[96];
-            wsprintfW(szStatus, L"Searching... %s (ESC = cancel)", szPos);
+            wsprintfW(szStatus, g_bWFActive ? L"Searching the whole file... %s (ESC = cancel)" : L"Searching... %s (ESC = cancel)", szPos);
             SendMessage(hStatusBar, SB_SETTEXTW, 0, (LPARAM)szStatus);
+        }
+        return(0);
+    }
+    case WM_APP_EXPORTPROG:
+    {
+        // 6.22: whole-file export progress (bytes written so far).
+        if (g_bExportBusy)
+        {
+            ULONGLONG qwPos = ((ULONGLONG)(DWORD)lParam << 32) | (ULONGLONG)(DWORD)wParam;
+            WCHAR szPos[40];
+            FormatU64Locale(szPos, 40, qwPos);
+            WCHAR szStatus[96];
+            wsprintfW(szStatus, L"Exporting... %s bytes (ESC = cancel)", szPos);
+            SendMessage(hStatusBar, SB_SETTEXTW, 0, (LPARAM)szStatus);
+        }
+        return(0);
+    }
+    case WM_APP_EXPORTDONE:
+    {
+        // 6.22: export worker finished: wParam 1 = ok, 0xFFFFFFFF = failed, 0 = cancelled.
+        if (g_hExportThread != nullptr)
+        {
+            CloseHandle(g_hExportThread);
+            g_hExportThread = nullptr;
+        }
+        g_bExportBusy = false;
+        UpdateStatusBar(true);
+        if (wParam == 1)
+        {
+            StatusFlash(L"Export finished.");
+        }
+        else if (wParam == 0)
+        {
+            StatusFlash(L"Export cancelled; the output file holds what was written so far.");
+        }
+        else
+        {
+            AppMsgBox(hWndMain, L"The file could not be written (check the path, or the disk may be full).", L"Export", MB_OK | MB_ICONWARNING);
         }
         return(0);
     }
@@ -1942,6 +3449,49 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         // Worker finished: wParam = 1 (found), 0xFFFFFFFF (not
         // found), 0 (cancelled), 2 (3.07: could not scan at all).
+        // 6.22: the WHOLE-FILE find worker shares the gate (g_bInByteSearch),
+        // the cancel flag and the progress message; g_bWFActive decides who
+        // this done message belongs to. Its jump also SELECTS the hit once
+        // the page lands (g_qwPendingGoto + g_qwPendingHitLen).
+        if (g_bWFActive)
+        {
+            g_bWFActive = false;
+            if (g_hSearchThread != nullptr)
+            {
+                CloseHandle(g_hSearchThread);
+                g_hSearchThread = nullptr;
+            }
+            g_bInByteSearch = false;
+            UpdateStatusBar(true);
+            if (wParam == 1)
+            {
+                const ULONGLONG qwFound = g_qwWFHit;
+                if (qwFound < g_cbFileTotal && g_cchWFHit > 0)
+                {
+                    g_qwPendingHitLen = (ULONGLONG)g_cchWFHit;   // consumed in ApplyLoadResult / PositionAtOffset
+                    GoToOffset(qwFound);
+                }
+            }
+            else if (wParam == 0)
+            {
+                StatusFlash(L"Search cancelled.");
+            }
+            else if (wParam == 0xFFFFFFFF)
+            {
+                WCHAR szText[160];
+                wsprintfW(szText, L"The whole file does not contain \"%s\".", szFind);
+                AppMsgBox(hWndMain, szText, L"Find", MB_OK | MB_ICONINFORMATION);
+            }
+            else if (wParam == 2)
+            {
+                AppMsgBox(hWndMain, L"The file could not be scanned (it may have been removed, or there is not enough memory).", L"Find", MB_OK | MB_ICONWARNING);
+            }
+            else if (wParam == 3)
+            {
+                AppMsgBox(hWndMain, L"The regular expression is invalid.", L"Find", MB_OK | MB_ICONWARNING);
+            }
+            return(0);
+        }
         if (g_hSearchThread != nullptr)
         {
             CloseHandle(g_hSearchThread);
@@ -1963,19 +3513,100 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         else if (wParam == 0)
         {
-            MessageBox(hWndMain, L"Search cancelled.", L"Find Bytes", MB_OK | MB_ICONINFORMATION);
+            AppMsgBox(hWndMain, L"Search cancelled.", L"Find Bytes", MB_OK | MB_ICONINFORMATION);
         }
         else if (wParam == 0xFFFFFFFF)
         {
             g_qwLastHit = (ULONGLONG)-1;        // 6.07: nothing at all (the scan wrapped): start over next time
-            MessageBox(hWndMain, L"Pattern not found.", L"Find Bytes", MB_OK | MB_ICONINFORMATION);
+            AppMsgBox(hWndMain, L"Pattern not found.", L"Find Bytes", MB_OK | MB_ICONINFORMATION);
         }
         else if (wParam == 2)
         {
             // 3.07: the worker could not even scan (the file was removed
             // after it was loaded, or no memory for the chunk buffer).
             // "Pattern not found" was an actionable lie.
-            MessageBox(hWndMain, L"The file could not be scanned (it may have been removed, or there is not enough memory).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+            AppMsgBox(hWndMain, L"The file could not be scanned (it may have been removed, or there is not enough memory).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+        }
+        return(0);
+    }
+    case WM_APP_FIFDONE:
+    {
+        if (g_hFifThread != nullptr)
+        {
+            CloseHandle(g_hFifThread);
+            g_hFifThread = nullptr;
+        }
+        AppMsgBox(hWndMain, g_szFifResult, L"4More - Find in Files", MB_OK | MB_ICONINFORMATION);
+        return(0);
+    }
+    case WM_APP_COMPAREDONE:
+    {
+        // wParam: 1 = finished, 0 = cancelled / could not read a file
+        if (g_hCmpThread != nullptr)
+        {
+            CloseHandle(g_hCmpThread);
+            g_hCmpThread = nullptr;
+        }
+        if (wParam == 0)
+        {
+            StatusFlash(L"Compare cancelled, or a file could not be read.");
+        }
+        else if (g_cCmpHits == 0)
+        {
+            AppMsgBox(hWndMain, g_bCmpLines ? L"No line differs (the first 4 MB of each file were compared)." : L"The files are identical.",
+                L"4More - Compare", MB_OK | MB_ICONINFORMATION);
+        }
+        else
+        {
+            DialogBox(hInst, MAKEINTRESOURCE(IDD_COMPARE), hWndMain, CompareDlgProc);
+        }
+        return(0);
+    }
+    case WM_APP_HASHDONE:
+    {
+        // 6.27: one Properties dialog (metadata + digests) when g_bPropPending; else hashes only.
+        if (g_hHashThread != nullptr)
+        {
+            CloseHandle(g_hHashThread);
+            g_hHashThread = nullptr;
+        }
+        const bool bProp = g_bPropPending;
+        g_bPropPending = false;
+        if (wParam == 1)
+        {
+            WCHAR szAll[1900];
+            if (bProp && g_szPropText[0] != L'\0')
+            {
+                wnsprintfW(szAll, (int)_countof(szAll), L"%s\r\n\r\n--- Hashes (copied to clipboard) ---\r\n%s",
+                    g_szPropText, g_szHashResult);
+            }
+            else
+            {
+                lstrcpynW(szAll, g_szHashResult, (int)_countof(szAll));
+            }
+            (void)ClipboardSetText(hWndMain, g_szHashResult, lstrlenW(g_szHashResult), false);
+            AppMsgBox(hWndMain, szAll, L"4More - Properties", MB_OK | MB_ICONINFORMATION);
+        }
+        else if (wParam == 0)
+        {
+            if (bProp && g_szPropText[0] != L'\0')
+            {
+                AppMsgBox(hWndMain, g_szPropText, L"4More - Properties", MB_OK | MB_ICONINFORMATION);
+            }
+            StatusFlash(L"Hash cancelled.");
+        }
+        else
+        {
+            if (bProp && g_szPropText[0] != L'\0')
+            {
+                WCHAR szAll[1300];
+                wnsprintfW(szAll, (int)_countof(szAll), L"%s\r\n\r\n(Hashes unavailable.)", g_szPropText);
+                AppMsgBox(hWndMain, szAll, L"4More - Properties", MB_OK | MB_ICONWARNING);
+            }
+            else
+            {
+                AppMsgBox(hWndMain, L"The file could not be hashed (it may have been removed, or there is not enough memory).", szTitle, MB_OK | MB_ICONWARNING);
+            }
         }
         return(0);
     }
@@ -2149,6 +3780,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             CloseHandle(g_hSearchThread);
             g_hSearchThread = nullptr;
         }
+        // 6.22: the hash and export workers stop the same way (bounded waits;
+        // the export leaves the partial file it managed to write).
+        WfWorkerCancelAll();
+        if (g_hHashThread != nullptr)
+        {
+            WaitForSingleObject(g_hHashThread, 5000);
+            CloseHandle(g_hHashThread);
+            g_hHashThread = nullptr;
+        }
+        if (g_hExportThread != nullptr)
+        {
+            WaitForSingleObject(g_hExportThread, 10000);
+            CloseHandle(g_hExportThread);
+            g_hExportThread = nullptr;
+        }
+        g_bExportBusy = false;
+        FilterClear(false);
+        delete[] g_pExportCopy;
+        g_pExportCopy = nullptr;
+        g_cchExportCopy = 0;
         delete[] pFileBytes;        // raw bytes of the last loaded file
         pFileBytes = nullptr;
         // V5: free the custom control's view text buffer (leak fix)
@@ -2282,7 +3933,7 @@ void ShowCommandLineHelp(void)
         L"  4More /hex /goto:0x1000 dump.bin\r\n"
         L"  4More /utf8 /find:ERROR /regex app.log\r\n"
         L"  4More /tail /wrap C:\\logs\\live.log\r\n";
-    MessageBoxW(hWndMain, psz, L"4More - Command Line", MB_OK | MB_ICONINFORMATION);
+    AppMsgBox(hWndMain, psz, L"4More - Command Line", MB_OK | MB_ICONINFORMATION);
 }
 
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
@@ -2322,6 +3973,2690 @@ INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     return (INT_PTR)FALSE;
 }
 
+
+
+
+/* ============================================================================================
+   6.22 — whole-file find, filter lines, highlight matches, export view, file hash,
+   properties, statistics, character inspector, hex copy-as, change watcher,
+   session reopen. The shared low-level walks (chars <-> bytes per view) are pure
+   and exercised by the audit bench.
+   ============================================================================================ */
+
+// 6.22: the EBCDIC (code page 37) decode table at FILE SCOPE: the whole-file
+// find, the whole-file export and BuildViewText all decode with the SAME one
+// (it used to be a function-local magic static). BuildViewText keeps its local
+// name `et` via a reference.
+struct EbcdicTable
+{
+    WCHAR w[256];
+    EbcdicTable()
+    {
+        for (int i = 0; i < 256; i++)
+        {
+            w[i] = 0xFFFD;   // unmapped: the replacement character
+        }
+        w[0x00] = 0x0000;        // NUL stays NUL (binary heuristics)
+        w[0x40] = L' ';  w[0x4A] = 0x00A2; w[0x4B] = L'.';  w[0x4C] = L'<';
+        w[0x4D] = L'(';  w[0x4E] = L'+';  w[0x4F] = L'|';  w[0x50] = L'&';
+        w[0x5A] = L'!';  w[0x5B] = L'$';  w[0x5C] = L'*';  w[0x5D] = L')';
+        w[0x5E] = L';';  w[0x5F] = 0x00AC; w[0x60] = L'-'; w[0x61] = L'/';
+        w[0x6A] = 0x00A6; w[0x6B] = L',';  w[0x6C] = L'%'; w[0x6D] = L'_';
+        w[0x6E] = L'>';  w[0x6F] = L'?';   w[0x7A] = L':';
+        w[0x7B] = L'#';  w[0x7C] = L'@';  w[0x7D] = 0x0027; w[0x7E] = L'=';
+        w[0x7F] = L'"';
+        for (int i = 0; i < 9; i++)            // a-i
+        {
+            w[0x81 + i] = (WCHAR)(L'a' + i);
+        }
+        for (int i = 0; i < 9; i++)            // j-r
+        {
+            w[0x91 + i] = (WCHAR)(L'j' + i);
+        }
+        for (int i = 0; i < 8; i++)            // s-z
+        {
+            w[0xA2 + i] = (WCHAR)(L's' + i);
+        }
+        for (int i = 0; i < 9; i++)            // A-I
+        {
+            w[0xC1 + i] = (WCHAR)(L'A' + i);
+        }
+        for (int i = 0; i < 9; i++)            // J-R
+        {
+            w[0xD1 + i] = (WCHAR)(L'J' + i);
+        }
+        for (int i = 0; i < 8; i++)            // S-Z
+        {
+            w[0xE2 + i] = (WCHAR)(L'S' + i);
+        }
+        for (int i = 0; i < 10; i++)           // 0-9
+        {
+            w[0xF0 + i] = (WCHAR)(L'0' + i);
+        }
+        // 6.03: the rest of the code page 37 graphic cells: the
+        // brackets/braces/backslash/tilde/caret/grave and the Latin-1
+        // accented letters (n with tilde, vowels with accents...).
+        static const struct { BYTE b; WORD u; } kCp037[] =
+        {
+            {0x41,0x00A0},{0x42,0x00E2},{0x43,0x00E4},{0x44,0x00E0},{0x45,0x00E1},{0x46,0x00E3},{0x47,0x00E5},{0x48,0x00E7},{0x49,0x00F1},
+            {0x51,0x00E9},{0x52,0x00EA},{0x53,0x00EB},{0x54,0x00E8},{0x55,0x00ED},{0x56,0x00EE},{0x57,0x00EF},{0x58,0x00EC},{0x59,0x00DF},
+            {0x62,0x00C2},{0x63,0x00C4},{0x64,0x00C0},{0x65,0x00C1},{0x66,0x00C3},{0x67,0x00C5},{0x68,0x00C7},{0x69,0x00D1},
+            {0x70,0x00F8},{0x71,0x00C9},{0x72,0x00CA},{0x73,0x00CB},{0x74,0x00C8},{0x75,0x00CD},{0x76,0x00CE},{0x77,0x00CF},{0x78,0x00CC},{0x79,0x0060},
+            {0x80,0x00D8},{0x8A,0x00AB},{0x8B,0x00BB},{0x8C,0x00F0},{0x8D,0x00FD},{0x8E,0x00FE},{0x8F,0x00B1},
+            {0x90,0x00B0},{0x9A,0x00AA},{0x9B,0x00BA},{0x9C,0x00E6},{0x9D,0x00B8},{0x9E,0x00C6},{0x9F,0x00A4},
+            {0xA0,0x00B5},{0xA1,0x007E},{0xAA,0x00A1},{0xAB,0x00BF},{0xAC,0x00D0},{0xAD,0x00DD},{0xAE,0x00DE},{0xAF,0x00AE},
+            {0xB0,0x005E},{0xB1,0x00A3},{0xB2,0x00A5},{0xB3,0x00B7},{0xB4,0x00A9},{0xB5,0x00A7},{0xB6,0x00B6},{0xB7,0x00BC},{0xB8,0x00BD},{0xB9,0x00BE},
+            {0xBA,0x005B},{0xBB,0x005D},{0xBC,0x00AF},{0xBD,0x00A8},{0xBE,0x00B4},{0xBF,0x00D7},
+            {0xC0,0x007B},{0xCA,0x00AD},{0xCB,0x00F4},{0xCC,0x00F6},{0xCD,0x00F2},{0xCE,0x00F3},{0xCF,0x00F5},
+            {0xD0,0x007D},{0xDA,0x00B9},{0xDB,0x00FB},{0xDC,0x00FC},{0xDD,0x00F9},{0xDE,0x00FA},{0xDF,0x00FF},
+            {0xE0,0x005C},{0xE1,0x00F7},{0xEA,0x00B2},{0xEB,0x00D4},{0xEC,0x00D6},{0xED,0x00D2},{0xEE,0x00D3},{0xEF,0x00D5},
+            {0xFA,0x00B3},{0xFB,0x00DB},{0xFC,0x00DC},{0xFD,0x00D9},{0xFE,0x00DA}
+        };
+        for (size_t k = 0; k < sizeof(kCp037) / sizeof(kCp037[0]); k++)
+        {
+            w[kCp037[k].b] = (WCHAR)kCp037[k].u;
+        }
+    }
+};
+static const EbcdicTable g_EbcdicTable;
+
+// Forward declarations of file-scope statics defined LATER in this file (used here).
+static void PostSearchDone(UINT uCode);
+static const std::wregex* GetCachedRegex(void);
+static bool TV_BuildLineIndex(WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine);
+static bool ClipboardSetText(HWND hOwner, const WCHAR* psz, int cch, bool bAppend);
+static int TV_DispEnd(const WCHAR* pText, int iLS, int iLE);          // 5.9.10
+static int HexByteOfCol(int col);                                     // 6.17's byte-of-column helper (defined near FindPlainBefore)
+static const WCHAR* ViewLabel(int iV);                                // the view's name for the status / dialogs
+static void U64ToHex(WCHAR* d, ULONGLONG v);                          // hex digits, at least 8
+
+// The Find word-boundary rule: the same classes the double-click word logic uses
+// (spaces are breaks; letters/digits/_ are word; everything else is punctuation).
+static bool FxIsWordChar(WCHAR c)
+{
+    return (c == L'_' || IsCharAlphaNumericW(c));
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22 PURE ENCODING WALKS. They answer, for the ACTIVE view's decoding rules:
+//   WfCharsOfBytes  — how many characters the bytes [p, p+cb) decode to
+//   WfBytesOfChars  — how many bytes the first iChar characters consumed
+// Both are exact for fixed-width encodings and for the whole prefix of
+// well-formed UTF-8 / ANSI (DBCS) text; a decode of INVALID bytes may differ
+// from MultiByteToWideChar by the odd replacement character (a viewer-grade
+// approximation, never a crash). qwAbsBase is the absolute file offset of p[0]:
+// the UTF-16 / UTF-32 BOM (only at file offset 0) produces no character.
+// --------------------------------------------------------------------------------------------
+static int WfCharsOfBytes(int iView, UINT uCP, const BYTE* p, DWORD cb, ULONGLONG qwAbsBase)
+{
+    int c = 0;
+    if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+    {
+        const bool bBE = (iView == VIEW_UTF16BE);
+        DWORD off = (qwAbsBase == 0 && cb >= 2 &&
+            (bBE ? (p[0] == 0xFE && p[1] == 0xFF) : (p[0] == 0xFF && p[1] == 0xFE))) ? 2 : 0;
+        return (int)((cb - off) / 2);
+    }
+    if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+    {
+        // One unit per 4 bytes; an astral unit decodes to a SURROGATE PAIR (2 chars).
+        const bool bBE = (iView == VIEW_UTF32BE);
+        DWORD off = 0;
+        if (qwAbsBase == 0 && cb >= 4 &&
+            (bBE ? (p[0] == 0x00 && p[1] == 0x00 && p[2] == 0xFE && p[3] == 0xFF)
+                 : (p[0] == 0xFF && p[1] == 0xFE && p[2] == 0x00 && p[3] == 0x00)))
+        {
+            off = 4;
+        }
+        for (DWORD k = off; k + 4 <= cb; k += 4)
+        {
+            const DWORD uc = bBE ? (((DWORD)p[k] << 24) | ((DWORD)p[k + 1] << 16) | ((DWORD)p[k + 2] << 8) | (DWORD)p[k + 3])
+                                 : (((DWORD)p[k + 3] << 24) | ((DWORD)p[k + 2] << 16) | ((DWORD)p[k + 1] << 8) | (DWORD)p[k]);
+            c += (uc >= 0x10000) ? 2 : 1;
+        }
+        return c;
+    }
+    if (iView == VIEW_EBCDIC)
+    {
+        return (int)cb;                     // one byte -> one WCHAR, 1:1
+    }
+    if (iView == VIEW_HEX)
+    {
+        return (int)(cb / (DWORD)HexBpl());   // not a text walk (hex rows are arithmetic elsewhere)
+    }
+    // VIEW_UTF8 / VIEW_ANSI
+    DWORD i = 0;
+    while (i < cb)
+    {
+        const BYTE b = p[i];
+        if (iView == VIEW_UTF8)
+        {
+            if (b < 0x80) { i += 1; c += 1; }
+            else if ((b & 0xE0) == 0xC0) { i += 2; c += 1; }
+            else if ((b & 0xF0) == 0xE0) { i += 3; c += 1; }
+            else if ((b & 0xF8) == 0xF0) { i += 4; c += 2; }   // astral: surrogate pair
+            else { i += 1; c += 1; }                            // stray byte: one replacement char
+        }
+        else
+        {
+            if (IsDBCSLeadByteEx(uCP, b) && i + 1 < cb) { i += 2; c += 1; }
+            else { i += 1; c += 1; }
+        }
+    }
+    return c;
+}
+
+static DWORD WfBytesOfChars(int iView, UINT uCP, const BYTE* p, DWORD cb, int iChar, ULONGLONG qwAbsBase)
+{
+    if (iChar <= 0)
+    {
+        return 0;
+    }
+    if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+    {
+        const bool bBE = (iView == VIEW_UTF16BE);
+        DWORD off = (qwAbsBase == 0 && cb >= 2 &&
+            (bBE ? (p[0] == 0xFE && p[1] == 0xFF) : (p[0] == 0xFF && p[1] == 0xFE))) ? 2 : 0;
+        DWORD want = off + (DWORD)iChar * 2;
+        return (want > cb) ? cb : want;
+    }
+    if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+    {
+        const bool bBE = (iView == VIEW_UTF32BE);
+        DWORD off = 0;
+        if (qwAbsBase == 0 && cb >= 4 &&
+            (bBE ? (p[0] == 0x00 && p[1] == 0x00 && p[2] == 0xFE && p[3] == 0xFF)
+                 : (p[0] == 0xFF && p[1] == 0xFE && p[2] == 0x00 && p[3] == 0x00)))
+        {
+            off = 4;
+        }
+        DWORD i = off;
+        int c = 0;
+        while (i + 4 <= cb && c < iChar)
+        {
+            const DWORD uc = bBE ? (((DWORD)p[i] << 24) | ((DWORD)p[i + 1] << 16) | ((DWORD)p[i + 2] << 8) | (DWORD)p[i + 3])
+                                 : (((DWORD)p[i + 3] << 24) | ((DWORD)p[i + 2] << 16) | ((DWORD)p[i + 1] << 8) | (DWORD)p[i]);
+            c += (uc >= 0x10000) ? 2 : 1;
+            i += 4;
+        }
+        return i;
+    }
+    if (iView == VIEW_EBCDIC)
+    {
+        return ((DWORD)iChar > cb) ? cb : (DWORD)iChar;
+    }
+    if (iView == VIEW_HEX)
+    {
+        return ((DWORD)iChar * (DWORD)(HexBpl()) > cb) ? cb : (DWORD)iChar * (DWORD)(HexBpl());
+    }
+    // VIEW_UTF8 / VIEW_ANSI
+    DWORD i = 0;
+    int c = 0;
+    while (i < cb && c < iChar)
+    {
+        const BYTE b = p[i];
+        if (iView == VIEW_UTF8)
+        {
+            if (b < 0x80) { i += 1; c += 1; }
+            else if ((b & 0xE0) == 0xC0) { i += 2; c += 1; }
+            else if ((b & 0xF0) == 0xE0) { i += 3; c += 1; }
+            else if ((b & 0xF8) == 0xF0) { i += 4; c += 2; }
+            else { i += 1; c += 1; }
+        }
+        else
+        {
+            if (IsDBCSLeadByteEx(uCP, b) && i + 1 < cb) { i += 2; c += 1; }
+            else { i += 1; c += 1; }
+        }
+    }
+    return i;
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: char positions of the page text <-> file offsets (the character inspector
+// and the whole-file find's exact hit selection). Both fail politely for the hex
+// view (its layout is arithmetic the callers own) and while the filter is on (the
+// shown lines are a subset; the mapping would lie).
+// --------------------------------------------------------------------------------------------
+static bool CharToFileOffset(int iChar, ULONGLONG* pqwOff)
+{
+    if (iView == VIEW_HEX || iView == VIEW_EBCDIC || g_bFilter ||
+        pFileBytes == nullptr || g_tv.pText == nullptr)
+    {
+        return false;
+    }
+    const int iLine = TV_LineFromChar(iChar);
+    if (iLine < 0)
+    {
+        return false;
+    }
+    ULONGLONG qwLine = 0;
+    if (!OffsetOfLine((DWORD)iLine, qwLine))
+    {
+        return false;
+    }
+    ULONGLONG qwNext = 0;
+    if (!OffsetOfLine((DWORD)iLine + 1, qwNext))
+    {
+        qwNext = g_qwBase + (ULONGLONG)cbFile;
+    }
+    const DWORD cbRel = (DWORD)(qwLine - g_qwBase);
+    DWORD cbLine = (DWORD)(qwNext - qwLine);
+    if (cbRel > cbFile || (ULONGLONG)cbRel + (ULONGLONG)cbLine > (ULONGLONG)cbFile)
+    {
+        cbLine = (cbRel <= cbFile) ? (cbFile - cbRel) : 0;
+    }
+    const int iLS = TV_LineIndex(iLine);
+    const int iInLine = iChar - iLS;
+    const DWORD cbInto = WfBytesOfChars(iView, g_uAnsiCP, pFileBytes + cbRel, cbLine, iInLine, qwLine);
+    *pqwOff = qwLine + (ULONGLONG)cbInto;
+    return true;
+}
+
+static bool OffsetToCharPos(ULONGLONG qwOff, int* piChar)
+{
+    if (iView == VIEW_HEX || iView == VIEW_EBCDIC || g_bFilter ||
+        pFileBytes == nullptr || g_tv.pText == nullptr || qwOff < g_qwBase ||
+        qwOff > g_qwBase + (ULONGLONG)cbFile)
+    {
+        return false;
+    }
+    int iLine = 0;
+    if (!LineAtOffset(qwOff, iLine))
+    {
+        return false;
+    }
+    ULONGLONG qwLine = 0;
+    if (!OffsetOfLine((DWORD)iLine, qwLine))
+    {
+        return false;
+    }
+    ULONGLONG qwNext = 0;
+    if (!OffsetOfLine((DWORD)iLine + 1, qwNext))
+    {
+        qwNext = g_qwBase + (ULONGLONG)cbFile;
+    }
+    const DWORD cbRel = (DWORD)(qwLine - g_qwBase);
+    DWORD cbLine = (DWORD)(qwNext - qwLine);
+    if (cbRel > cbFile || (ULONGLONG)cbRel + (ULONGLONG)cbLine > (ULONGLONG)cbFile)
+    {
+        cbLine = (cbRel <= cbFile) ? (cbFile - cbRel) : 0;
+    }
+    ULONGLONG cbInto = qwOff - qwLine;
+    if (cbInto > (ULONGLONG)cbLine)
+    {
+        cbInto = (ULONGLONG)cbLine;
+    }
+    const int iLS = TV_LineIndex(iLine);
+    const int cchBefore = WfCharsOfBytes(iView, g_uAnsiCP, pFileBytes + cbRel, (DWORD)cbInto, qwLine);
+    int iChar = iLS + cchBefore;
+    if (iChar < 0 || iChar > g_tv.cch)
+    {
+        return false;
+    }
+    *piChar = iChar;
+    return true;
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: THE FIND PATTERN AGAINST ONE LINE (plain part shared by the filter and
+// the highlight overlay). Answers the match positions; a line matches when the
+// pattern occurs in it (Match case / Whole word follow the Find dialog's flags).
+// The regex part is in TvCollectMatches (it needs the compiled regex).
+// --------------------------------------------------------------------------------------------
+static bool FxPlainScan(const WCHAR* p, int cchLine, int* piLo, int* piHi)
+{
+    const int n = lstrlenW(szFind);
+    if (n <= 0 || n > cchLine)
+    {
+        return false;
+    }
+    const bool bCase = (fr.Flags & FR_MATCHCASE) != 0;
+    const bool bWord = (fr.Flags & FR_WHOLEWORD) != 0;
+    WCHAR c0 = szFind[0];
+    WCHAR c0Lo = c0, c0Up = c0;
+    if (!bCase)
+    {
+        if (c0 >= L'A' && c0 <= L'Z') c0Lo = (WCHAR)(c0 + 32);
+        if (c0 >= L'a' && c0 <= L'z') c0Up = (WCHAR)(c0 - 32);
+    }
+    for (int i = 0; i + n <= cchLine; i++)
+    {
+        const WCHAR t = p[i];
+        bool bFirst;
+        if (bCase)
+        {
+            bFirst = (t == c0);
+        }
+        else if (c0 < 0x80)
+        {
+            bFirst = (t == c0Lo || t == c0Up);
+        }
+        else
+        {
+            bFirst = (ChrCmpIW(t, c0) == 0);    // 0 = equal: the full locale fold
+        }
+        if (!bFirst)
+        {
+            continue;
+        }
+        bool bEq = true;
+        for (int k = 1; k < n; k++)
+        {
+            const WCHAR a = p[i + k];
+            const WCHAR b = szFind[k];
+            if (bCase)
+            {
+                if (a != b) { bEq = false; break; }
+            }
+            else
+            {
+                if (ChrCmpIW(a, b) != 0) { bEq = false; break; }
+            }
+        }
+        if (!bEq)
+        {
+            continue;
+        }
+        if (bWord)
+        {
+            const bool bLeftOk = (i == 0) || !FxIsWordChar(p[i - 1]);
+            const bool bRightOk = (i + n >= cchLine) || !FxIsWordChar(p[i + n]);
+            if (!bLeftOk || !bRightOk)
+            {
+                continue;
+            }
+        }
+        *piLo = i;
+        *piHi = i + n;
+        return true;
+    }
+    return false;
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: matches of the Find pattern within one logical line [iLS, iLE) of the
+// page text — the data behind Options > Highlight Matches. Plain uses FxPlainScan
+// repeatedly; a regular expression is searched line-scoped (a line starts at
+// iLS: ^ works; $ ends at the line's display end). Cap: cMax spans per line.
+// --------------------------------------------------------------------------------------------
+static int TvCollectMatches(const WCHAR* pText, int iLS, int iLE, int* pOutLo, int* pOutHi, int cMax)
+{
+    if (!g_bHiliteAll || szFind[0] == L'\0' || iView == VIEW_HEX || iLE <= iLS)
+    {
+        return 0;
+    }
+    int cOut = 0;
+    if (g_bRegexFind)
+    {
+        const std::wregex* pre = GetCachedRegex();
+        if (pre == nullptr)
+        {
+            return 0;
+        }
+        using std::regex_constants::match_default;
+        try
+        {
+            const WCHAR* pSeg = pText + iLS;
+            const WCHAR* pEnd = pText + iLE;
+            while (pSeg < pEnd && cOut < cMax)
+            {
+                // 6.00 rule: a match never spans an embedded NUL (the same
+                // segmented walk FindPatternFrom uses on the page).
+                const WCHAR* z = (const WCHAR*)wmemchr(pSeg, L'\0', (size_t)(pEnd - pSeg));
+                const WCHAR* segEnd = (z != nullptr) ? z : pEnd;
+                std::wcmatch m;
+                const WCHAR* cur = pSeg;
+                while (cur < segEnd && cOut < cMax)
+                {
+                    if (!std::regex_search(cur, segEnd, m, *pre, match_default))
+                    {
+                        break;
+                    }
+                    pOutLo[cOut] = (int)(m[0].first - pText);
+                    pOutHi[cOut] = (int)(m[0].second - pText);
+                    if (pOutHi[cOut] > pOutLo[cOut])
+                    {
+                        cOut++;
+                        cur = m[0].second;
+                    }
+                    else
+                    {
+                        cur = m[0].second + 1;      // empty match: advance one
+                    }
+                    if (cur <= m[0].first)
+                    {
+                        cur = m[0].first + 1;
+                    }
+                }
+                if (segEnd >= pEnd)
+                {
+                    break;
+                }
+                pSeg = segEnd + 1;
+            }
+        }
+        catch (...)
+        {
+            // too complex / out of memory: the overlay silently skips this line
+        }
+        return cOut;
+    }
+    int iOff = 0;
+    while (cOut < cMax)
+    {
+        int lo = -1, hi = -1;
+        if (!FxPlainScan(pText + iLS + iOff, iLE - iLS - iOff, &lo, &hi))
+        {
+            break;
+        }
+        pOutLo[cOut] = iLS + iOff + lo;
+        pOutHi[cOut] = iLS + iOff + hi;
+        cOut++;
+        iOff += hi;
+        if (hi <= 0)
+        {
+            break;                                  // defensive: always advance
+        }
+    }
+    return cOut;
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: FILTER LINES (Options > Filter Lines, Ctrl+Shift+G). The page shows only
+// the lines where the Find pattern matches (plain or regex; Match case / Whole
+// word apply). The full page is one ShowViewSafely() away: the toggle OFF
+// rebuilds it from the raw bytes, exactly like leaving the CSV table. While the
+// filter is on, g_pFilterOrig[iLine] is the ORIGINAL line number of each shown
+// line (the gutter labels and the status bar use it), bookmarks are suspended
+// (their lines mean nothing in the subset) and TailAppend falls back to a full
+// reload so the splice never lands on filtered text.
+// --------------------------------------------------------------------------------------------
+static bool FilterIsLineMatch(const WCHAR* p, int cch)
+{
+    if (cch <= 0)
+    {
+        return false;
+    }
+    if (g_bRegexFind)
+    {
+        const std::wregex* pre = GetCachedRegex();
+        if (pre == nullptr)
+        {
+            return false;
+        }
+        try
+        {
+            // 6.00 rule: no match spans an embedded NUL.
+            const WCHAR* pSeg = p;
+            const WCHAR* pEnd = p + cch;
+            while (pSeg < pEnd)
+            {
+                const WCHAR* z = (const WCHAR*)wmemchr(pSeg, L'\0', (size_t)(pEnd - pSeg));
+                const WCHAR* segEnd = (z != nullptr) ? z : pEnd;
+                std::wcmatch m;
+                if (std::regex_search(pSeg, segEnd, m, *pre, std::regex_constants::match_default))
+                {
+                    return true;
+                }
+                if (segEnd >= pEnd)
+                {
+                    break;
+                }
+                pSeg = segEnd + 1;
+            }
+        }
+        catch (...)
+        {
+            return false;
+        }
+        return false;
+    }
+    int lo = -1, hi = -1;
+    return FxPlainScan(p, cch, &lo, &hi);
+}
+
+static void FilterFreeOrig(void)
+{
+    delete[] g_pFilterOrig;
+    g_pFilterOrig = nullptr;
+    g_cFilterShown = 0;
+    g_cFilterTotal = 0;
+}
+
+static void ApplyFilterToPage(void)
+{
+    if (!g_bFilter || g_tv.pText == nullptr || g_tv.cch <= 0 || g_tv.pLineStarts == nullptr || iView == VIEW_HEX)
+    {
+        g_bFilter = false;
+        return;
+    }
+    const WCHAR* pText = g_tv.pText;
+    const int cLines = g_tv.cLines;
+    // Pass 1: which lines match (each line is tested ONCE: a regex filter made this the slow part, and
+    // pass 2 used to test every line again), and how big the filtered text becomes. pHit is one byte per
+    // line (a line-number array would cost 4 bytes per LINE of the page, on Win32 too).
+    BYTE* pHit = new (std::nothrow) BYTE[(size_t)cLines + 1];
+    if (pHit == nullptr)
+    {
+        StatusFlash(L"Not enough memory for the filter.");
+        return;
+    }
+    int cbTotal = 0;                            // characters (incl. the CRLF each kept line carries)
+    int cShown = 0;
+    for (int i = 0; i < cLines; i++)
+    {
+        const int iLS = g_tv.pLineStarts[i];
+        const int iLE = (i + 1 < cLines) ? g_tv.pLineStarts[i + 1] : g_tv.cch;
+        const int iDispEnd = TV_DispEnd(pText, iLS, iLE);    // excludes the line break
+        pHit[i] = FilterIsLineMatch(pText + iLS, iDispEnd - iLS) ? 1 : 0;
+        if (pHit[i] != 0)
+        {
+            cbTotal += iLE - iLS;
+            cShown++;
+        }
+    }
+    g_cFilterTotal = cLines;
+    if (cShown == 0)
+    {
+        delete[] pHit;
+        g_bFilter = false;
+        FilterFreeOrig();
+        WCHAR sz[160];
+        wsprintfW(sz, L"No line of the page matches \"%s\".", szFind);
+        StatusFlash(sz);
+        return;
+    }
+    WCHAR* pNew = AllocViewText((DWORD)cbTotal + 1);
+    int* pOrig = new (std::nothrow) int[cShown];
+    if (pNew == nullptr || pOrig == nullptr)
+    {
+        if (pNew != nullptr) FreeViewText(pNew);
+        delete[] pOrig;
+        delete[] pHit;
+        StatusFlash(L"Not enough memory for the filter.");
+        return;
+    }
+    // Pass 2: copy the kept lines (their raw slice, CRLF included).
+    int w = 0;
+    int k = 0;
+    for (int i = 0; i < cLines; i++)
+    {
+        if (pHit[i] != 0)
+        {
+            const int iLS = g_tv.pLineStarts[i];
+            const int iLE = (i + 1 < cLines) ? g_tv.pLineStarts[i + 1] : g_tv.cch;
+            const int n = iLE - iLS;
+            CopyMemory(pNew + w, pText + iLS, (size_t)n * sizeof(WCHAR));
+            w += n;
+            pOrig[k++] = i;
+        }
+    }
+    delete[] pHit;
+    pNew[w] = L'\0';
+    // Index + delivery. TV_SetText frees the FULL page text (the control points
+    // at it), so FilterClear rebuilds it from the raw bytes (ShowViewSafely).
+    int* pStarts = nullptr;
+    int cNewLines = 0;
+    int iMaxNew = 0;
+    if (!TV_BuildLineIndex(pNew, w, &pStarts, &cNewLines, &iMaxNew))
+    {
+        FreeViewText(pNew);
+        delete[] pOrig;
+        StatusFlash(L"Not enough memory for the filter.");
+        return;
+    }
+    FilterFreeOrig();
+    g_pFilterOrig = pOrig;
+    g_cFilterShown = cShown;
+    SendMessage(hEdit, WM_SETREDRAW, FALSE, 0);
+    if (g_pViewText != nullptr && g_pViewText != pNew)
+    {
+        FreeViewText(g_pViewText);
+    }
+    g_pViewText = pNew;
+    TV_SetText(pNew, w, pStarts, cNewLines, iMaxNew);
+    TV_SetSel(0, 0);
+    TV_ScrollCaret();
+    LayoutEdit();
+    SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hEdit, nullptr, FALSE);
+    WCHAR sz[160];
+    wsprintfW(sz, L"Filter: %d of %d lines match.", cShown, cLines);
+    StatusFlash(sz);
+    UpdateStatusBar(true);
+}
+
+static void FilterClear(bool bRebuild)
+{
+    if (!g_bFilter)
+    {
+        return;
+    }
+    g_bFilter = false;
+    FilterFreeOrig();
+    if (bRebuild && pFileBytes != nullptr && cbFile > 0 && iView != VIEW_HEX)
+    {
+        ShowViewSafely();                       // the full page, from the raw bytes
+    }
+}
+
+void ToggleFilter(void)
+{
+    if (g_bFilter)
+    {
+        FilterClear(true);
+        UpdateViewMenu();
+        StatusFlash(L"Filter off.");
+        return;
+    }
+    if (iView == VIEW_HEX)
+    {
+        StatusFlash(L"The filter works on text views.");
+        return;
+    }
+    if (g_tv.pText == nullptr || g_tv.cch <= 0)
+    {
+        StatusFlash(L"No text to filter.");
+        return;
+    }
+    if (szFind[0] == L'\0')
+    {
+        StatusFlash(L"Type a Find pattern first (Ctrl+F), then Filter Lines again.");
+        OpenFindDialog(hWndMain);
+        return;
+    }
+    g_bFilter = true;
+    ApplyFilterToPage();
+    UpdateViewMenu();
+}
+
+void ToggleHiliteAll(void)
+{
+    g_bHiliteAll = !g_bHiliteAll;
+    UpdateViewMenu();
+    if (hEdit != nullptr)
+    {
+        InvalidateRect(hEdit, nullptr, FALSE);  // the overlay follows the toggle
+    }
+    StatusFlash(g_bHiliteAll ? L"Highlight matches ON." : L"Highlight matches OFF.");
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: the change watcher (outside tail). The tail's own timer tick calls this
+// when tail is OFF: one GetFileAttributesExW per 2 s, and only while a real file
+// is on screen. A changed file flashes a notice until F5 (or any reload) shows
+// the new content and re-bases the watcher.
+// --------------------------------------------------------------------------------------------
+void WatchTick(void)
+{
+    if (!g_bWatch || g_bTail || g_szCurrentFile[0] == L'\0' || g_pJob != nullptr || g_bInByteSearch || g_cbFileTotal == 0)
+    {
+        return;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExW(g_szCurrentFile, GetFileExInfoStandard, &fad))
+    {
+        return;
+    }
+    const ULONGLONG cbSize = ((ULONGLONG)fad.nFileSizeHigh << 32) | (ULONGLONG)fad.nFileSizeLow;
+    const bool bChanged = (cbSize != g_cbWatchSize ||
+        fad.ftLastWriteTime.dwLowDateTime != g_ftWatch.dwLowDateTime ||
+        fad.ftLastWriteTime.dwHighDateTime != g_ftWatch.dwHighDateTime);
+    if (bChanged)
+    {
+        StatusFlash(L"File changed on disk \x2014 F5 reloads it.");
+        g_bWatchDirty = true;
+    }
+}
+
+static void WatchResetBaseline(void)
+{
+    g_bWatchDirty = false;
+    if (g_szCurrentFile[0] == L'\0')
+    {
+        g_cbWatchSize = 0;
+        g_ftWatch.dwLowDateTime = 0;
+        g_ftWatch.dwHighDateTime = 0;
+        return;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExW(g_szCurrentFile, GetFileExInfoStandard, &fad))
+    {
+        g_cbWatchSize = ((ULONGLONG)fad.nFileSizeHigh << 32) | (ULONGLONG)fad.nFileSizeLow;
+        g_ftWatch = fad.ftLastWriteTime;
+    }
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: FILE OFFSET OF THE CARET (the whole-file find starts where the page
+// search stopped). Hex: the dump's fixed row arithmetic. Text: the line's first
+// byte plus the byte walk of the caret's chars within the line.
+// --------------------------------------------------------------------------------------------
+static ULONGLONG CaretFileOffset(void)
+{
+    DWORD dwS = 0, dwE = 0;
+    EditGetSel(dwS, dwE);
+    if (iView == VIEW_HEX)
+    {
+        const int iLine = TV_LineFromChar((int)dwE);
+        ULONGLONG qwOff = g_qwBase + (ULONGLONG)((iLine < 0) ? 0 : iLine) * (ULONGLONG)(HexBpl()) +
+            (ULONGLONG)HexByteOfCol((int)(dwE - (DWORD)TV_LineIndex((iLine < 0) ? 0 : iLine)));
+        if (g_cbFileTotal > 0 && qwOff >= g_cbFileTotal)
+        {
+            qwOff = (g_cbFileTotal > 0) ? g_cbFileTotal - 1 : 0;
+        }
+        return qwOff;
+    }
+    ULONGLONG qwOff = 0;
+    if (CharToFileOffset((int)dwE, &qwOff))
+    {
+        return qwOff;
+    }
+    return g_qwBase;                            // best effort: the page start
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: WHOLE-FILE FIND. The page search failed: the worker decodes the rest of
+// the file with the ACTIVE view's rules and reports the first hit as a byte
+// offset; the UI jumps there (GoToOffset) and SELECTS the hit once the page
+// lands (g_qwPendingGoto + g_qwPendingHitLen in ApplyLoadResult). Shares the
+// Find Bytes gate (g_bInByteSearch), its cancel flag, its progress message and
+// its done message: g_bWFActive decides who the done belongs to.
+//
+// Chunking: every chunk ENDS right after a line break (or on a character
+// boundary — WfChunkEnd), so a multi-byte sequence is never cut and a plain
+// pattern (which cannot contain a line break) can never straddle a border. The
+// plain case-sensitive / ASCII-case-insensitive scan runs on the RAW BYTES
+// (memchr + memcmp, the ScanForPattern pattern); a regex, a whole-word search
+// and a case-insensitive pattern with non-ASCII characters run on the DECODED
+// chunk, and their hit maps back to bytes with WfBytesOfChars.
+// --------------------------------------------------------------------------------------------
+struct WfHit { ULONGLONG qwOff; int cch; };
+
+// the byte encoding of szFind for the byte-level scan; false = use the decode path
+static bool WfEncodePattern(int iView, BYTE* pOut, DWORD cbOut, DWORD* pcbOut, bool* pbAsciiFold)
+{
+    *pbAsciiFold = false;
+    int cb = 0;
+    if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+    {
+        // 6.23: WCHAR is 16-bit; expand surrogate pairs and cast to DWORD before >>24/16
+        // (MSVC C4333 on bare WCHAR shifts of 24).
+        const bool bBE = (iView == VIEW_UTF32BE);
+        const int nW = lstrlenW(szFind);
+        for (int k = 0; k < nW; k++)
+        {
+            if (cb + 4 > (int)cbOut)
+            {
+                return false;
+            }
+            DWORD uc = (DWORD)(WCHAR)szFind[k];
+            if (uc >= 0xD800 && uc <= 0xDBFF && k + 1 < nW)
+            {
+                const DWORD lo = (DWORD)(WCHAR)szFind[k + 1];
+                if (lo >= 0xDC00 && lo <= 0xDFFF)
+                {
+                    uc = 0x10000 + ((uc - 0xD800) << 10) + (lo - 0xDC00);
+                    k++;
+                }
+            }
+            if (bBE)
+            {
+                pOut[cb++] = (BYTE)(uc >> 24); pOut[cb++] = (BYTE)(uc >> 16);
+                pOut[cb++] = (BYTE)(uc >> 8);  pOut[cb++] = (BYTE)uc;
+            }
+            else
+            {
+                pOut[cb++] = (BYTE)uc;         pOut[cb++] = (BYTE)(uc >> 8);
+                pOut[cb++] = (BYTE)(uc >> 16); pOut[cb++] = (BYTE)(uc >> 24);
+            }
+        }
+        *pcbOut = (DWORD)cb;
+        return true;
+    }
+    if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+    {
+        const bool bBE = (iView == VIEW_UTF16BE);
+        const int nUnits = lstrlenW(szFind);
+        for (int k = 0; k < nUnits; k++)
+        {
+            if (cb + 2 > (int)cbOut)
+            {
+                return false;
+            }
+            const BYTE bLo = (BYTE)(szFind[k] & 0xFF);
+            const BYTE bHi = (BYTE)((szFind[k] >> 8) & 0xFF);
+            pOut[cb++] = (bBE) ? bHi : bLo;
+            pOut[cb++] = (bBE) ? bLo : bHi;
+        }
+        *pcbOut = (DWORD)cb;
+        return true;
+    }
+    if (iView == VIEW_ANSI)
+    {
+        BOOL bDefUsed = FALSE;
+        cb = WideCharToMultiByte(g_uAnsiCP, 0, szFind, -1, (LPSTR)pOut, (int)cbOut - 1, nullptr, &bDefUsed);
+        if (cb <= 0 || bDefUsed)
+        {
+            return false;                       // not representable: decode path
+        }
+        *pcbOut = (DWORD)(cb - 1);
+        return true;
+    }
+    if (iView == VIEW_UTF8)
+    {
+        cb = WideCharToMultiByte(CP_UTF8, 0, szFind, -1, (LPSTR)pOut, (int)cbOut - 1, nullptr, nullptr);
+        if (cb <= 0)
+        {
+            return false;
+        }
+        *pcbOut = (DWORD)(cb - 1);
+        return true;
+    }
+    return false;                               // EBCDIC / hex: decode path
+}
+
+// raw-byte scan (exact); returns the ABSOLUTE offset or (ULONGLONG)-1
+static ULONGLONG WfScanBytes(const BYTE* p, DWORD cb, ULONGLONG qwBase, const BYTE* pPat, DWORD cbPat, bool bFold)
+{
+    if (cbPat == 0 || cbPat > cb)
+    {
+        return (ULONGLONG)-1;
+    }
+    const DWORD cbLast = cb - cbPat;
+    BYTE b0 = pPat[0];
+    BYTE b0Lo = b0;
+    if (bFold && b0 >= 'A' && b0 <= 'Z')
+    {
+        b0Lo = (BYTE)(b0 + 32);
+    }
+    DWORD i = 0;
+    while (i <= cbLast)
+    {
+        if (!bFold)
+        {
+            const BYTE* pM = (const BYTE*)memchr(p + i, b0, (size_t)(cbLast - i + 1));
+            if (pM == nullptr)
+            {
+                return (ULONGLONG)-1;           // no more candidates in this chunk
+            }
+            i = (DWORD)(pM - p);
+        }
+        else
+        {
+            BYTE a0 = p[i];
+            if (a0 >= 'A' && a0 <= 'Z')
+            {
+                a0 = (BYTE)(a0 + 32);
+            }
+            if (a0 != b0Lo)
+            {
+                i++;
+                continue;
+            }
+        }
+        DWORD k = 1;
+        for (; k < cbPat; k++)
+        {
+            BYTE a = p[i + k], b = pPat[k];
+            if (bFold)
+            {
+                if (a >= 'A' && a <= 'Z') a = (BYTE)(a + 32);
+                if (b >= 'A' && b <= 'Z') b = (BYTE)(b + 32);
+            }
+            if (a != b)
+            {
+                break;
+            }
+        }
+        if (k == cbPat)
+        {
+            return qwBase + (ULONGLONG)i;
+        }
+        i++;
+    }
+    return (ULONGLONG)-1;
+}
+
+// one decoded chunk (no newline normalization; the worker owns the buffer)
+struct WfChunk
+{
+    WCHAR* pText;
+    int cch;
+};
+
+static bool WfDecodeChunk(int iView, UINT uCP, const BYTE* p, DWORD cb, ULONGLONG qwAbsBase, WfChunk* pOut)
+{
+    pOut->pText = nullptr;
+    pOut->cch = 0;
+    DWORD off = 0;                              // a BOM at file offset 0 decodes to no character
+    if (qwAbsBase == 0)
+    {
+        if ((iView == VIEW_UTF16 || iView == VIEW_UTF16BE) && cb >= 2 &&
+            ((iView == VIEW_UTF16BE) ? (p[0] == 0xFE && p[1] == 0xFF) : (p[0] == 0xFF && p[1] == 0xFE)))
+        {
+            off = 2;
+        }
+        else if ((iView == VIEW_UTF32 || iView == VIEW_UTF32BE) && cb >= 4 &&
+            ((iView == VIEW_UTF32BE) ? (p[0] == 0x00 && p[1] == 0x00 && p[2] == 0xFE && p[3] == 0xFF)
+                                     : (p[0] == 0xFF && p[1] == 0xFE && p[2] == 0x00 && p[3] == 0x00)))
+        {
+            off = 4;
+        }
+    }
+    p += off;
+    cb -= off;
+    WCHAR* pText = new (std::nothrow) WCHAR[(size_t)cb + 1];
+    if (pText == nullptr)
+    {
+        return false;
+    }
+    int cch = 0;
+    if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+    {
+        const bool bBE = (iView == VIEW_UTF16BE);
+        const int cwch = (int)(cb / 2);
+#if WCHAR_MAX <= 0xFFFF
+        if (!bBE)
+        {
+            CopyMemory(pText, p, (size_t)cwch * 2);
+        }
+        else
+        {
+            for (int i = 0; i < cwch; i++)
+            {
+                pText[i] = (WCHAR)(((WCHAR)p[(DWORD)i * 2] << 8) | (WCHAR)p[(DWORD)i * 2 + 1]);
+            }
+        }
+#else
+        for (int i = 0; i < cwch; i++)
+        {
+            const WORD w = bBE ? (WORD)(((WORD)p[(DWORD)i * 2] << 8) | (WORD)p[(DWORD)i * 2 + 1])
+                               : (WORD)((WORD)p[(DWORD)i * 2] | ((WORD)p[(DWORD)i * 2 + 1] << 8));
+            pText[i] = (WCHAR)w;
+        }
+#endif
+        cch = cwch;
+    }
+    else if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+    {
+        const bool bBE = (iView == VIEW_UTF32BE);
+        for (DWORD k = 0; k + 4 <= cb; k += 4)
+        {
+            const DWORD uc = bBE ? (((DWORD)p[k] << 24) | ((DWORD)p[k + 1] << 16) | ((DWORD)p[k + 2] << 8) | (DWORD)p[k + 3])
+                                 : (((DWORD)p[k + 3] << 24) | ((DWORD)p[k + 2] << 16) | ((DWORD)p[k + 1] << 8) | (DWORD)p[k]);
+            if (uc >= 0x10000 && uc <= 0x10FFFF && cch + 2 <= (int)(cb + 1))
+            {
+                const DWORD u2 = uc - 0x10000;
+                pText[cch++] = (WCHAR)(0xD800 + (u2 >> 10));
+                pText[cch++] = (WCHAR)(0xDC00 + (u2 & 0x3FF));
+            }
+            else if (cch < (int)cb)
+            {
+                pText[cch++] = (WCHAR)uc;       // BMP, or a lone surrogate folded in
+            }
+        }
+    }
+    else if (iView == VIEW_EBCDIC)
+    {
+        for (DWORD k = 0; k < cb; k++)
+        {
+            pText[cch++] = g_EbcdicTable.w[p[k]];
+        }
+    }
+    else
+    {
+        cch = MultiByteToWideChar((iView == VIEW_UTF8) ? CP_UTF8 : uCP, 0, (LPCSTR)p, (int)cb, pText, (int)cb);
+        if (cch < 0)
+        {
+            cch = 0;
+        }
+    }
+    pOut->pText = pText;
+    pOut->cch = cch;
+    return true;
+}
+
+// the scan on the DECODED chunk: plain (whole-word / non-ASCII fold) or regex
+static bool WfScanChunkText(const WfChunk* pChunk, int iView, UINT uCP, const std::wregex* pre,
+    ULONGLONG qwChunkBase, const BYTE* pRaw, DWORD cbRaw, WfHit* pHit)
+{
+    const WCHAR* pT = pChunk->pText;
+    const int cchT = pChunk->cch;
+    if (pT == nullptr || cchT <= 0)
+    {
+        return false;
+    }
+    int iHit = -1, cchHit = 0;
+    if (pre != nullptr)
+    {
+        try
+        {
+            const WCHAR* pSeg = pT;
+            const WCHAR* pEnd = pT + cchT;
+            while (pSeg < pEnd && iHit < 0)
+            {
+                const WCHAR* z = (const WCHAR*)wmemchr(pSeg, L'\0', (size_t)(pEnd - pSeg));
+                const WCHAR* segEnd = (z != nullptr) ? z : pEnd;
+                std::wcmatch m;
+                // line-scoped when the pattern carries an anchor (6.06 rule)
+                if (wcschr(szFind, L'^') != nullptr || wcschr(szFind, L'$') != nullptr)
+                {
+                    const WCHAR* pL = pSeg;
+                    for (;;)
+                    {
+                        const WCHAR* pNl = (pL < segEnd) ? (const WCHAR*)wmemchr(pL, L'\n', (size_t)(segEnd - pL)) : nullptr;
+                        const WCHAR* pLineEnd = (pNl != nullptr) ? pNl : segEnd;
+                        if (pLineEnd > pL && pLineEnd[-1] == L'\r')
+                        {
+                            pLineEnd--;
+                        }
+                        const bool bAtLineStart = (pL == pT) || (pL[-1] == L'\n');
+                        if (pLineEnd > pL &&
+                            std::regex_search(pL, pLineEnd, m, *pre,
+                                bAtLineStart ? std::regex_constants::match_default : std::regex_constants::match_prev_avail))
+                        {
+                            iHit = (int)(m[0].first - pT);
+                            cchHit = (int)m.length(0);
+                            break;
+                        }
+                        if (pNl == nullptr || pNl + 1 >= segEnd)
+                        {
+                            break;
+                        }
+                        pL = pNl + 1;
+                    }
+                }
+                else
+                {
+                    if (std::regex_search(pSeg, segEnd, m, *pre,
+                        (pSeg > pT) ? std::regex_constants::match_prev_avail : std::regex_constants::match_default))
+                    {
+                        iHit = (int)(m[0].first - pT);
+                        cchHit = (int)m.length(0);
+                    }
+                }
+                if (segEnd >= pEnd)
+                {
+                    break;
+                }
+                pSeg = segEnd + 1;
+            }
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+    else
+    {
+        // FxPlainScan applies Match case / Whole word itself (the flags of the
+        // Find dialog); the chunk starts on a line boundary, so a candidate at
+        // its edge sees a correct word break on the left.
+        int iScan = 0;
+        while (iScan <= cchT && iHit < 0)
+        {
+            int lo = -1, hi = -1;
+            if (!FxPlainScan(pT + iScan, cchT - iScan, &lo, &hi))
+            {
+                break;
+            }
+            iHit = iScan + lo;
+            cchHit = hi - lo;
+        }
+    }
+    if (iHit < 0 || cchHit <= 0)
+    {
+        return false;
+    }
+    const DWORD cbInto = WfBytesOfChars(iView, uCP, pRaw, cbRaw, iHit, qwChunkBase);
+    pHit->qwOff = qwChunkBase + (ULONGLONG)cbInto;
+    pHit->cch = cchHit;
+    return true;
+}
+
+// where a chunk may END without cutting a multi-byte sequence (see the block
+// comment). pProbe is the mapped file (LF-preferred boundaries) or nullptr — the
+// ReadFile fallback back-aligns only (no bytes to peek at).
+static ULONGLONG WfChunkEnd(int iView, const BYTE* pProbe, ULONGLONG cbFile, ULONGLONG qwTarget)
+{
+    if (qwTarget >= cbFile)
+    {
+        return cbFile;
+    }
+    if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
+    {
+        return qwTarget & ~(ULONGLONG)1;
+    }
+    if (iView == VIEW_UTF32 || iView == VIEW_UTF32BE)
+    {
+        return qwTarget & ~(ULONGLONG)3;
+    }
+    if (iView == VIEW_EBCDIC)
+    {
+        return qwTarget;                        // 1 byte = 1 char, any boundary works
+    }
+    if (pProbe != nullptr)
+    {
+        // UTF-8 / ANSI: prefer the byte right after a line break (no sequence
+        // cut; a DBCS trail byte and a UTF-8 continuation byte are never 0x0A).
+        ULONGLONG qwScanEnd = qwTarget + 65536;
+        if (qwScanEnd > cbFile)
+        {
+            qwScanEnd = cbFile;
+        }
+        const BYTE* pNl = (const BYTE*)memchr(pProbe + qwTarget, 0x0A, (size_t)(qwScanEnd - qwTarget));
+        if (pNl != nullptr)
+        {
+            return (ULONGLONG)(pNl - pProbe) + 1;
+        }
+    }
+    ULONGLONG q = qwTarget;                     // fallback: back up onto a boundary
+    if (iView == VIEW_UTF8)
+    {
+        while (q > 0 && (pProbe[q] & 0xC0) == 0x80)
+        {
+            q--;
+        }
+    }
+    else
+    {
+        if (q > 0 && IsDBCSLeadByteEx(g_uAnsiCP, pProbe[q - 1]))
+        {
+            q--;
+        }
+    }
+    return q;
+}
+
+// 6.23: SEH body isolated from std::wregex (MSVC forbids __try in a function that
+// needs C++ object unwinding). Locals here are POD / raw pointers only.
+struct WfScanCtx
+{
+    HANDLE hFile;
+    const BYTE* pView;
+    BYTE* pBuf;
+    ULONGLONG cbSearch;
+    ULONGLONG qwStart;
+    int iViewWf;
+    UINT uCPWf;
+    const BYTE* abPat;
+    DWORD cbPat;
+    bool bByteScan;
+    bool bFold;
+    const std::wregex* pre;
+};
+
+static void WfScanBody(WfScanCtx* c, bool* pbFound, bool* pbCancel, bool* pbError)
+{
+    *pbFound = false;
+    *pbCancel = false;
+    *pbError = false;
+    ULONGLONG qwNextPost = GetTickCount64() + 100;
+    const ULONGLONG qwStart = c->qwStart;
+    const int iViewWf = c->iViewWf;
+    const UINT uCPWf = c->uCPWf;
+    const BYTE* pView = c->pView;
+    BYTE* pBuf = c->pBuf;
+    HANDLE hFile = c->hFile;
+    const ULONGLONG cbSearch = c->cbSearch;
+    const bool bByteScan = c->bByteScan;
+    const bool bFold = c->bFold;
+    const BYTE* abPat = c->abPat;
+    const DWORD cbPat = c->cbPat;
+    const std::wregex* pre = c->pre;
+    __try
+    {
+
+    for (int pass = 0; pass < 2 && !*pbFound && !*pbCancel; pass++)
+    {
+        const ULONGLONG qwFrom = (pass == 0) ? qwStart : 0;
+        const ULONGLONG qwTo = (pass == 0) ? (ULONGLONG)-1 : (qwStart + 1);
+        if (pass == 1 && qwStart == 0)
+        {
+            break;
+        }
+        ULONGLONG qwPos = qwFrom;
+        while (!*pbFound && !*pbCancel)
+        {
+            if (qwPos >= cbSearch || qwPos >= qwTo)
+            {
+                break;
+            }
+            const BYTE* pProbe = pView;         // the ReadFile fallback back-aligns only
+            ULONGLONG qwEnd = WfChunkEnd(iViewWf, pProbe, cbSearch, qwPos + CB_READ_CHUNK);
+            if (qwEnd > qwTo)
+            {
+                qwEnd = WfChunkEnd(iViewWf, pProbe, cbSearch, qwTo);
+            }
+            ULONGLONG qwStride = (iViewWf == VIEW_UTF32 || iViewWf == VIEW_UTF32BE) ? 4 : (iViewWf == VIEW_UTF16 || iViewWf == VIEW_UTF16BE) ? 2 : 1;
+            if (qwEnd <= qwPos)
+            {
+                qwEnd = qwPos + qwStride;       // the wrap limit cut a chunk: advance minimally
+            }
+            if (qwEnd > cbSearch)
+            {
+                qwEnd = cbSearch;
+            }
+            ULONGLONG qwScanEnd = qwEnd + (bByteScan ? 512 : 0);   // the straddle zone (LF-aligned chunks never need it, the fallback may)
+            if (qwScanEnd > cbSearch)
+            {
+                qwScanEnd = cbSearch;
+            }
+            const BYTE* pChunk = nullptr;
+            if (pView != nullptr)
+            {
+                pChunk = pView + qwPos;
+            }
+            else
+            {
+                LARGE_INTEGER li;
+                li.QuadPart = (LONGLONG)qwPos;
+                if (!SetFilePointerEx(hFile, li, nullptr, FILE_BEGIN))
+                {
+                    *pbError = true;
+                    break;
+                }
+                DWORD cbRead = 0;
+                if (!ReadFile(hFile, pBuf, (DWORD)(qwScanEnd - qwPos), &cbRead, nullptr) || cbRead != (DWORD)(qwScanEnd - qwPos))
+                {
+                    *pbError = true;
+                    break;
+                }
+                pChunk = pBuf;
+            }
+            const DWORD cbChunk = (DWORD)(qwScanEnd - qwPos);
+            WfHit hit = { (ULONGLONG)-1, 0 };
+            if (bByteScan)
+            {
+                const ULONGLONG qwHit = WfScanBytes(pChunk, cbChunk, qwPos, abPat, cbPat, bFold);
+                if (qwHit != (ULONGLONG)-1)
+                {
+                    hit.qwOff = qwHit;
+                    hit.cch = lstrlenW(szFind);
+                }
+            }
+            else
+            {
+                WfChunk chunk;
+                if (!WfDecodeChunk(iViewWf, uCPWf, pChunk, cbChunk, qwPos, &chunk))
+                {
+                    *pbError = true;
+                    break;
+                }
+                (void)WfScanChunkText(&chunk, iViewWf, uCPWf, pre, qwPos, pChunk, cbChunk, &hit);
+                delete[] chunk.pText;
+            }
+            if (hit.qwOff != (ULONGLONG)-1)
+            {
+                g_qwWFHit = hit.qwOff;
+                g_cchWFHit = hit.cch;
+                *pbFound = true;
+                break;
+            }
+            qwPos = qwEnd;                      // next chunk starts on the aligned boundary
+            ULONGLONG qwNow = GetTickCount64();
+            if (qwNow >= qwNextPost)
+            {
+                PostMessage(hWndMain, WM_APP_SEARCHPROGRESS, (WPARAM)(DWORD)qwPos, (LPARAM)(DWORD)(qwPos >> 32));
+                qwNextPost = qwNow + 100;
+            }
+            *pbCancel = (InterlockedExchange(&g_bSearchCancel, 0) != 0);
+        }
+    }
+    
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        *pbError = true;
+    }
+}
+
+unsigned __stdcall WFSearchThreadProc(void* pParameter)
+{
+    UNREFERENCED_PARAMETER(pParameter);
+    HANDLE hFile = CreateFileW(g_szWFFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        PostSearchDone(2);
+        return(0);
+    }
+    const int iViewWf = iView;                  // snapshot: the UI may switch views mid-scan
+    const UINT uCPWf = g_uAnsiCP;
+    const bool bRegex = g_bRegexFind;
+    const std::wregex* pre = nullptr;
+    std::wregex rxLocal;
+    if (bRegex && szFind[0] != L'\0')
+    {
+        // a PRIVATE compiled regex: the UI thread may re-build the shared cache
+        // while this worker is running (GetCachedRegex is not thread-safe to rebuild)
+        try
+        {
+            std::regex_constants::syntax_option_type opts = std::regex_constants::ECMAScript;
+            if ((fr.Flags & FR_MATCHCASE) == 0)
+            {
+                opts |= std::regex_constants::icase;
+            }
+            rxLocal.assign(szFind, opts);
+            pre = &rxLocal;
+        }
+        catch (...)
+        {
+            pre = nullptr;
+        }
+        if (pre == nullptr)
+        {
+            CloseHandle(hFile);
+            PostSearchDone(3);                  // 6.22: the regular expression is invalid
+            return(0);
+        }
+    }
+    BYTE abPat[512];
+    DWORD cbPat = 0;
+    bool bByteScan = false;
+    bool bFold = false;
+    if (pre == nullptr && !(fr.Flags & FR_WHOLEWORD))
+    {
+        bByteScan = WfEncodePattern(iViewWf, abPat, sizeof(abPat), &cbPat, &bFold);
+        if (bByteScan && !(fr.Flags & FR_MATCHCASE))
+        {
+            bool bAsciiOnly = true;
+            for (int k = 0; szFind[k] != L'\0'; k++)
+            {
+                if (szFind[k] >= 0x80) { bAsciiOnly = false; break; }
+            }
+            if (!bAsciiOnly)
+            {
+                bByteScan = false;              // fold a non-ASCII alphabet: decode path
+            }
+        }
+    }
+    HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    const BYTE* pView = nullptr;
+    ULONGLONG cbSearch = 0;
+    if (hMap != nullptr)
+    {
+        LARGE_INTEGER liSize;
+        if (GetFileSizeEx(hFile, &liSize) && liSize.QuadPart > 0)
+        {
+            pView = (const BYTE*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+            if (pView != nullptr)
+            {
+                cbSearch = (ULONGLONG)liSize.QuadPart;
+            }
+        }
+    }
+    BYTE* pBuf = nullptr;
+    const DWORD cbBuf = CB_READ_CHUNK + 512;    // 512: the byte-scan's straddle zone (max pattern = 512 bytes)
+    if (pView == nullptr)
+    {
+        pBuf = new (std::nothrow) BYTE[cbBuf];
+        if (pBuf == nullptr)
+        {
+            if (hMap != nullptr) CloseHandle(hMap);
+            CloseHandle(hFile);
+            PostSearchDone(2);
+            return(0);
+        }
+    }
+    bool bFound = false, bCancel = false, bError = false;
+    {
+        WfScanCtx ctx = {};
+        ctx.hFile = hFile;
+        ctx.pView = pView;
+        ctx.pBuf = pBuf;
+        ctx.cbSearch = cbSearch;
+        ctx.qwStart = g_qwWFRange;
+        ctx.iViewWf = iViewWf;
+        ctx.uCPWf = uCPWf;
+        ctx.abPat = abPat;
+        ctx.cbPat = cbPat;
+        ctx.bByteScan = bByteScan;
+        ctx.bFold = bFold;
+        ctx.pre = pre;
+        WfScanBody(&ctx, &bFound, &bCancel, &bError);
+    }
+    delete[] pBuf;
+    if (pView != nullptr)
+    {
+        UnmapViewOfFile(pView);
+    }
+    if (hMap != nullptr)
+    {
+        CloseHandle(hMap);
+    }
+    CloseHandle(hFile);
+    PostSearchDone(bFound ? 1 : (bCancel ? 0 : (bError ? 2 : 0xFFFFFFFF)));
+    return(0);
+}
+
+// F3 found nothing on the page: continue on the WHOLE file (a real file only).
+static void StartWholeFileFind(void)
+{
+    if (g_szCurrentFile[0] == L'\0')
+    {
+        return;                                 // stdin / clipboard: the caller keeps its message
+    }
+    if (g_pJob != nullptr || g_bInByteSearch)
+    {
+        StatusFlash(L"Still busy; try again in a moment.");
+        return;
+    }
+    g_bWFActive = true;
+    g_qwWFHit = (ULONGLONG)-1;
+    g_cchWFHit = 0;
+    g_qwWFRange = (iView == VIEW_HEX || !g_bFilter) ? CaretFileOffset() : g_qwBase;
+    (void)lstrcpynW(g_szWFFile, g_szCurrentFile, MAX_PATH);     // the worker reads its OWN snapshot (a page load may land mid-scan)
+    InterlockedExchange(&g_bSearchCancel, 0);
+    g_bInByteSearch = true;
+    uintptr_t uThread = _beginthreadex(nullptr, 0, WFSearchThreadProc, nullptr, 0, nullptr);
+    if (uThread == 0)
+    {
+        g_bInByteSearch = false;
+        g_bWFActive = false;
+        StatusFlash(L"Not enough memory to start the search.");
+    }
+    else
+    {
+        g_hSearchThread = (HANDLE)uThread;
+    }
+}
+
+// --------------------------------------------------------------------------------------------
+// --------------------------------------------------------------------------------------------
+// 6.23: FILE > FILE HASH. One sequential read feeds several BCrypt digests at once
+// (MD5, SHA-1, SHA-256, SHA-512). CRC32 is not offered by BCrypt and is intentionally
+// omitted. ESC or the window closing stops the worker at the next chunk. The result
+// lands in a MessageBox and the clipboard.
+// --------------------------------------------------------------------------------------------
+
+
+// --------------------------------------------------------------------------------------------
+// 6.24: CRC-32 (ISO 3309 / PNG / Ethernet poly 0xEDB88320). Not available via BCrypt;
+// a 1 KB table is the standard approach. Seed 0xFFFFFFFF, final XOR 0xFFFFFFFF.
+// --------------------------------------------------------------------------------------------
+// 7.01: slicing-by-N CRC-32. x86 (Win32) has too few registers for eight table lookups in flight (the
+// extra ones spill to the stack), so it uses slicing-by-4; x64 keeps slicing-by-8.
+#if defined(_M_IX86) || defined(__i386__)
+#define CRC_SLICES 4
+#else
+#define CRC_SLICES 8
+#endif
+
+struct Crc32Tables                              // CRC_SLICES x 1 KB, built once by the magic static below
+{
+    DWORD t[CRC_SLICES][256];
+    Crc32Tables()
+    {
+        for (DWORD i = 0; i < 256; i++)
+        {
+            DWORD c = i;
+            for (int k = 0; k < 8; k++)
+            {
+                c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            }
+            t[0][i] = c;
+        }
+        for (DWORD i = 0; i < 256; i++)
+        {
+            for (int s = 1; s < CRC_SLICES; s++)
+            {
+                t[s][i] = (t[s - 1][i] >> 8) ^ t[0][t[s - 1][i] & 0xFF];
+            }
+        }
+    }
+};
+
+static DWORD Crc32Update(DWORD crc, const BYTE* p, DWORD cb)
+{
+    static const Crc32Tables s_tab;             // C++11: thread-safe one-time init (the hash worker and the UI both arrive here)
+    const DWORD (*t)[256] = s_tab.t;
+#if CRC_SLICES == 8
+    while (cb >= 8)
+    {
+        const DWORD a = crc ^ ((DWORD)p[0] | ((DWORD)p[1] << 8) | ((DWORD)p[2] << 16) | ((DWORD)p[3] << 24));
+        const DWORD b = (DWORD)p[4] | ((DWORD)p[5] << 8) | ((DWORD)p[6] << 16) | ((DWORD)p[7] << 24);
+        crc = t[7][a & 0xFF] ^ t[6][(a >> 8) & 0xFF] ^ t[5][(a >> 16) & 0xFF] ^ t[4][a >> 24] ^
+              t[3][b & 0xFF] ^ t[2][(b >> 8) & 0xFF] ^ t[1][(b >> 16) & 0xFF] ^ t[0][b >> 24];
+        p += 8;
+        cb -= 8;
+    }
+#else
+    while (cb >= 4)
+    {
+        const DWORD a = crc ^ ((DWORD)p[0] | ((DWORD)p[1] << 8) | ((DWORD)p[2] << 16) | ((DWORD)p[3] << 24));
+        crc = t[3][a & 0xFF] ^ t[2][(a >> 8) & 0xFF] ^ t[1][(a >> 16) & 0xFF] ^ t[0][a >> 24];
+        p += 4;
+        cb -= 4;
+    }
+#endif
+    while (cb-- != 0)
+    {
+        crc = t[0][(crc ^ *p++) & 0xFF] ^ (crc >> 8);
+    }
+    return crc;
+}
+
+static DWORD Crc32Of(const BYTE* p, DWORD cb)
+{
+    return Crc32Update(0xFFFFFFFFu, p, cb) ^ 0xFFFFFFFFu;
+}
+
+// Hex layout geometry (6.24). Classic 16-byte line with mid gap used columns
+// 0..47 for "XX " x16 and ASCII at 50. General form: 3 chars per byte, plus one
+// extra space after every group (except possibly the last of the line).
+static int HexAsciiCol(void)
+{
+    const int bpl = HexBpl();
+    const int grp = HexGrp();
+    int col = 0;
+    for (int i = 0; i < bpl; i++)
+    {
+        col += 3;                               // "XX "
+        if (grp > 0 && ((i + 1) % grp) == 0 && (i + 1) < bpl)
+        {
+            col += 1;                           // group gap
+        }
+    }
+    return col + 1;                             // one space before ASCII
+}
+
+static int HexLineChars(void)
+{
+    // hex area up to ASCII col, then bpl ASCII chars, then CRLF
+    const int bpl = HexBpl();
+    return HexAsciiCol() + bpl + 2;
+}
+
+struct HashAlgSlot
+{
+    LPCWSTR pszBcrypt;
+    LPCWSTR pszLabel;
+    DWORD   cbDigest;
+    BCRYPT_HASH_HANDLE hHash;
+    BYTE*   pObj;
+    DWORD   cbObj;
+    BYTE    abDigest[64];
+};
+
+static void HashAppendHex(WCHAR*& p, const BYTE* ab, DWORD cb)
+{
+    static const WCHAR* kHex = L"0123456789abcdef";
+    for (DWORD i = 0; i < cb; i++)
+    {
+        *p++ = kHex[(ab[i] >> 4) & 15];
+        *p++ = kHex[ab[i] & 15];
+    }
+}
+
+unsigned __stdcall HashThreadProc(void* pParameter)
+{
+    UNREFERENCED_PARAMETER(pParameter);
+    HashAlgSlot slots[] =
+    {
+        { BCRYPT_MD5_ALGORITHM,    L"MD5",     16, nullptr, nullptr, 0, {} },
+        { BCRYPT_SHA1_ALGORITHM,   L"SHA-1",   20, nullptr, nullptr, 0, {} },
+        { BCRYPT_SHA256_ALGORITHM, L"SHA-256", 32, nullptr, nullptr, 0, {} },
+        { BCRYPT_SHA512_ALGORITHM, L"SHA-512", 64, nullptr, nullptr, 0, {} },
+    };
+    const int nSlots = (int)(sizeof(slots) / sizeof(slots[0]));
+    BCRYPT_ALG_HANDLE hAlgs[4] = {};
+    bool bOk = false;
+    bool bCancel = false;
+    int nOpen = 0;
+    DWORD crc = 0xFFFFFFFFu;                    // 6.24: running CRC-32
+    g_szHashResult[0] = L'\0';
+
+    HANDLE hFile = CreateFileW(g_szHashFile, GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        for (int i = 0; i < nSlots; i++)
+        {
+            if (BCryptOpenAlgorithmProvider(&hAlgs[i], slots[i].pszBcrypt, nullptr, 0) != 0)
+            {
+                break;
+            }
+            BYTE abProp[8];
+            DWORD cbGot = 0;
+            DWORD cbObj = 0;
+            if (BCryptGetProperty(hAlgs[i], BCRYPT_OBJECT_LENGTH, abProp, sizeof(abProp), &cbGot, 0) == 0 && cbGot >= 4)
+            {
+                cbObj = *(DWORD*)abProp;
+            }
+            slots[i].cbObj = cbObj;
+            slots[i].pObj = (cbObj > 0 && cbObj <= 65536) ? new (std::nothrow) BYTE[cbObj] : nullptr;
+            if (BCryptCreateHash(hAlgs[i], &slots[i].hHash, slots[i].pObj, cbObj, nullptr, 0, 0) != 0)
+            {
+                break;
+            }
+            nOpen++;
+        }
+        if (nOpen == nSlots)
+        {
+            BYTE* pBuf = new (std::nothrow) BYTE[CB_READ_CHUNK];
+            if (pBuf != nullptr)
+            {
+                bOk = true;
+                DWORD cbRead = 0;
+                for (;;)
+                {
+                    if (InterlockedCompareExchange(&g_bHashCancel, 0, 0) != 0)
+                    {
+                        bCancel = true;
+                        break;
+                    }
+                    if (!ReadFile(hFile, pBuf, CB_READ_CHUNK, &cbRead, nullptr))
+                    {
+                        bOk = false;
+                        break;
+                    }
+                    if (cbRead == 0)
+                    {
+                        break;
+                    }
+                    for (int i = 0; i < nSlots; i++)
+                    {
+                        if (BCryptHashData(slots[i].hHash, pBuf, cbRead, 0) != 0)
+                        {
+                            bOk = false;
+                            break;
+                        }
+                    }
+                    if (!bOk)
+                    {
+                        break;
+                    }
+                    crc = Crc32Update(crc, pBuf, cbRead);
+                }
+                if (bOk && !bCancel)
+                {
+                    for (int i = 0; i < nSlots; i++)
+                    {
+                        if (BCryptFinishHash(slots[i].hHash, slots[i].abDigest, slots[i].cbDigest, 0) != 0)
+                        {
+                            bOk = false;
+                            break;
+                        }
+                    }
+                }
+                delete[] pBuf;
+            }
+        }
+        for (int i = 0; i < nSlots; i++)
+        {
+            if (slots[i].hHash != nullptr)
+            {
+                BCryptDestroyHash(slots[i].hHash);
+            }
+            delete[] slots[i].pObj;
+            if (hAlgs[i] != nullptr)
+            {
+                BCryptCloseAlgorithmProvider(hAlgs[i], 0);
+            }
+        }
+        CloseHandle(hFile);
+    }
+    if (bOk && !bCancel)
+    {
+        WCHAR* p = g_szHashResult;
+        const WCHAR* pEnd = g_szHashResult + (_countof(g_szHashResult) - 8);
+        for (int i = 0; i < nSlots; i++)
+        {
+            if (p >= pEnd)
+            {
+                break;
+            }
+            if (i > 0)
+            {
+                *p++ = L'\r';
+                *p++ = L'\n';
+            }
+            p += wsprintfW(p, L"%s: ", slots[i].pszLabel);
+            HashAppendHex(p, slots[i].abDigest, slots[i].cbDigest);
+            *p = L'\0';
+        }
+        if (p + 24 < pEnd)
+        {
+            const DWORD crcFinal = crc ^ 0xFFFFFFFFu;
+            p += wsprintfW(p, L"\r\nCRC-32: %08X", crcFinal);
+        }
+    }
+    PostMessage(hWndMain, WM_APP_HASHDONE, (WPARAM)(bOk ? 1 : (bCancel ? 0 : 0xFFFFFFFF)), 0);
+    return(0);
+}
+
+// 6.22: FILE > PROPERTIES — one honest page of what the viewer knows about the
+// file (sizes, dates, attributes, what is on screen). MessageBox like the
+// command-line help: no dialog template, no new focus dance.
+// --------------------------------------------------------------------------------------------
+static void FxFileTimeText(const FILETIME& ft, WCHAR* psz, int cch)
+{
+    SYSTEMTIME st = {};
+    psz[0] = L'\0';
+    if (FileTimeToSystemTime(&ft, &st))
+    {
+        WCHAR szDate[40], szTime[40];
+        if (GetDateFormatW(LOCALE_USER_DEFAULT, DATE_SHORTDATE, &st, nullptr, szDate, (int)_countof(szDate)) > 0 &&
+            GetTimeFormatW(LOCALE_USER_DEFAULT, 0, &st, nullptr, szTime, (int)_countof(szTime)) > 0)
+        {
+            wsprintfW(psz, L"%s %s", szDate, szTime);
+        }
+    }
+}
+
+void ShowFileProperties(void)
+{
+    if (g_szCurrentFile[0] == L'\0')
+    {
+        AppMsgBox(hWndMain, L"There is no file loaded.", szTitle, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExW(g_szCurrentFile, GetFileExInfoStandard, &fad))
+    {
+        AppMsgBox(hWndMain, L"The file no longer exists on disk.", szTitle, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    const ULONGLONG cbSize = ((ULONGLONG)fad.nFileSizeHigh << 32) | (ULONGLONG)fad.nFileSizeLow;
+    WCHAR szCreated[64], szWritten[64], szAccessed[64];
+    FxFileTimeText(fad.ftCreationTime, szCreated, (int)_countof(szCreated));
+    FxFileTimeText(fad.ftLastWriteTime, szWritten, (int)_countof(szWritten));
+    FxFileTimeText(fad.ftLastAccessTime, szAccessed, (int)_countof(szAccessed));
+    WCHAR szSize[40];
+    FormatU64Locale(szSize, (int)_countof(szSize), cbSize);
+    WCHAR szAttr[128];
+    szAttr[0] = L'\0';
+    {
+        WCHAR* p = szAttr;
+        if (fad.dwFileAttributes & FILE_ATTRIBUTE_READONLY) { p += wsprintfW(p, L"ReadOnly "); }
+        if (fad.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) { p += wsprintfW(p, L"Hidden "); }
+        if (fad.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) { p += wsprintfW(p, L"System "); }
+        if (fad.dwFileAttributes & FILE_ATTRIBUTE_ARCHIVE) { p += wsprintfW(p, L"Archive "); }
+        if (fad.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { p += wsprintfW(p, L"Reparse "); }
+        if (fad.dwFileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) { p += wsprintfW(p, L"Sparse "); }
+        if (p == szAttr)
+        {
+            lstrcpynW(szAttr, L"none", (int)_countof(szAttr));
+        }
+    }
+    WCHAR szPage[160];
+    wsprintfW(szPage, L"On screen: %s  |  %I64u..%I64u of %I64u bytes",
+        ViewLabel(iView), g_qwBase, g_qwBase + (ULONGLONG)cbFile, g_cbFileTotal);
+    // 6.27: one dialog only — stash metadata, hash worker completes the box
+    wsprintfW(g_szPropText,
+        L"%s\r\n\r\nSize: %s bytes (%I64u)\r\nCreated:   %s\r\nModified:  %s\r\nAccessed:  %s\r\nAttributes: %s\r\n\r\n%s\r\nBookmarks on this page: %d",
+        g_szCurrentFile, szSize, cbSize, szCreated, szWritten, szAccessed, szAttr, szPage, g_cBookmarks);
+    if (g_hHashThread != nullptr)
+    {
+        StatusFlash(L"A hash is already running; Properties will show when it finishes.");
+        g_bPropPending = true;
+        return;
+    }
+    StatusFlash(L"Properties: computing hashes... (ESC cancels)");
+    g_bPropPending = true;
+    InterlockedExchange(&g_bHashCancel, 0);
+    (void)lstrcpynW(g_szHashFile, g_szCurrentFile, MAX_PATH);
+    uintptr_t uThread = _beginthreadex(nullptr, 0, HashThreadProc, nullptr, 0, nullptr);
+    if (uThread != 0)
+    {
+        g_hHashThread = (HANDLE)uThread;
+    }
+    else
+    {
+        g_bPropPending = false;
+        AppMsgBox(hWndMain, g_szPropText, L"4More - Properties", MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: SEARCH > STATISTICS — the page on screen and the file behind it, from
+// data the viewer already computed (the line index, the raw buffer).
+// --------------------------------------------------------------------------------------------
+void ShowStatistics(void)
+{
+    if (g_tv.pText == nullptr || g_tv.cch <= 0)
+    {
+        AppMsgBox(hWndMain, L"Nothing is loaded.", szTitle, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    ULONGLONG cWords = 0;
+    bool bInWord = false;
+    for (int i = 0; i < g_tv.cch; i++)
+    {
+        const bool bW = FxIsWordChar(g_tv.pText[i]);
+        if (bW && !bInWord)
+        {
+            cWords++;
+        }
+        bInWord = bW;
+    }
+    int iLongest = 0;
+    for (int i = 0; i < g_tv.cLines; i++)
+    {
+        const int iLS = g_tv.pLineStarts[i];
+        const int iLE = (i + 1 < g_tv.cLines) ? g_tv.pLineStarts[i + 1] : g_tv.cch;
+        const int n = TV_DispEnd(g_tv.pText, iLS, iLE) - iLS;
+        if (n > iLongest)
+        {
+            iLongest = n;
+        }
+    }
+    WCHAR szWords[40], szTotal[40], szPageSize[40];
+    FormatU64Locale(szWords, (int)_countof(szWords), cWords);
+    FormatU64Locale(szTotal, (int)_countof(szTotal), g_cbFileTotal);
+    FormatU64Locale(szPageSize, (int)_countof(szPageSize), (ULONGLONG)cbFile);
+    WCHAR szFilter[80];
+    szFilter[0] = L'\0';
+    if (g_bFilter)
+    {
+        wsprintfW(szFilter, L"\r\nFILTER ON: %d of %d lines shown (Ctrl+Shift+G leaves it)", g_cFilterShown, g_cFilterTotal);
+    }
+    WCHAR szText[700];
+    wsprintfW(szText,
+        L"View: %s%s\r\n\r\nPage: %I64u .. %I64u (%s bytes on screen)\r\nFile on disk: %s bytes\r\n\r\nPage lines: %d  (longest: %d chars)\r\nPage words: %s\r\nPage characters: %d%s",
+        ViewLabel(iView), g_bCsvMode ? L" (CSV table)" : L"",
+        g_qwBase, g_qwBase + (ULONGLONG)cbFile, szPageSize, szTotal,
+        g_tv.cLines, iLongest, szWords, g_tv.cch, szFilter);
+    AppMsgBox(hWndMain, szText, L"4More - Statistics", MB_OK | MB_ICONINFORMATION);
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: SEARCH > CHARACTER AT CARET (Ctrl+Q) — what the character under the
+// caret IS: code point, UTF-8 and UTF-16 bytes, and the file offset it decodes
+// from. The hex view reports its byte instead.
+// --------------------------------------------------------------------------------------------
+void ShowCharInspector(void)
+{
+    if (hEdit == nullptr || g_tv.pText == nullptr || g_tv.cch <= 0)
+    {
+        return;
+    }
+    if (g_bFilter)
+    {
+        StatusFlash(L"Turn the filter off first (Ctrl+Shift+G): the caret maps to the filtered lines.");
+        return;
+    }
+    DWORD dwS = 0, dwE = 0;
+    EditGetSel(dwS, dwE);
+    if (iView == VIEW_HEX)
+    {
+        // 6.24: data inspector (LE/BE integers + floats) at the caret byte;
+        // CRC-32 covers the selected byte range when a multi-byte selection exists.
+        const int iLine = TV_LineFromChar((int)dwE);
+        const int bpl = HexBpl();
+        ULONGLONG qwOff = g_qwBase + (ULONGLONG)((iLine < 0) ? 0 : iLine) * (ULONGLONG)bpl +
+            (ULONGLONG)HexByteOfCol((int)(dwE - (DWORD)TV_LineIndex((iLine < 0) ? 0 : iLine)));
+        if (g_cbFileTotal > 0 && qwOff >= g_cbFileTotal)
+        {
+            qwOff = g_cbFileTotal - 1;
+        }
+        const DWORD cbRel = (DWORD)(qwOff - g_qwBase);
+        WCHAR szHex[24], szDec[40];
+        U64ToHex(szHex, qwOff);
+        FormatU64Locale(szDec, (int)_countof(szDec), qwOff);
+        WCHAR szText[900];
+        WCHAR* p = szText;
+        p += wsprintfW(p, L"File offset 0x%s (%s)\r\n", szHex, szDec);
+        if (pFileBytes != nullptr && cbRel < cbFile)
+        {
+            const BYTE* q = pFileBytes + cbRel;
+            const DWORD avail = cbFile - cbRel;
+            const BYTE b = q[0];
+            p += wsprintfW(p, L"\r\nByte: 0x%02X  (%u)\r\n", b, b);
+            if (avail >= 2)
+            {
+                const WORD le = (WORD)(q[0] | (q[1] << 8));
+                const WORD be = (WORD)((q[0] << 8) | q[1]);
+                p += wsprintfW(p, L"Int16 LE: %d (0x%04X)   BE: %d (0x%04X)\r\n",
+                    (short)le, le, (short)be, be);
+            }
+            if (avail >= 4)
+            {
+                const DWORD le = (DWORD)q[0] | ((DWORD)q[1] << 8) | ((DWORD)q[2] << 16) | ((DWORD)q[3] << 24);
+                const DWORD be = ((DWORD)q[0] << 24) | ((DWORD)q[1] << 16) | ((DWORD)q[2] << 8) | (DWORD)q[3];
+                float fle, fbe;
+                CopyMemory(&fle, &le, 4);
+                CopyMemory(&fbe, &be, 4);
+                p += wsprintfW(p, L"Int32 LE: %d (0x%08X)   BE: %d (0x%08X)\r\n", (int)le, le, (int)be, be);
+                // 7.01: wsprintfW has no floating-point support ("%g" never printed the value): the CRT formats them
+                const int nF = swprintf_s(p, 96, L"Float LE: %g   BE: %g\r\n", (double)fle, (double)fbe);
+                if (nF > 0) p += nF;
+            }
+            if (avail >= 8)
+            {
+                ULONGLONG le = 0, be = 0;
+                for (int k = 0; k < 8; k++)
+                {
+                    le |= ((ULONGLONG)q[k] << (8 * k));
+                    be |= ((ULONGLONG)q[k] << (8 * (7 - k)));
+                }
+                double dle, dbe;
+                CopyMemory(&dle, &le, 8);
+                CopyMemory(&dbe, &be, 8);
+                p += wsprintfW(p, L"Int64 LE: 0x%08X%08X\r\n", (DWORD)(le >> 32), (DWORD)le);
+                p += wsprintfW(p, L"Int64 BE: 0x%08X%08X\r\n", (DWORD)(be >> 32), (DWORD)be);
+                const int nD = swprintf_s(p, 96, L"Double LE: %g   BE: %g\r\n", dle, dbe);
+                if (nD > 0) p += nD;
+            }
+            // selection CRC when the selection spans more than one caret cell
+            DWORD dwLo = (dwS < dwE) ? dwS : dwE, dwHi = (dwS < dwE) ? dwE : dwS;
+            if (dwHi > dwLo && pFileBytes != nullptr)
+            {
+                const int iL0 = TV_LineFromChar((int)dwLo);
+                const int iL1 = TV_LineFromChar((int)dwHi);
+                ULONGLONG q0 = g_qwBase + (ULONGLONG)((iL0 < 0) ? 0 : iL0) * (ULONGLONG)bpl +
+                    (ULONGLONG)HexByteOfCol((int)(dwLo - (DWORD)TV_LineIndex((iL0 < 0) ? 0 : iL0)));
+                ULONGLONG q1 = g_qwBase + (ULONGLONG)((iL1 < 0) ? 0 : iL1) * (ULONGLONG)bpl +
+                    (ULONGLONG)HexByteOfCol((int)(dwHi - (DWORD)TV_LineIndex((iL1 < 0) ? 0 : iL1)));
+                if (q0 > q1) { ULONGLONG t = q0; q0 = q1; q1 = t; }
+                if (q0 >= g_qwBase && q1 < g_qwBase + (ULONGLONG)cbFile)
+                {
+                    const DWORD o0 = (DWORD)(q0 - g_qwBase);
+                    const DWORD o1 = (DWORD)(q1 - g_qwBase);
+                    const DWORD n = o1 - o0 + 1;
+                    if (n > 0 && n <= cbFile - o0)
+                    {
+                        const DWORD c = Crc32Of(pFileBytes + o0, n);
+                        p += wsprintfW(p, L"\r\nSelection CRC-32 (%u bytes): %08X", n, c);
+                    }
+                }
+            }
+        }
+        AppMsgBox(hWndMain, szText, L"4More - Data Inspector", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const int iPos = (int)dwE;
+    if (iPos < 0 || iPos >= g_tv.cch)
+    {
+        return;
+    }
+    WCHAR c1 = g_tv.pText[iPos];
+    WCHAR c2 = (iPos + 1 < g_tv.cch) ? g_tv.pText[iPos + 1] : 0;
+    DWORD uc;
+    int cchChar;
+    if (c1 >= 0xD800 && c1 <= 0xDBFF && c2 >= 0xDC00 && c2 <= 0xDFFF)
+    {
+        uc = 0x10000 + (((DWORD)c1 - 0xD800) << 10) + ((DWORD)c2 - 0xDC00);
+        cchChar = 2;
+    }
+    else
+    {
+        uc = c1;
+        cchChar = 1;
+    }
+    BYTE abUtf8[4];
+    int cbUtf8 = 0;
+    {
+        // the UTF-8 bytes of the code point (manual, deterministic)
+        if (uc < 0x80) { abUtf8[cbUtf8++] = (BYTE)uc; }
+        else if (uc < 0x800) { abUtf8[cbUtf8++] = (BYTE)(0xC0 | (uc >> 6)); abUtf8[cbUtf8++] = (BYTE)(0x80 | (uc & 0x3F)); }
+        else if (uc < 0x10000) { abUtf8[cbUtf8++] = (BYTE)(0xE0 | (uc >> 12)); abUtf8[cbUtf8++] = (BYTE)(0x80 | ((uc >> 6) & 0x3F)); abUtf8[cbUtf8++] = (BYTE)(0x80 | (uc & 0x3F)); }
+        else { abUtf8[cbUtf8++] = (BYTE)(0xF0 | (uc >> 18)); abUtf8[cbUtf8++] = (BYTE)(0x80 | ((uc >> 12) & 0x3F)); abUtf8[cbUtf8++] = (BYTE)(0x80 | ((uc >> 6) & 0x3F)); abUtf8[cbUtf8++] = (BYTE)(0x80 | (uc & 0x3F)); }
+    }
+    WCHAR szU8[40];
+    {
+        WCHAR* p = szU8;
+        for (int i = 0; i < cbUtf8; i++)
+        {
+            p += wsprintfW(p, L"%s%02X", (i > 0) ? L" " : L"", abUtf8[i]);
+        }
+        *p = L'\0';
+    }
+    ULONGLONG qwOff = 0;
+    const bool bHaveOff = CharToFileOffset(iPos, &qwOff);
+    const int iLine = TV_LineFromChar(iPos);
+    const int iLS = TV_LineIndex((iLine < 0) ? 0 : iLine);
+    WCHAR szOff[80];
+    if (bHaveOff)
+    {
+        WCHAR szHex[24], szDec[40];
+        U64ToHex(szHex, qwOff);
+        FormatU64Locale(szDec, (int)_countof(szDec), qwOff);
+        wsprintfW(szOff, L"0x%s (%s)", szHex, szDec);
+    }
+    else
+    {
+        lstrcpynW(szOff, L"(not mapped)", (int)_countof(szOff));
+    }
+    WCHAR szGlyph[8] = {};
+    int w = 0;
+    for (int i = 0; i < cchChar && iPos + i < g_tv.cch; i++)
+    {
+        const WCHAR c = g_tv.pText[iPos + i];
+        szGlyph[w++] = (c >= 0x20 && c != 0x7F) ? c : L'.';
+    }
+    szGlyph[w] = L'\0';
+    WCHAR szText[400];
+    wsprintfW(szText,
+        L"Character: %s\r\n\r\nCode point: U+%04X  (%I64u)\r\nUTF-8 bytes: %s\r\nUTF-16 units: %d\r\n\r\nLine %d, column %d\r\nFile offset: %s",
+        szGlyph, uc, (ULONGLONG)uc, szU8, cchChar,
+        (iLine < 0) ? 0 : iLine + 1, iPos - iLS + 1, szOff);
+    AppMsgBox(hWndMain, szText, L"4More - Character at Caret", MB_OK | MB_ICONINFORMATION);
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: hex view > Copy as C Array / Copy as Base64 — the bytes the selection
+// covers (the first to the last selected byte), capped at 1 MB.
+// --------------------------------------------------------------------------------------------
+static bool FxHexSelBytes(BYTE* pOut, DWORD cbOut, DWORD* pcbOut)
+{
+    DWORD dwS = 0, dwE = 0;
+    EditGetSel(dwS, dwE);
+    if (dwS == dwE)
+    {
+        return false;                           // no selection: caller flashes
+    }
+    const int iLineLo = TV_LineFromChar((int)((dwS < dwE) ? dwS : dwE));
+    const int iLineHi = TV_LineFromChar((int)((dwS > dwE) ? dwS : dwE));
+    const int iLSLo = TV_LineIndex((iLineLo < 0) ? 0 : iLineLo);
+    const int iLSHi = TV_LineIndex((iLineHi < 0) ? 0 : iLineHi);
+    const int iColLo = (int)((dwS < dwE) ? dwS : dwE) - iLSLo;
+    const int iColHi = (int)((dwS > dwE) ? dwS : dwE) - iLSHi;
+    ULONGLONG qwFirst = g_qwBase + (ULONGLONG)((iLineLo < 0) ? 0 : iLineLo) * (ULONGLONG)HexBpl() + (ULONGLONG)HexByteOfCol(iColLo);
+    ULONGLONG qwLast = g_qwBase + (ULONGLONG)((iLineHi < 0) ? 0 : iLineHi) * (ULONGLONG)HexBpl() + (ULONGLONG)HexByteOfCol(iColHi);
+    if (qwFirst > qwLast)
+    {
+        const ULONGLONG t = qwFirst; qwFirst = qwLast; qwLast = t;
+    }
+    if (g_cbFileTotal > 0 && qwLast >= g_cbFileTotal)
+    {
+        qwLast = g_cbFileTotal - 1;
+    }
+    if (qwFirst < g_qwBase || qwLast >= g_qwBase + (ULONGLONG)cbFile || pFileBytes == nullptr)
+    {
+        return false;
+    }
+    const DWORD cb = (DWORD)(qwLast - qwFirst + 1);
+    if (cb > cbOut)
+    {
+        return false;
+    }
+    CopyMemory(pOut, pFileBytes + (DWORD)(qwFirst - g_qwBase), cb);
+    *pcbOut = cb;
+    return true;
+}
+
+static int FxBase64Encode(const BYTE* p, DWORD cb, WCHAR* pszOut, int cchOut)
+{
+    static const WCHAR* kTbl = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int w = 0;
+    DWORD i = 0;
+    while (i + 3 <= cb)
+    {
+        const DWORD v = ((DWORD)p[i] << 16) | ((DWORD)p[i + 1] << 8) | (DWORD)p[i + 2];
+        if (w + 5 > cchOut) return -1;
+        pszOut[w++] = kTbl[(v >> 18) & 63];
+        pszOut[w++] = kTbl[(v >> 12) & 63];
+        pszOut[w++] = kTbl[(v >> 6) & 63];
+        pszOut[w++] = kTbl[v & 63];
+        i += 3;
+    }
+    if (i < cb)
+    {
+        const DWORD c1 = p[i];
+        const DWORD c2 = (i + 1 < cb) ? p[i + 1] : 0;
+        const DWORD v = (c1 << 16) | (c2 << 8);
+        if (w + 5 > cchOut) return -1;
+        pszOut[w++] = kTbl[(v >> 18) & 63];
+        pszOut[w++] = kTbl[(v >> 12) & 63];
+        pszOut[w++] = (i + 1 < cb) ? kTbl[(v >> 6) & 63] : L'=';
+        pszOut[w++] = L'=';
+    }
+    if (w >= cchOut) return -1;
+    pszOut[w] = L'\0';
+    return w;
+}
+
+static int CopyFmtAppendByte(WCHAR* psz, int w, int cchCap, int iFmt, BYTE b, bool bSep)
+{
+    if (w + 12 >= cchCap)
+    {
+        return w;
+    }
+    if (iFmt == COPYFMT_ASM)
+    {
+        return w + wsprintfW(psz + w, L"%s0%02Xh", bSep ? L", " : L"", b);
+    }
+    return w + wsprintfW(psz + w, L"%s0x%02X", bSep ? L", " : L"", b);
+}
+
+void CopyHexAs(int iFmt)
+{
+    if (iView != VIEW_HEX)
+    {
+        StatusFlash(L"Copy as array / Base64 works in the hex view.");
+        return;
+    }
+    BYTE* pBytes = new (std::nothrow) BYTE[1 << 20];
+    if (pBytes == nullptr)
+    {
+        return;
+    }
+    DWORD cb = 0;
+    if (!FxHexSelBytes(pBytes, 1 << 20, &cb) || cb == 0)
+    {
+        delete[] pBytes;
+        StatusFlash(L"Select the bytes to copy (up to 1 MB).");
+        return;
+    }
+    bool bOk = false;
+    if (iFmt == COPYFMT_BASE64)
+    {
+        WCHAR* psz = new (std::nothrow) WCHAR[(size_t)((cb + 2) / 3) * 4 + 8];
+        if (psz != nullptr)
+        {
+            const int n = FxBase64Encode(pBytes, cb, psz, (int)((size_t)((cb + 2) / 3) * 4 + 8));
+            if (n > 0)
+            {
+                bOk = ClipboardSetText(hWndMain, psz, n, false);
+            }
+            delete[] psz;
+        }
+        delete[] pBytes;
+        StatusFlash(bOk ? L"Base64 copied." : L"The clipboard refused the copy.");
+        return;
+    }
+
+    const int cchCap = (int)cb * 12 + 128;
+    WCHAR* psz = new (std::nothrow) WCHAR[(size_t)cchCap];
+    if (psz == nullptr)
+    {
+        delete[] pBytes;
+        return;
+    }
+    int w = 0;
+    if (iFmt == COPYFMT_C)
+    {
+        w += wsprintfW(psz + w, L"unsigned char data[] = {\r\n");
+    }
+    else if (iFmt == COPYFMT_ASM)
+    {
+        w += wsprintfW(psz + w, L"db ");
+    }
+    else if (iFmt == COPYFMT_PHP)
+    {
+        w += wsprintfW(psz + w, L"$data = [\r\n");
+    }
+    else if (iFmt == COPYFMT_JS)
+    {
+        w += wsprintfW(psz + w, L"const data = new Uint8Array([\r\n");
+    }
+    else if (iFmt == COPYFMT_PYTHON)
+    {
+        w += wsprintfW(psz + w, L"data = bytes([\r\n");
+    }
+
+    for (DWORD i = 0; i < cb; i++)
+    {
+        if (w + 16 >= cchCap)
+        {
+            break;
+        }
+        if (iFmt == COPYFMT_ASM)
+        {
+            if (i > 0 && (i % 16) == 0)
+            {
+                w += wsprintfW(psz + w, L"\r\ndb ");
+                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false);
+            }
+            else
+            {
+                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], (i % 16) != 0);
+            }
+        }
+        else
+        {
+            if (i > 0 && (i % 16) == 0)
+            {
+                w += wsprintfW(psz + w, L",\r\n");
+                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false);
+            }
+            else
+            {
+                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], i > 0);
+            }
+        }
+    }
+
+    if (iFmt == COPYFMT_C)
+    {
+        w += wsprintfW(psz + w, L"\r\n};");
+    }
+    else if (iFmt == COPYFMT_PHP)
+    {
+        w += wsprintfW(psz + w, L"\r\n];");
+    }
+    else if (iFmt == COPYFMT_JS)
+    {
+        w += wsprintfW(psz + w, L"\r\n]);");
+    }
+    else if (iFmt == COPYFMT_PYTHON)
+    {
+        w += wsprintfW(psz + w, L"\r\n])");
+    }
+    psz[w] = L'\0';
+    bOk = ClipboardSetText(hWndMain, psz, w, false);
+    delete[] psz;
+    delete[] pBytes;
+
+    static const WCHAR* kDone[] =
+    {
+        L"C array copied.",
+        L"ASM array copied.",
+        L"PHP array copied.",
+        L"JS array copied.",
+        L"Python array copied.",
+        L"Base64 copied."
+    };
+    const WCHAR* pszDone = (iFmt >= 0 && iFmt <= COPYFMT_BASE64) ? kDone[iFmt] : kDone[0];
+    StatusFlash(bOk ? pszDone : L"The clipboard refused the copy.");
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: FILE > EXPORT VIEW. Page mode writes the text on screen (the CSV table
+// included, the hex dump included); whole-file mode decodes the file with the
+// active view's rules in a worker and writes it as UTF-8, ESC-cancellable. The
+// worker takes a PRIVATE COPY of the page text: a page load may land mid-export
+// and the delivery frees the original buffer.
+// --------------------------------------------------------------------------------------------
+INT_PTR CALLBACK ExportDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        CheckRadioButton(hDlg, IDC_EXPORT_PAGE, IDC_EXPORT_ALL, IDC_EXPORT_PAGE);
+        return (INT_PTR)TRUE;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK)
+        {
+            int r = 1;
+            if (IsDlgButtonChecked(hDlg, IDC_EXPORT_ALL) == BST_CHECKED)
+            {
+                r = 2;
+            }
+            else if (IsDlgButtonChecked(hDlg, IDC_EXPORT_SEL) == BST_CHECKED)
+            {
+                r = 3;
+            }
+            EndDialog(hDlg, r);
+            return (INT_PTR)TRUE;
+        }
+        if (LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, 0);
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}
+
+static bool FxWriteUtf8Chunk(HANDLE hFile, const WCHAR* pText, int cch, ULONGLONG* pqwWritten)
+{
+    if (cch <= 0)
+    {
+        return true;
+    }
+    int cbUtf8 = WideCharToMultiByte(CP_UTF8, 0, pText, cch, nullptr, 0, nullptr, nullptr);
+    if (cbUtf8 <= 0)
+    {
+        return false;
+    }
+    BYTE* pBuf = new (std::nothrow) BYTE[cbUtf8];
+    if (pBuf == nullptr)
+    {
+        return false;
+    }
+    cbUtf8 = WideCharToMultiByte(CP_UTF8, 0, pText, cch, (LPSTR)pBuf, cbUtf8, nullptr, nullptr);
+    DWORD cbWrote = 0;
+    const bool bOk = (cbUtf8 > 0 && WriteFile(hFile, pBuf, (DWORD)cbUtf8, &cbWrote, nullptr) && cbWrote == (DWORD)cbUtf8);
+    if (bOk)
+    {
+        *pqwWritten += cbUtf8;
+    }
+    delete[] pBuf;
+    return bOk;
+}
+
+// one line break at a time across chunk borders: a \r at the very end of a
+// chunk is HELD (not written) and re-enters with the next chunk, where it
+// either closes a CRLF pair or becomes its own break. The held CR is written
+// from the flag, not from the buffer — the previous chunk's memory is gone.
+// 6.22 (audit-bench catch): the expansion writes into a SEPARATE destination
+// buffer. The first draft expanded IN PLACE and the write pointer (a lone \n
+// becomes two chars) caught up with the read pointer and stomped characters
+// that had not been read yet ("a\nb\rc" came out "a\r\n\r\n\r\n" — every
+// second character of the page was being eaten).
+static int FxNormalizeExportChunk(const WCHAR* pSrc, int cch, WCHAR* pDst, bool* pbPrevCR)
+{
+    int w = 0;
+    for (int i = 0; i < cch; i++)
+    {
+        const WCHAR c = pSrc[i];
+        if (*pbPrevCR)
+        {
+            // the held lone CR: it ends a line right here (the \n of a CRLF pair follows it or not)
+            *pbPrevCR = false;
+            pDst[w++] = L'\r';
+            pDst[w++] = L'\n';
+            if (c == L'\n')
+            {
+                continue;                       // the pair's LF is spent
+            }
+        }
+        if (c == L'\r')
+        {
+            if (i + 1 < cch)
+            {
+                if (pSrc[i + 1] == L'\n')
+                {
+                    i++;                        // CRLF stays CRLF (the loop skips the LF)
+                }
+                pDst[w++] = L'\r';
+                pDst[w++] = L'\n';
+            }
+            else
+            {
+                *pbPrevCR = true;               // may meet its LF in the next chunk
+            }
+        }
+        else if (c == L'\n')
+        {
+            pDst[w++] = L'\r';
+            pDst[w++] = L'\n';
+        }
+        else
+        {
+            pDst[w++] = c;
+        }
+    }
+    return w;
+}
+
+unsigned __stdcall ExportThreadProc(void* pParameter)
+{
+    const int iMode = (int)(intptr_t)pParameter;   // 1 = page text copy, 2 = whole file
+    UINT uResult = 0xFFFFFFFF;
+    HANDLE hFile = CreateFileW(g_szExportPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    ULONGLONG qwWritten = 0;
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        static const BYTE kBom[3] = { 0xEF, 0xBB, 0xBF };
+        DWORD cbWrote = 0;
+        if (WriteFile(hFile, kBom, 3, &cbWrote, nullptr))
+        {
+            qwWritten += 3;
+            if (iMode == 1)
+            {
+                // the private copy of the page text (UTF-16, CRLF-normalized already)
+                uResult = (FxWriteUtf8Chunk(hFile, g_pExportCopy, g_cchExportCopy, &qwWritten) && !g_bExportCancel)
+                    ? 1 : (g_bExportCancel ? 0 : 0xFFFFFFFF);
+            }
+            else
+            {
+                const int iViewEx = iView;
+                const UINT uCPEx = g_uAnsiCP;
+                if (iViewEx == VIEW_HEX)
+                {
+                    uResult = 0xFFFFFFFF;       // the dialog refused this combination; belt and braces
+                }
+                else
+                {
+                    HANDLE hSrc = CreateFileW(g_szExportSrc, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+                    if (hSrc != INVALID_HANDLE_VALUE)
+                    {
+                        // 7.01: the size comes first. A file that cannot be sized or mapped is an ERROR; before, cbSize
+                        // stayed 0 and an empty export (just the BOM) was reported as a success. (The ReadFile fallback
+                        // that stood here was unreachable for the same reason, and WfChunkEnd needs the mapped bytes.)
+                        LARGE_INTEGER liSize;
+                        const bool bSized = GetFileSizeEx(hSrc, &liSize) != FALSE;
+                        ULONGLONG cbSize = bSized ? (ULONGLONG)liSize.QuadPart : 0;
+                        HANDLE hMap = (cbSize > 0) ? CreateFileMappingW(hSrc, nullptr, PAGE_READONLY, 0, 0, nullptr) : nullptr;
+                        const BYTE* pView = (hMap != nullptr) ? (const BYTE*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0) : nullptr;
+                        uResult = (bSized && (cbSize == 0 || pView != nullptr)) ? 1 : 0xFFFFFFFF;
+                        if (pView == nullptr)
+                        {
+                            cbSize = 0;                 // nothing to walk
+                        }
+                        ULONGLONG qwPos = 0;
+                        bool bPrevCR = false;
+                        ULONGLONG qwNextPost = GetTickCount64() + 100;
+                        while (qwPos < cbSize)
+                        {
+                            if (InterlockedExchange(&g_bExportCancel, 0) != 0)
+                            {
+                                uResult = 0;
+                                break;
+                            }
+                            ULONGLONG qwEnd = WfChunkEnd(iViewEx, pView, cbSize, qwPos + CB_READ_CHUNK);
+                            if (qwEnd > cbSize) qwEnd = cbSize;
+                            if (qwEnd <= qwPos)
+                            {
+                                qwEnd = qwPos + ((iViewEx == VIEW_UTF32 || iViewEx == VIEW_UTF32BE) ? 4 : (iViewEx == VIEW_UTF16 || iViewEx == VIEW_UTF16BE) ? 2 : 1);
+                                if (qwEnd > cbSize) qwEnd = cbSize;
+                            }
+                            const BYTE* const pChunk = pView + qwPos;
+                            WfChunk chunk;
+                            if (!WfDecodeChunk(iViewEx, uCPEx, pChunk, (DWORD)(qwEnd - qwPos), qwPos, &chunk))
+                            {
+                                uResult = 0xFFFFFFFF;
+                                break;
+                            }
+                            // a separate destination buffer: every \n can become two chars
+                            WCHAR* pNorm = new (std::nothrow) WCHAR[(size_t)chunk.cch * 2 + 3];
+                            int cchNorm = 0;
+                            bool bWriteOk = false;
+                            if (pNorm != nullptr)
+                            {
+                                cchNorm = FxNormalizeExportChunk(chunk.pText, chunk.cch, pNorm, &bPrevCR);
+                                bWriteOk = FxWriteUtf8Chunk(hFile, pNorm, cchNorm, &qwWritten);
+                                delete[] pNorm;
+                            }
+                            delete[] chunk.pText;
+                            if (!bWriteOk)
+                            {
+                                uResult = 0xFFFFFFFF;
+                                break;
+                            }
+                            qwPos = qwEnd;
+                            ULONGLONG qwNow = GetTickCount64();
+                            if (qwNow >= qwNextPost)
+                            {
+                                PostMessage(hWndMain, WM_APP_EXPORTPROG, (WPARAM)(DWORD)qwWritten, (LPARAM)(DWORD)(qwWritten >> 32));
+                                qwNextPost = qwNow + 100;
+                            }
+                        }
+                        if (bPrevCR)
+                        {
+                            (void)FxWriteUtf8Chunk(hFile, L"\r\n", 2, &qwWritten);   // a trailing lone CR
+                        }
+                        if (pView != nullptr) UnmapViewOfFile(pView);
+                        if (hMap != nullptr) CloseHandle(hMap);
+                        CloseHandle(hSrc);
+                    }
+                }
+            }
+        }
+        else
+        {
+            uResult = 0xFFFFFFFF;
+        }
+        CloseHandle(hFile);
+    }
+    PostMessage(hWndMain, WM_APP_EXPORTDONE, (WPARAM)uResult, 0);
+    return(0);
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: the [Positions] bookmark offsets come back with the file, but every
+// page landing clears the page-scoped bookmarks — including the landing the
+// restore's GoToOffset causes. The offsets wait here and rebind when their
+// page lands (ApplyLoadResult); offsets outside that page stay in the INI for
+// the next session, exactly like the pre-6.22 view-switch rule.
+// --------------------------------------------------------------------------------------------
+static void ApplyPendingBookmarks(void)
+{
+    if (g_cPendingBm <= 0 || pFileBytes == nullptr || cbFile == 0)
+    {
+        return;
+    }
+    const int cBm = (g_cPendingBm < 16) ? g_cPendingBm : 16;
+    DWORD* pLines = new (std::nothrow) DWORD[cBm];
+    ULONGLONG* pOffs = new (std::nothrow) ULONGLONG[cBm];
+    if (pLines != nullptr && pOffs != nullptr)
+    {
+        for (int i = 0; i < cBm; i++)
+        {
+            pLines[i] = 0;
+            pOffs[i] = g_qwPendingBm[i];
+        }
+        delete[] g_pBookmarks;
+        delete[] g_pBookmarkOffs;
+        g_pBookmarks = pLines;
+        g_pBookmarkOffs = pOffs;
+        g_cBookmarks = cBm;
+        g_cBookmarksMax = cBm;
+        RebindBookmarksToView();            // in-page offsets become lines; the rest wait in the INI
+        TV_GutterRepaint();
+    }
+    else
+    {
+        delete[] pLines;
+        delete[] pOffs;
+    }
+    g_cPendingBm = 0;                       // consumed: the next landing must not re-apply them
+}
+
+// --------------------------------------------------------------------------------------------
+// 6.22: stop every 6.22 worker (the window is dying)
+// --------------------------------------------------------------------------------------------
+static void WfWorkerCancelAll(void)
+{
+    InterlockedExchange(&g_bSearchCancel, 1);   // Find Bytes / whole-file find share it
+    InterlockedExchange(&g_bHashCancel, 1);
+    InterlockedExchange(&g_bExportCancel, 1);
+}
+
+void ExportViewDialog(HWND hWnd)
+{
+    if (g_tv.pText == nullptr || g_tv.cch <= 0)
+    {
+        AppMsgBox(hWndMain, L"Nothing to export.", L"Export", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (g_bExportBusy || g_pJob != nullptr || g_bInByteSearch)
+    {
+        StatusFlash(L"Still busy; try again in a moment.");
+        return;
+    }
+    const int iChoice = (int)DialogBox(hInst, MAKEINTRESOURCE(IDD_EXPORT), hWnd, ExportDlgProc);
+    if (iChoice == 0)
+    {
+        return;
+    }
+    if (iChoice == 2 && iView == VIEW_HEX)          // 7.01: refused BEFORE the file box, not after the user typed a name
+    {
+        StatusFlash(L"The whole file exports from a text view (the hex dump exports page by page).");
+        return;
+    }
+    WCHAR szFile[MAX_PATH];
+    lstrcpynW(szFile, L"", MAX_PATH);
+    if (g_szCurrentFile[0] != L'\0')
+    {
+        const WCHAR* pName = g_szCurrentFile;
+        for (const WCHAR* p = g_szCurrentFile; *p != L'\0'; p++)
+        {
+            if (*p == L'\\' || *p == L'/')
+            {
+                pName = p + 1;
+            }
+        }
+        lstrcpynW(szFile, pName, MAX_PATH - 12);   // 7.01: room for ".export.txt" (a 250+ character name overflowed szFile)
+        (void)lstrcatW(szFile, (g_bCsvMode && iChoice == 1) ? L".export.csv" : L".export.txt");
+    }
+    else
+    {
+        lstrcpynW(szFile, L"export.txt", MAX_PATH);
+    }
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hWndMain;
+    ofn.lpstrFilter = L"Text (*.txt)\0*.txt\0CSV (*.csv)\0*.csv\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = L"txt";
+    if (!GetSaveFileNameW(&ofn))
+    {
+        return;                                 // cancelled at the file box
+    }
+    if (iChoice == 1 || iChoice == 3)
+    {
+        // PAGE or SELECTION: private copy (UI thread must snapshot g_tv now)
+        delete[] g_pExportCopy;
+        g_pExportCopy = nullptr;
+        g_cchExportCopy = 0;
+        if (iChoice == 3)
+        {
+            DWORD dwS = 0, dwE = 0;
+            EditGetSel(dwS, dwE);
+            if (dwS == dwE)
+            {
+                StatusFlash(L"No selection to export.");
+                return;
+            }
+            if (dwS > dwE) { DWORD t = dwS; dwS = dwE; dwE = t; }
+            if (dwE > (DWORD)g_tv.cch) dwE = (DWORD)g_tv.cch;
+            const int cchSel = (int)(dwE - dwS);
+            g_pExportCopy = new (std::nothrow) WCHAR[(size_t)cchSel + 1];
+            if (g_pExportCopy == nullptr)
+            {
+                AppMsgBox(hWndMain, L"Not enough memory for the export.", L"Export", MB_OK | MB_ICONWARNING);
+                return;
+            }
+            if (cchSel > 0 && g_tv.pText != nullptr)
+            {
+                CopyMemory(g_pExportCopy, g_tv.pText + dwS, (size_t)cchSel * sizeof(WCHAR));
+            }
+            g_cchExportCopy = cchSel;
+            g_pExportCopy[cchSel] = L'\0';
+        }
+        else
+        {
+            g_pExportCopy = new (std::nothrow) WCHAR[(size_t)g_tv.cch + 1];
+            if (g_pExportCopy == nullptr)
+            {
+                AppMsgBox(hWndMain, L"Not enough memory for the export.", L"Export", MB_OK | MB_ICONWARNING);
+                return;
+            }
+            CopyMemory(g_pExportCopy, g_tv.pText, (size_t)g_tv.cch * sizeof(WCHAR));
+            g_cchExportCopy = g_tv.cch;
+        }
+    }
+    (void)lstrcpynW(g_szExportPath, szFile, MAX_PATH);
+    if (iChoice == 2)
+    {
+        (void)lstrcpynW(g_szExportSrc, g_szCurrentFile, MAX_PATH);   // the worker reads its OWN snapshot of the SOURCE
+    }
+    InterlockedExchange(&g_bExportCancel, 0);
+    g_bExportBusy = true;
+    uintptr_t uThread = _beginthreadex(nullptr, 0, ExportThreadProc, (void*)(intptr_t)iChoice, 0, nullptr);
+    if (uThread == 0)
+    {
+        g_bExportBusy = false;
+        delete[] g_pExportCopy;
+        g_pExportCopy = nullptr;
+        g_cchExportCopy = 0;
+        AppMsgBox(hWndMain, L"Not enough memory to start the export.", L"Export", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    g_hExportThread = (HANDLE)uThread;
+    StatusFlash(L"Exporting...");
+}
 
 /* -------------------------------------------------------------------------------------------- */
 // Converts lone \r and \n to CRLF (the edit control requires CRLF).
@@ -2494,6 +6829,7 @@ WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown
 void ResetViewer(void)
 {
     SaveFilePosition();          // 6.17: the file about to be replaced: remember where it was left
+    FilterClear(false);          // 6.22: the subset dies with the page too
     delete[] pFileBytes;
     pFileBytes = nullptr;
     cbFile = 0;
@@ -2511,6 +6847,7 @@ void ResetViewer(void)
         SetWindowTextW(hWndMain, szTitle);
     }
     UpdateStatusBar();
+    WatchResetBaseline();        // 6.22: nothing on screen to watch
 }
 
 
@@ -2534,7 +6871,7 @@ void LoadFile(const WCHAR* pacFilename)
         // worker or silently doing nothing.
         if (pacFilename[0] != L'\0')
         {
-            MessageBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
+            AppMsgBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
         }
         return;
     }
@@ -2547,7 +6884,7 @@ void LoadFile(const WCHAR* pacFilename)
     {
         // The job cannot store a longer path (szPath is MAX_PATH): say
         // so instead of silently truncating it.
-        MessageBox(hWndMain, L"The file path is too long (the limit is 259 characters).", szTitle, MB_OK | MB_ICONWARNING);
+        AppMsgBox(hWndMain, L"The file path is too long (the limit is 259 characters).", szTitle, MB_OK | MB_ICONWARNING);
         return;
     }
     StartAsyncLoad(pacFilename);
@@ -2568,7 +6905,7 @@ LoadJob* BeginLoadJob(bool bStdin)
     LoadJob* pJob = new (std::nothrow) LoadJob();
     if (pJob == nullptr)
     {
-        MessageBox(hWndMain, L"Not enough memory to load the file.", szTitle, MB_OK | MB_ICONERROR);
+        AppMsgBox(hWndMain, L"Not enough memory to load the file.", szTitle, MB_OK | MB_ICONERROR);
         return(nullptr);
     }
     pJob->bStdin = bStdin;
@@ -3682,7 +8019,7 @@ void RunLoadJob(LoadJob* pJob)
         DWORD cch = 0;
         DWORD dwSrcOff = 0, dwSrcLen = 0;       // 3.02: raw window the decode covered (O2)
         bool bPreNorm = false;                // 6.14: the parallel decode already normalized the text
-        if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen, pJob, &bPreNorm))
+        if (BuildViewText(pJob->iDetected, pJob->pBytes, pJob->cbFile, pJob->cbOnDisk, pJob->qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen, &bPreNorm))
         {
             WCHAR* pNorm = pText;
             int cchNorm = (int)cch;
@@ -3796,6 +8133,13 @@ void ApplyLoadResult(LoadJob* pJob)
         AddRecentEntry(pJob->szPath);      // 6.05: a mistyped / unreadable path no longer enters the MRU list
     }
     ClearBookmarks();                        // page-relative line bookmarks die with the old page
+    if (!pJob->bKeepView)
+    {
+        // 6.22: a fresh load replaces the page (and with it the filter's
+        // subset); the pattern stays for the next Filter Lines. Page loads
+        // (bKeepView) keep the filter and re-apply it to the new page below.
+        FilterClear(false);
+    }
     EnsureEditControlType();                 // 5.4: only creates the control if it does not exist yet
     UpdateViewMenu();
 
@@ -3867,25 +8211,25 @@ void ApplyLoadResult(LoadJob* pJob)
     // never precedes the state it describes.
     if (pJob->bOpenFailed)
     {
-        MessageBox(hWndMain, L"Could not open the file.", szTitle, MB_OK | MB_ICONWARNING);
+        AppMsgBox(hWndMain, L"Could not open the file.", szTitle, MB_OK | MB_ICONWARNING);
     }
     else if (pJob->bOOM)
     {
-        MessageBox(hWndMain, L"Not enough memory to load the file.", szTitle, MB_OK | MB_ICONERROR);
+        AppMsgBox(hWndMain, L"Not enough memory to load the file.", szTitle, MB_OK | MB_ICONERROR);
     }
     else if (pJob->bReadError)
     {
         // The read failed or stopped short. What was read is still shown
         // (for binary content the hex dump stays useful), but say so.
-        MessageBox(hWndMain, L"Could not read the whole file.", szTitle, MB_OK | MB_ICONWARNING);
+        AppMsgBox(hWndMain, L"Could not read the whole file.", szTitle, MB_OK | MB_ICONWARNING);
     }
     else if (pJob->bStreamTruncated)
     {
-        MessageBox(hWndMain, L"The stream is too long; showing its first part.", szTitle, MB_OK | MB_ICONWARNING);
+        AppMsgBox(hWndMain, L"The stream is too long; showing its first part.", szTitle, MB_OK | MB_ICONWARNING);
     }
     if (!bDelivered)
     {
-        MessageBox(hWndMain, L"An unexpected error occurred while showing the file.", szTitle, MB_OK | MB_ICONERROR);
+        AppMsgBox(hWndMain, L"An unexpected error occurred while showing the file.", szTitle, MB_OK | MB_ICONERROR);
     }
     if (bDelivered)
     {
@@ -3908,9 +8252,23 @@ void ApplyLoadResult(LoadJob* pJob)
         {
             // Go To / Find Bytes asked for a page that just landed: the
             // requested offset is inside it now.
+            // 6.22: the whole-file find also SELECTS the hit: g_qwPendingHitLen
+            // carries the hit's character length (text views; hex keeps the caret).
             ULONGLONG qwGoto = g_qwPendingGoto;
             g_qwPendingGoto = (ULONGLONG)-1;
+            const ULONGLONG qwHitLen = g_qwPendingHitLen;
+            g_qwPendingHitLen = 0;
             PositionAtOffset(qwGoto);
+            if (qwHitLen > 0 && iView != VIEW_HEX && iView != VIEW_EBCDIC && !g_bFilter)
+            {
+                int iChar = 0;
+                if (OffsetToCharPos(qwGoto, &iChar))
+                {
+                    TV_SetSel(iChar, iChar + (int)qwHitLen);
+                    TV_ScrollCaret();
+                    UpdateStatusBar();
+                }
+            }
         }
         if (g_bCsvMode && iView == VIEW_HEX)
         {
@@ -3921,6 +8279,11 @@ void ApplyLoadResult(LoadJob* pJob)
         {
             ApplyCsvMode(true);         // 6.00: /csv or menu — format after first delivery
         }
+        // 6.22: the filter re-applies to every NEW page text (page loads land here too)
+        if (g_bFilter && iView != VIEW_HEX)
+        {
+            ApplyFilterToPage();
+        }
     }
     if (g_qwPendingLine != 0 && !pJob->bKeepView && !pJob->bOpenFailed)
     {
@@ -3930,16 +8293,61 @@ void ApplyLoadResult(LoadJob* pJob)
     }
     if (bRestorePos)
     {
-        ULONGLONG qwSaved = 0;
-        if (PosLookup(pJob->szPath, &qwSaved) && qwSaved > 0 && qwSaved < g_cbFileTotal)
+        // 6.22: the position AND the way the file was shown come back: the
+        // view, the ANSI code page, the font size and the page's bookmarks.
+        PosEntry pe;
+        if (PosLookup(pJob->szPath, &pe))
         {
-            GoToOffset(qwSaved);
+            if (pe.iView >= VIEW_ANSI && pe.iView <= VIEW_UTF32BE && pe.iView != iView)
+            {
+                SetView(pe.iView);              // the encoding the user chose last time wins over detection
+            }
+            if (pe.uCP != 0 && pe.uCP != g_uAnsiCP && (pe.iView == VIEW_ANSI || iView == VIEW_ANSI) && IsValidCodePage(pe.uCP))
+            {
+                g_uAnsiCP = pe.uCP;             // silent: it was validated when it was picked
+                if (iView == VIEW_ANSI && pFileBytes != nullptr && cbFile > 0)
+                {
+                    ShowViewSafely();           // re-decode with the remembered page
+                }
+            }
+            if (pe.iFont >= 0 && pe.iFont < (int)_countof(g_iFontSizes) && pe.iFont != g_iFontIndex)
+            {
+                g_iFontIndex = pe.iFont;
+                ApplyEditorFont();
+            }
+            if (pe.cBm > 0)
+            {
+                // the offsets wait for their page: the GoToOffset below lands a
+                // NEW page and every landing clears the bookmarks
+                g_cPendingBm = (pe.cBm < 16) ? pe.cBm : 16;
+                for (int i = 0; i < g_cPendingBm; i++)
+                {
+                    g_qwPendingBm[i] = pe.qwbm[i];
+                }
+            }
+            if (pe.qwOff > 0 && pe.qwOff < g_cbFileTotal)
+            {
+                GoToOffset(pe.qwOff);
+                if (pe.qwOff >= g_qwBase && pe.qwOff < g_qwBase + (ULONGLONG)cbFile)
+                {
+                    ApplyPendingBookmarks();    // the goto stayed on THIS page: no landing will come
+                }
+            }
         }
     }
     if (!pJob->bStdin && !pJob->bOpenFailed)
     {
         StartPagePrefetch();               // 6.14: the page is on screen: warm the file cache for PgDn / PgUp
     }
+    // 6.22: the change watcher re-bases on EVERY delivered page (the screen
+    // was just rebuilt from the file's CURRENT state), and its timer rides
+    // the tail timer's id when tail is off (ToggleTail no longer kills it).
+    WatchResetBaseline();
+    if (hWndMain != nullptr && !g_bTail)
+    {
+        SetTimer(hWndMain, 1, 2000, nullptr);
+    }
+    ApplyPendingBookmarks();            // 6.22: a restore's bookmarks rebind on their page's landing
     delete pJob;
 }
 
@@ -3966,7 +8374,7 @@ void RunJobSynchronously(LoadJob* pJob)
         delete pJob;                    // never reached ApplyLoadResult
         RecoverEditAfterViewFailure();
         ResetViewer();
-        MessageBox(hWndMain, L"An unexpected error occurred while loading the file.", szTitle, MB_OK | MB_ICONERROR);
+        AppMsgBox(hWndMain, L"An unexpected error occurred while loading the file.", szTitle, MB_OK | MB_ICONERROR);
     }
 }
 
@@ -4387,17 +8795,18 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
 // the current page (qwBase..qwBase+CB_HEX_MAX at most); when the file holds
 // more bytes past that window, a notice replaces the final CRLF of the last
 // line. cbAll is the REAL total on disk, the notice cites the page range.
-WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch, LoadJob* pProgJob)
+WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch)
 {
     if (cbAll < qwBase + (ULONGLONG)cb)
     {
         cbAll = qwBase + (ULONGLONG)cb;        // never cite a total smaller than what was handed in
     }
-    DWORD cbHexMax = CB_HEX_MAX;
-    bool bTruncated = (qwBase + (ULONGLONG)cbHexMax < cbAll);
-    DWORD cbUse = ((ULONGLONG)cb > (ULONGLONG)cbHexMax) ? cbHexMax : cb;
-    DWORD cLines = (cbUse + 15) / 16;
-    DWORD cchLine = 49 + 1 + 16 + 2;                // hex block + gap + ASCII + CRLF (no offset column)
+    const DWORD cbHexMax = CB_HEX_MAX;
+    const DWORD cbUse = ((ULONGLONG)cb > (ULONGLONG)cbHexMax) ? cbHexMax : cb;
+    const int bpl = HexBpl();
+    const int grp = HexGrp();
+    DWORD cLines = (cbUse + (DWORD)bpl - 1) / (DWORD)bpl;
+    DWORD cchLine = (DWORD)HexLineChars();         // 6.24: depends on BPL + group
 
     // The two hex digits and their separating space for every possible
     // byte value, precomputed once: the dump loop below just copies table
@@ -4418,34 +8827,6 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
         }
     };
     static const HexDigits hd;
-
-#if !defined(NO_HEX_PAIR_LUT)
-    // One table lookup covers TWO bytes ("XX XX "), halving the loads and
-    // stores of the hot loop (measured, see README: the 8 MB worst case
-    // dumps 25% faster; measured at the old 8 MB cap). The table costs 65536 x 12 read-only bytes
-    // (768 KB) and one-time init. 3.02: enabled on Win32 too — 786 KB of
-    // constant data do not compromise the 2 GB address space, so the
-    // define NO_HEX_PAIR_LUT remains as the only opt-out.
-    struct HexPairs
-    {
-        WCHAR sz[65536][6];
-        HexPairs()
-        {
-            for (int i = 0; i < 65536; i++)
-            {
-                BYTE b0 = (BYTE)(i & 0xFF);
-                BYTE b1 = (BYTE)(i >> 8);
-                sz[i][0] = s_szHexDigits[b0 >> 4];
-                sz[i][1] = s_szHexDigits[b0 & 0x0F];
-                sz[i][2] = L' ';
-                sz[i][3] = s_szHexDigits[b1 >> 4];
-                sz[i][4] = s_szHexDigits[b1 & 0x0F];
-                sz[i][5] = L' ';
-            }
-        }
-    };
-    static const HexPairs hp;
-#endif
 
     // 3.02: the ASCII column of both loops goes through a 256-entry table:
     // one load per byte instead of compare-and-select, same output.
@@ -4474,110 +8855,73 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
     WCHAR* p = pOut;
     for (DWORD iLine = 0; iLine < cLines; iLine++)
     {
-        DWORD off = iLine * 16;
-        if (cbUse - off >= 16)
+        // 6.24: BPL (8/16/32) and group spacing drive the layout.
+        DWORD off = iLine * (DWORD)bpl;
+        const DWORD n = (off + (DWORD)bpl <= cbUse) ? (DWORD)bpl : (cbUse - off);
+        if (n == (DWORD)bpl)
         {
-            // Full line: the common case by far, written without a
-            // single per-byte bounds check.
-            const BYTE* q = pBytes + off;
-#if !defined(NO_HEX_PAIR_LUT)
-            // 3.03: the gap between the two halves is written once,
-            // outside the loop: eight per-pair comparisons off every
-            // full line (the common case, ~524k lines per hex page).
-            for (int iPair = 0; iPair < 4; iPair++)
+            // 7.01: a FULL row (every row but the last) without the per-byte "is there a byte?" and "is this a
+            // group end?" tests of the generic loop below: one inner loop per group, the gap after each
+            // group but the last. Same text as the generic path (grp divides bpl: 1/2/4/8 into 8/16/32).
+            const BYTE* const pb = pBytes + off;
+            for (DWORD i = 0; i < (DWORD)bpl; i += (DWORD)grp)
             {
-                WORD w;
-                memcpy(&w, q + iPair * 2, 2);           // two bytes, in order
-                memcpy(p, hp.sz[w], 6 * sizeof(WCHAR)); // "XX XX " in one store
-                p += 6;
-            }
-            *p++ = L' ';    // gap between the two 8-byte halves
-            for (int iPair = 4; iPair < 8; iPair++)
-            {
-                WORD w;
-                memcpy(&w, q + iPair * 2, 2);
-                memcpy(p, hp.sz[w], 6 * sizeof(WCHAR));
-                p += 6;
-            }
-#else
-            for (int i = 0; i < 16; i++)
-            {
-                if (i == 8)
+                for (DWORD k = 0; k < (DWORD)grp; k++)
                 {
-                    *p++ = L' ';            // gap between the two 8-byte halves
+                    const WCHAR* szB = hd.sz[pb[i + k]];
+                    p[0] = szB[0];
+                    p[1] = szB[1];
+                    p[2] = szB[2];
+                    p += 3;
                 }
-                const WCHAR* szB = hd.sz[q[i]];
-                *p++ = szB[0];                  // two digits + space, from the table
-                *p++ = szB[1];
-                *p++ = szB[2];
-            }
-#endif
-            *p++ = L' ';    // 3.20: fixed stray space after dereference operator
-            for (int i = 0; i < 16; i++)
-            {
-                *p++ = am.w[q[i]];              // 3.02: LUT, sin compare-and-select
-            }
-        }
-        else
-        {
-            // Final partial line: same output, bounds-checked.
-            for (int i = 0; i < 16; i++)
-            {
-                if (i == 8)
+                if (i + (DWORD)grp < (DWORD)bpl)
                 {
-                    *p++ = L' ';
-                }
-                if (off + (DWORD)i < cbUse)
-                {
-                    const WCHAR* szB = hd.sz[pBytes[off + i]];
-                    *p++ = szB[0];
-                    *p++ = szB[1];
-                    *p++ = szB[2];
-                }
-                else
-                {
-                    *p++ = L' ';
-                    *p++ = L' ';
                     *p++ = L' ';
                 }
             }
             *p++ = L' ';
-            for (int i = 0; i < 16; i++)
+            for (DWORD i = 0; i < (DWORD)bpl; i++)
             {
-                *p++ = (off + (DWORD)i < cbUse) ? am.w[pBytes[off + i]] : L' ';   // 3.02: LUT
+                *p++ = am.w[pb[i]];
+            }
+            *p++ = L'\r';
+            *p++ = L'\n';
+            continue;
+        }
+        for (DWORD i = 0; i < (DWORD)bpl; i++)
+        {
+            if (i < n)
+            {
+                const WCHAR* szB = hd.sz[pBytes[off + i]];
+                *p++ = szB[0];
+                *p++ = szB[1];
+                *p++ = szB[2];
+            }
+            else
+            {
+                *p++ = L' ';
+                *p++ = L' ';
+                *p++ = L' ';
+            }
+            if (grp > 0 && ((int)(i + 1) % grp) == 0 && (int)(i + 1) < bpl)
+            {
+                *p++ = L' ';
+            }
+        }
+        *p++ = L' ';
+        for (DWORD i = 0; i < (DWORD)bpl; i++)
+        {
+            if (i < n)
+            {
+                *p++ = am.w[pBytes[off + i]];
+            }
+            else
+            {
+                *p++ = L' ';
             }
         }
         *p++ = L'\r';
         *p++ = L'\n';
-        // 3.10: build ticks for the load bar — only the worker passes a job
-        // (every UI-thread re-decode comes with nullptr and never ticks, and
-        // a bar no tick has raised yet stays hidden: bBarPosted gates it).
-        // Every 4096 lines (64 KB of page) the chars written so far join
-        // the page bytes on the one scale the read ticks opened, so the
-        // x4.25 dump build — the slow CPU stretch of a hex load — keeps the
-        // bar climbing to 100% instead of hiding behind a frozen marquee.
-        if (pProgJob != nullptr && pProgJob->bBarPosted && (iLine & 0xFFF) == 0)
-        {
-            LoadProgressPublish(pProgJob, (ULONGLONG)cb + (ULONGLONG)(p - pOut), (ULONGLONG)cb + EstBuildChars(VIEW_HEX, cb));
-        }
-    }
-    if (!bTruncated && p > pOut)
-    {
-        p -= 2;   // 6.11: no CRLF after the LAST row: the index counted an extra, empty line (End / Ctrl+End parked the caret on a blank row, and its gutter label)
-    }
-    if (bTruncated)
-    {
-        WCHAR szFirst[32], szLast[32], szTotal[32];
-        FormatU64Locale(szFirst, _countof(szFirst), qwBase);
-        FormatU64Locale(szLast, _countof(szLast), qwBase + (ULONGLONG)cbUse);
-        FormatU64Locale(szTotal, _countof(szTotal), cbAll);
-        // 3.02: the notice is a paragraph of its own, like the text views.
-        // It used to REPLACE the final CRLF, ending glued to the last
-        // dump line ("...MZ......[Hex view: ...]"); the +160 slack of the
-        // allocation covers the kept CRLF with room to spare.
-        *p++ = L'\r';
-        *p++ = L'\n';
-        p += wsprintfW(p, L"[Hex view: showing bytes %s-%s of %s]", szFirst, szLast, szTotal);
     }
     *p = L'\0';
     if (pcch != nullptr)
@@ -4845,7 +9189,8 @@ static bool ParallelDecodeText(UINT cp, const BYTE* pSrc, DWORD cbSrc, DWORD cEx
     return true;
 }
 
-bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen, LoadJob* pProgJob, bool* pbNormalized)
+
+bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen, bool* pbNormalized)
 {
     *ppText = nullptr;
     *pcch = 0;
@@ -4873,7 +9218,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
     if (iViewBuild == VIEW_HEX)
     {
         DWORD cchHex = 0;
-        *ppText = BuildHexText(pBytes, cb, cbAll, qwBase, &cchHex, pProgJob);
+        *ppText = BuildHexText(pBytes, cb, cbAll, qwBase, &cchHex);
         if (*ppText == nullptr)
         {
             return(false);                  // 3.05: OOM answers FALSE, never a null dump
@@ -5081,83 +9426,9 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
     }
     else if (iViewBuild == VIEW_EBCDIC)             // IBM mainframe text (CP37/500 graphic set)
     {
-        // The classic EBCDIC tables (code pages 37 and 500 share the
-        // graphic cells used here): letters, digits and the punctuation
-        // cells of the US/international set; every unmapped byte shows
-        // U+FFFD. Built as a function-local static so C++11 makes the
-        // one-time fill thread-safe (the worker thread can arrive here).
-        struct EbcdicTable
-        {
-            WCHAR w[256];
-            EbcdicTable()
-            {
-                for (int i = 0; i < 256; i++)
-                {
-                    w[i] = 0xFFFD;   // unmapped: the replacement character
-                }
-                w[0x00] = 0x0000;        // NUL stays NUL (binary heuristics)
-                w[0x40] = L' ';  w[0x4A] = 0x00A2; w[0x4B] = L'.';  w[0x4C] = L'<';
-                w[0x4D] = L'(';  w[0x4E] = L'+';  w[0x4F] = L'|';  w[0x50] = L'&';
-                w[0x5A] = L'!';  w[0x5B] = L'$';  w[0x5C] = L'*';  w[0x5D] = L')';
-                w[0x5E] = L';';  w[0x5F] = 0x00AC; w[0x60] = L'-'; w[0x61] = L'/';
-                w[0x6A] = 0x00A6; w[0x6B] = L',';  w[0x6C] = L'%'; w[0x6D] = L'_';
-                w[0x6E] = L'>';  w[0x6F] = L'?';   w[0x7A] = L':';
-                w[0x7B] = L'#';  w[0x7C] = L'@';  w[0x7D] = 0x0027; w[0x7E] = L'=';
-                w[0x7F] = L'"';
-                for (int i = 0; i < 9; i++)            // a-i
-                {
-                    w[0x81 + i] = (WCHAR)(L'a' + i);
-                }
-                for (int i = 0; i < 9; i++)            // j-r
-                {
-                    w[0x91 + i] = (WCHAR)(L'j' + i);
-                }
-                for (int i = 0; i < 8; i++)            // s-z
-                {
-                    w[0xA2 + i] = (WCHAR)(L's' + i);
-                }
-                for (int i = 0; i < 9; i++)            // A-I
-                {
-                    w[0xC1 + i] = (WCHAR)(L'A' + i);
-                }
-                for (int i = 0; i < 9; i++)            // J-R
-                {
-                    w[0xD1 + i] = (WCHAR)(L'J' + i);
-                }
-                for (int i = 0; i < 8; i++)            // S-Z
-                {
-                    w[0xE2 + i] = (WCHAR)(L'S' + i);
-                }
-                for (int i = 0; i < 10; i++)           // 0-9
-                {
-                    w[0xF0 + i] = (WCHAR)(L'0' + i);
-                }
-                // 6.03: the rest of the code page 37 graphic cells: the
-                // brackets/braces/backslash/tilde/caret/grave and the Latin-1
-                // accented letters (n with tilde, vowels with accents...).
-                static const struct { BYTE b; WORD u; } kCp037[] =
-                {
-                    {0x41,0x00A0},{0x42,0x00E2},{0x43,0x00E4},{0x44,0x00E0},{0x45,0x00E1},{0x46,0x00E3},{0x47,0x00E5},{0x48,0x00E7},{0x49,0x00F1},
-                    {0x51,0x00E9},{0x52,0x00EA},{0x53,0x00EB},{0x54,0x00E8},{0x55,0x00ED},{0x56,0x00EE},{0x57,0x00EF},{0x58,0x00EC},{0x59,0x00DF},
-                    {0x62,0x00C2},{0x63,0x00C4},{0x64,0x00C0},{0x65,0x00C1},{0x66,0x00C3},{0x67,0x00C5},{0x68,0x00C7},{0x69,0x00D1},
-                    {0x70,0x00F8},{0x71,0x00C9},{0x72,0x00CA},{0x73,0x00CB},{0x74,0x00C8},{0x75,0x00CD},{0x76,0x00CE},{0x77,0x00CF},{0x78,0x00CC},{0x79,0x0060},
-                    {0x80,0x00D8},{0x8A,0x00AB},{0x8B,0x00BB},{0x8C,0x00F0},{0x8D,0x00FD},{0x8E,0x00FE},{0x8F,0x00B1},
-                    {0x90,0x00B0},{0x9A,0x00AA},{0x9B,0x00BA},{0x9C,0x00E6},{0x9D,0x00B8},{0x9E,0x00C6},{0x9F,0x00A4},
-                    {0xA0,0x00B5},{0xA1,0x007E},{0xAA,0x00A1},{0xAB,0x00BF},{0xAC,0x00D0},{0xAD,0x00DD},{0xAE,0x00DE},{0xAF,0x00AE},
-                    {0xB0,0x005E},{0xB1,0x00A3},{0xB2,0x00A5},{0xB3,0x00B7},{0xB4,0x00A9},{0xB5,0x00A7},{0xB6,0x00B6},{0xB7,0x00BC},{0xB8,0x00BD},{0xB9,0x00BE},
-                    {0xBA,0x005B},{0xBB,0x005D},{0xBC,0x00AF},{0xBD,0x00A8},{0xBE,0x00B4},{0xBF,0x00D7},
-                    {0xC0,0x007B},{0xCA,0x00AD},{0xCB,0x00F4},{0xCC,0x00F6},{0xCD,0x00F2},{0xCE,0x00F3},{0xCF,0x00F5},
-                    {0xD0,0x007D},{0xDA,0x00B9},{0xDB,0x00FB},{0xDC,0x00FC},{0xDD,0x00F9},{0xDE,0x00FA},{0xDF,0x00FF},
-                    {0xE0,0x005C},{0xE1,0x00F7},{0xEA,0x00B2},{0xEB,0x00D4},{0xEC,0x00D6},{0xED,0x00D2},{0xEE,0x00D3},{0xEF,0x00D5},
-                    {0xFA,0x00B3},{0xFB,0x00DB},{0xFC,0x00DC},{0xFD,0x00D9},{0xFE,0x00DA}
-                };
-                for (size_t k = 0; k < sizeof(kCp037) / sizeof(kCp037[0]); k++)
-                {
-                    w[kCp037[k].b] = (WCHAR)kCp037[k].u;
-                }
-            }
-        };
-        static const EbcdicTable et;
+        // 6.22: the table lives at FILE SCOPE now (g_EbcdicTable): the whole-file
+        // find and the whole-file export decode with the same one.
+        const EbcdicTable& et = g_EbcdicTable;
         int cbSrc = (int)cb;
         if (cbSrc > (int)CB_TEXT_MAX)
         {
@@ -6828,7 +11099,7 @@ static void SetAnsiCodePage(UINT cp)
 {
     if (cp != CP_ACP && !IsValidCodePage(cp))
     {
-        MessageBoxW(hWndMain, L"This code page is not installed on this system.", szTitle, MB_OK | MB_ICONWARNING);
+        AppMsgBox(hWndMain, L"This code page is not installed on this system.", szTitle, MB_OK | MB_ICONWARNING);
         return;
     }
     g_bCsvMode = false;                                  // a table of the old decoding makes no sense
@@ -6944,7 +11215,8 @@ static void TV_PaintWhitespace(HDC hdc, const TextViewState* pState, int xBase, 
 // row across the two. The shade follows whatever background the row has (plain, green bar, current line,
 // bookmark), the text colour follows the theme (blue on light, light blue on dark). Each part is drawn with
 // its own clip rectangle by the same painters (selection, tabs, frozen columns all keep working).
-#define TV_HEX_ASCII_COL 50
+// 6.24: TV_HEX_ASCII_COL was 50 (16 bytes, group 8). Use HexAsciiCol() instead.
+#define TV_HEX_ASCII_COL (HexAsciiCol())
 
 static COLORREF TV_HexAsciiBg(COLORREF c)
 {
@@ -6960,6 +11232,64 @@ static COLORREF TV_HexAsciiText(COLORREF clrBg)
 {
     const int r = GetRValue(clrBg), g = GetGValue(clrBg), b = GetBValue(clrBg);
     return ((r * 299 + g * 587 + b * 114) / 1000 >= 128) ? RGB(0x1F, 0x5F, 0x9F) : RGB(0x8F, 0xD0, 0xFF);
+}
+
+// 6.22: the Highlight Matches overlay. After a visual row is painted, every
+// span of the Find pattern that intersects it gets its highlight fill and its
+// text redrawn on top (two GDI calls per span; a row carries only the spans a
+// search would put there). The selection keeps its own colors: a span inside
+// it is skipped. Works with frozen columns (the caller's clip rectangle holds)
+// and with tabs (the visual columns of TV_VisCol translate char -> x).
+static void TV_PaintMatchOverlay(HDC hdc, const TextViewState* pState, int xBase, int y, int iLS, int iPos, int iChunkEnd, int cxClient, const int* pLo, const int* pHi, int cSpans)
+{
+    if (cSpans <= 0 || iHexCharW <= 0 || iChunkEnd <= iPos || pState->pText == nullptr)
+    {
+        return;
+    }
+    const COLORREF clrHi = g_bDark ? RGB(0x6B, 0x54, 0x1A) : RGB(0xFF, 0xE2, 0x9E);
+    HBRUSH hbr = ThBrush(clrHi);
+    if (hbr == nullptr)
+    {
+        return;
+    }
+    const int iSelLo = TV_LoI(pState->iSelStart, pState->iSelEnd);
+    const int iSelHi = TV_HiI(pState->iSelStart, pState->iSelEnd);
+    const int iColBase = TV_VisCol(iLS, iPos);              // visual column of the chunk's first char
+    for (int k = 0; k < cSpans; k++)
+    {
+        const int lo = pLo[k];
+        const int hi = pHi[k];
+        if (hi <= iPos || lo >= iChunkEnd)
+        {
+            continue;                               // another row draws this one
+        }
+        if (lo >= iSelLo && hi <= iSelHi)
+        {
+            continue;                               // the selection already painted its own colors
+        }
+        const int x0 = xBase + (TV_VisCol(iLS, (lo > iPos) ? lo : iPos) - iColBase) * iHexCharW;
+        const int x1 = xBase + (TV_VisCol(iLS, (hi < iChunkEnd) ? hi : iChunkEnd) - iColBase) * iHexCharW;
+        int xa = (x0 < 0) ? 0 : x0;
+        int xb = (x1 > cxClient) ? cxClient : x1;
+        if (xb > xBase + (TV_VisCol(iLS, iChunkEnd) - iColBase) * iHexCharW)
+        {
+            xb = xBase + (TV_VisCol(iLS, iChunkEnd) - iColBase) * iHexCharW;   // never past the chunk's own edge
+        }
+        if (xb <= xa)
+        {
+            continue;
+        }
+        RECT rc = { xa, y, xb, y + iHexLineH };
+        FillRect(hdc, &rc, hbr);
+        const int iStart = (lo > iPos) ? lo : iPos;
+        const int iEnd = (hi < iChunkEnd) ? hi : iChunkEnd;
+        if (iEnd > iStart && x0 >= xa - iHexCharW && x0 < cxClient)
+        {
+            SetBkColor(hdc, clrHi);
+            ExtTextOutW(hdc, x0, y, ETO_OPAQUE, &rc, pState->pText + iStart, (UINT)(iEnd - iStart), nullptr);
+            SetBkMode(hdc, TRANSPARENT);            // the row painter's mode, restored for the next span
+        }
+    }
 }
 
 static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y, int iPos, int iChunkEnd,
@@ -7128,6 +11458,16 @@ static int FindPlainBefore(const WCHAR* pText, int cch, const WCHAR* pat, int n,
         }
         if (TvEqualAt(pText + i, pat, n, bCase))
         {
+            // 6.22: Whole word — the same boundary rule FindPatternFrom applies
+            if (fr.Flags & FR_WHOLEWORD)
+            {
+                const bool bLeftOk = (i == 0) || !FxIsWordChar(pText[i - 1]);
+                const bool bRightOk = (i + n >= cch) || !FxIsWordChar(pText[i + n]);
+                if (!bLeftOk || !bRightOk)
+                {
+                    continue;
+                }
+            }
             return i;
         }
     }
@@ -7177,17 +11517,38 @@ static ULONGLONG PercentOffset(ULONGLONG qwTotal, ULONGLONG qwPct)
 // 8 bytes, one space, then the 16 ASCII characters from column TV_HEX_ASCII_COL.
 static int HexByteOfCol(int col)
 {
+    // 6.24: walk the same geometry BuildHexText uses (group gaps).
+    const int bpl = HexBpl();
+    const int grp = HexGrp();
+    const int asciiCol = HexAsciiCol();
     if (col < 0)
     {
         return 0;
     }
-    if (col >= TV_HEX_ASCII_COL)
+    if (col >= asciiCol)
     {
-        const int b = col - TV_HEX_ASCII_COL;
-        return (b > 15) ? 15 : b;
+        const int b = col - asciiCol;
+        return (b >= bpl) ? (bpl - 1) : b;
     }
-    const int b = (col <= 24) ? col / 3 : (col - 1) / 3;
-    return (b > 15) ? 15 : b;
+    int c = 0;
+    for (int i = 0; i < bpl; i++)
+    {
+        // each byte occupies columns c..c+2 ("XX ")
+        if (col < c + 3)
+        {
+            return i;
+        }
+        c += 3;
+        if (grp > 0 && ((i + 1) % grp) == 0 && (i + 1) < bpl)
+        {
+            if (col < c + 1)
+            {
+                return i;                       // landed in the group gap: still this byte
+            }
+            c += 1;
+        }
+    }
+    return bpl - 1;
 }
 
 static void U64ToHex(WCHAR* d, ULONGLONG v)          // at least 8 digits
@@ -7237,12 +11598,15 @@ static const WCHAR* ViewLabel(int iV)
     return L"";
 }
 
-// "Remember where I was": an MRU list of "offset|path" entries in the INI ([Positions], P1..P24). Pure part:
+// "Remember where I was": an MRU list in the INI ([Positions], P1..P24). Pure part:
 // put the new entry first, drop the old entry of the same path (case-insensitive), cap the list.
+// 6.22: the entry grew from "offset|path" to "offset|view|cp|font|bm,bm,...|path" — the
+// view, the ANSI code page, the font size and the page's bookmark OFFSETS come back with
+// the position. Old two-field entries keep working (rfind finds the path in both).
 #define POS_MAX 24
 static bool PosPathEq(const std::wstring& entry, const std::wstring& path)
 {
-    const size_t iBar = entry.find(L'|');
+    const size_t iBar = entry.rfind(L'|');      // 6.22: the LAST bar — the path is the last field
     if (iBar == std::wstring::npos)
     {
         return false;
@@ -7328,8 +11692,9 @@ static void TV_MoveCaretWord(TextViewState* pState, int iDir, bool bShift)
     TV_ScrollCaret();
 }
 
-// ---- remember where I was (INI [Positions]: P1 = "offset|path", most recent first) -------------------------------
-static bool PosLookup(const WCHAR* pszPath, ULONGLONG* pqwOff)
+// ---- remember where I was (INI [Positions]: P1 = "offset|view|cp|font|bms|path", most recent first) ----
+
+static bool PosLookup(const WCHAR* pszPath, PosEntry* pE)
 {
     if (!g_bRememberPos || g_szIniPath[0] == L'\0')
     {
@@ -7337,36 +11702,84 @@ static bool PosLookup(const WCHAR* pszPath, ULONGLONG* pqwOff)
     }
     for (int i = 1; i <= POS_MAX; i++)
     {
-        WCHAR szKey[8], szVal[MAX_PATH + 32];
+        WCHAR szKey[8], szVal[MAX_PATH + 800];
         wsprintfW(szKey, L"P%d", i);
         if (GetPrivateProfileStringW(L"Positions", szKey, L"", szVal, _countof(szVal), g_szIniPath) == 0)
         {
             break;                                   // the list is contiguous: the first empty key ends it
         }
-        WCHAR* pBar = wcschr(szVal, L'|');
-        if (pBar != nullptr && lstrcmpiW(pBar + 1, pszPath) == 0)
+        // the path is the LAST field; 6.22 entries carry extras between the first bar and it
+        WCHAR* pLast = wcsrchr(szVal, L'|');
+        if (pLast != nullptr && lstrcmpiW(pLast + 1, pszPath) == 0)
         {
-            *pBar = L'\0';
-            ULONGLONG q = 0;
-            if (ParseU64(szVal, q))
+            *pLast = L'\0';
+            if (!ParseU64(szVal, pE->qwOff))
             {
-                *pqwOff = q;
-                return true;
+                return false;
             }
-            return false;
+            // the extras (tolerant: an old entry or a hand-edited one degrades to offsets only)
+            WCHAR* pCtx = nullptr;
+            WCHAR* pTok = wcstok_s(szVal, L"|", &pCtx);   // token 0 = the offset (already parsed): skip it
+            if (pTok != nullptr)
+            {
+                pTok = wcstok_s(nullptr, L"|", &pCtx);
+            }
+            int iField = 0;
+            while (pTok != nullptr && iField < 4)
+            {
+                ULONGLONG q = 0;
+                switch (iField)
+                {
+                case 0:                             // the view
+                    if (ParseU64(pTok, q) && q >= (ULONGLONG)VIEW_ANSI && q <= (ULONGLONG)VIEW_UTF32BE)
+                    {
+                        pE->iView = (int)q;
+                    }
+                    break;
+                case 1:                             // the ANSI code page
+                    if (ParseU64(pTok, q) && q > 0 && q < 65536)
+                    {
+                        pE->uCP = (UINT)q;
+                    }
+                    break;
+                case 2:                             // the font size slot
+                    if (ParseU64(pTok, q) && q < (ULONGLONG)_countof(g_iFontSizes))
+                    {
+                        pE->iFont = (int)q;
+                    }
+                    break;
+                case 3:                             // bookmarks, comma-separated absolute offsets
+                {
+                    WCHAR* pCtx2 = nullptr;
+                    WCHAR* pTok2 = wcstok_s(pTok, L",", &pCtx2);
+                    while (pTok2 != nullptr && pE->cBm < POS_BM_MAX)
+                    {
+                        if (ParseU64(pTok2, q))
+                        {
+                            pE->qwbm[pE->cBm++] = q;
+                        }
+                        pTok2 = wcstok_s(nullptr, L",", &pCtx2);
+                    }
+                    break;
+                }
+                }
+                iField++;
+                pTok = wcstok_s(nullptr, L"|", &pCtx);
+            }
+            return true;
         }
     }
     return false;
 }
 
-static void PosStore(const WCHAR* pszPath, ULONGLONG qwOff)
+static void PosStore(const WCHAR* pszPath, const PosEntry* pE)
 {
     try
     {
         std::vector<std::wstring> v;
         for (int i = 1; i <= POS_MAX; i++)
         {
-            WCHAR szKey[8], szVal[MAX_PATH + 32];
+            WCHAR szKey[8], szVal[MAX_PATH + 800];
             wsprintfW(szKey, L"P%d", i);
             if (GetPrivateProfileStringW(L"Positions", szKey, L"", szVal, _countof(szVal), g_szIniPath) == 0)
             {
@@ -7375,8 +11788,43 @@ static void PosStore(const WCHAR* pszPath, ULONGLONG qwOff)
             v.push_back(szVal);
         }
         WCHAR szOff[32];
-        U64ToWide(szOff, qwOff);
-        PosMruMerge(v, std::wstring(szOff) + L"|" + pszPath, pszPath, POS_MAX);
+        U64ToWide(szOff, pE->qwOff);
+        // the 6.22 entry: offset|view|cp|font|bm,bm,...|path
+        std::wstring entry(szOff);
+        {
+            WCHAR szNum[24];
+            entry += L"|";
+            if (pE->iView >= VIEW_ANSI && pE->iView <= VIEW_UTF32BE)
+            {
+                U64ToWide(szNum, (ULONGLONG)pE->iView);
+                entry += szNum;
+            }
+            entry += L"|";
+            if (pE->uCP != 0)
+            {
+                U64ToWide(szNum, (ULONGLONG)pE->uCP);
+                entry += szNum;
+            }
+            entry += L"|";
+            if (pE->iFont >= 0)
+            {
+                U64ToWide(szNum, (ULONGLONG)pE->iFont);
+                entry += szNum;
+            }
+            entry += L"|";
+            for (int i = 0; i < pE->cBm && i < POS_BM_MAX; i++)
+            {
+                if (i > 0)
+                {
+                    entry += L",";
+                }
+                U64ToWide(szNum, pE->qwbm[i]);
+                entry += szNum;
+            }
+            entry += L"|";
+            entry += pszPath;
+        }
+        PosMruMerge(v, entry, pszPath, POS_MAX);
         std::wstring sec;
         for (size_t i = 0; i < v.size(); i++)
         {
@@ -7395,7 +11843,8 @@ static void PosStore(const WCHAR* pszPath, ULONGLONG qwOff)
 }
 
 // Called when the file on screen is about to be replaced and when the window closes: the first VISIBLE line's
-// file offset. (Not for the clipboard / pipe entries, vanished files, or tail mode.)
+// file offset (6.22: plus the view, the ANSI code page, the font and the page's bookmark offsets).
+// (Not for the clipboard / pipe entries, vanished files, or tail mode.)
 static void SaveFilePosition(void)
 {
     if (!g_bRememberPos || g_szIniPath[0] == L'\0' || g_szCurrentFile[0] == L'\0' || g_cbFileTotal == 0 ||
@@ -7412,7 +11861,17 @@ static void SaveFilePosition(void)
     {
         return;
     }
-    PosStore(g_szCurrentFile, qwOff);
+    PosEntry pe;
+    pe.qwOff = qwOff;
+    pe.iView = iView;
+    pe.uCP = (iView == VIEW_ANSI) ? g_uAnsiCP : 0;
+    pe.iFont = g_iFontIndex;
+    pe.cBm = (g_cBookmarks < POS_BM_MAX) ? g_cBookmarks : POS_BM_MAX;   // the page's bookmark offsets survive the session
+    for (int i = 0; i < pe.cBm; i++)
+    {
+        pe.qwbm[i] = g_pBookmarkOffs[i];
+    }
+    PosStore(g_szCurrentFile, &pe);
 }
 
 // ---- right-click menu of the view -----------------------------------------------------------------------------
@@ -7685,6 +12144,15 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             int iLE = (iLine + 1 < pState->cLines) ? pState->pLineStarts[iLine + 1] : pState->cch;
             int iDispEnd = TV_DispEnd(pState->pText, iLineStart, iLE);   // 5.9.10: one helper
 
+            // 6.22: Highlight Matches — the spans of the Find pattern in THIS
+            // logical line (visible rows only get painted anyway). Plain and
+            // regex share the collector; the overlay runs after each chunk.
+            enum { kHiliteMax = 64 };
+            int aHiLo[kHiliteMax], aHiHi[kHiliteMax];
+            int cHiSpans = (g_bHiliteAll && iView != VIEW_HEX && szFind[0] != L'\0')
+                ? TvCollectMatches(pState->pText, iLineStart, iDispEnd, aHiLo, aHiHi, kHiliteMax)
+                : 0;
+
             // V5: greenbar background for this logical line; 5.8: the
             // caret line wins the band when the option is on; 5.9: a
             // bookmarked line wins over both (it is the persistent mark).
@@ -7693,7 +12161,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             // keep the brush. One source of truth instead of two parallel
             // ternary chains that could drift apart.
             bool bBmLine = false;
-            if (g_cBookmarks > 0)
+            if (g_cBookmarks > 0 && !g_bFilter)   // 6.22: the filter hides the bookmark lines (their numbers mean nothing in the subset)
             {
                 // 5.9.13 hotfix (build): C4018 signed/unsigned — g_pBookmarks
                 // is DWORD*, iLine is int. Same (int) cast the gutter cursor
@@ -7773,15 +12241,18 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
                             int iSaved = SaveDC(hdcPaint);
                             IntersectClipRect(hdcPaint, iFreezePx, y, rc.right, y + iHexLineH);
                             TV_PaintChunk(hdcPaint, pState, -iScrollX, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, rc.right);
+                            TV_PaintMatchOverlay(hdcPaint, pState, -iScrollX, y, iLineStart, iPos, iChunkEnd, rc.right, aHiLo, aHiHi, cHiSpans);
                             RestoreDC(hdcPaint, iSaved);
                             iSaved = SaveDC(hdcPaint);
                             IntersectClipRect(hdcPaint, 0, y, iFreezePx, y + iHexLineH);
                             TV_PaintChunk(hdcPaint, pState, 0, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, rc.right);
+                            TV_PaintMatchOverlay(hdcPaint, pState, 0, y, iLineStart, iPos, iChunkEnd, rc.right, aHiLo, aHiHi, cHiSpans);
                             RestoreDC(hdcPaint, iSaved);
                         }
                         else
                         {
                             TV_PaintChunk(hdcPaint, pState, -iScrollX, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, rc.right);
+                            TV_PaintMatchOverlay(hdcPaint, pState, -iScrollX, y, iLineStart, iPos, iChunkEnd, rc.right, aHiLo, aHiHi, cHiSpans);
                         }
                     }
 
@@ -8204,7 +12675,7 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
         if (pNorm == nullptr)
         {
             FreeViewText(pText);
-            MessageBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
+            AppMsgBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
             return;
         }
         cch = cchNorm;   // V5: use the normalized length from here on
@@ -8370,6 +12841,25 @@ void UpdateViewMenu(void)
         CheckMenuItem(hBar, ID_VIEW_ESCEXIT, MF_BYCOMMAND | (g_bEscExit ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hBar, ID_FIND_REGEX, MF_BYCOMMAND | (g_bRegexFind ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hBar, ID_VIEW_WHITESPACE, MF_BYCOMMAND | (g_bShowWS ? MF_CHECKED : MF_UNCHECKED));                 // 6.18
+        // 6.22: the new toggles and the hex-only copy commands
+        CheckMenuItem(hBar, ID_OPTIONS_FILTER, MF_BYCOMMAND | (g_bFilter ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(hBar, ID_OPTIONS_HILITEALL, MF_BYCOMMAND | (g_bHiliteAll ? MF_CHECKED : MF_UNCHECKED));
+        {
+            const UINT uHex = MF_BYCOMMAND | ((iView == VIEW_HEX) ? MF_ENABLED : MF_GRAYED);
+            EnableMenuItem(hBar, ID_COPY_CARRAY, uHex);
+            EnableMenuItem(hBar, ID_COPY_ASMARRAY, uHex);
+            EnableMenuItem(hBar, ID_COPY_PHPARRAY, uHex);
+            EnableMenuItem(hBar, ID_COPY_JSARRAY, uHex);
+            EnableMenuItem(hBar, ID_COPY_PYARRAY, uHex);
+            EnableMenuItem(hBar, ID_COPY_B64, uHex);
+            CheckMenuItem(hBar, ID_HEX_BPL8, MF_BYCOMMAND | (g_iHexBpl == 8 ? MF_CHECKED : MF_UNCHECKED));
+            CheckMenuItem(hBar, ID_HEX_BPL16, MF_BYCOMMAND | (g_iHexBpl == 16 ? MF_CHECKED : MF_UNCHECKED));
+            CheckMenuItem(hBar, ID_HEX_BPL32, MF_BYCOMMAND | (g_iHexBpl == 32 ? MF_CHECKED : MF_UNCHECKED));
+            CheckMenuItem(hBar, ID_HEX_GRP1, MF_BYCOMMAND | (g_iHexGroup == 1 ? MF_CHECKED : MF_UNCHECKED));
+            CheckMenuItem(hBar, ID_HEX_GRP2, MF_BYCOMMAND | (g_iHexGroup == 2 ? MF_CHECKED : MF_UNCHECKED));
+            CheckMenuItem(hBar, ID_HEX_GRP4, MF_BYCOMMAND | (g_iHexGroup == 4 ? MF_CHECKED : MF_UNCHECKED));
+            CheckMenuItem(hBar, ID_HEX_GRP8, MF_BYCOMMAND | (g_iHexGroup == 8 ? MF_CHECKED : MF_UNCHECKED));
+        }
         HMENU hThemeMenu = FindSubMenuWithCommand(hWndMain, ID_THEME_AUTO);
         if (hThemeMenu != nullptr)
         {
@@ -8394,6 +12884,10 @@ void SetView(int iNewView)
     if (iNewView == VIEW_HEX)
     {
         g_bCsvMode = false;                     // 6.16: hex is never a CSV table
+        if (g_bFilter)
+        {
+            FilterClear(false);                 // 6.22: the filter is a text-view aid (the rebuild below shows the full dump)
+        }
     }
     else
     {
@@ -8443,12 +12937,12 @@ void SetView(int iNewView)
             {
                 PositionAtOffset(qwCaretOff);
             }
-            MessageBox(hWndMain, L"The requested view is not available; showing hexadecimal instead.", szTitle, MB_OK | MB_ICONWARNING);
+            AppMsgBox(hWndMain, L"The requested view is not available; showing hexadecimal instead.", szTitle, MB_OK | MB_ICONWARNING);
             return;
         }
     }
     ResetViewer();
-    MessageBox(hWndMain, L"The requested view could not be shown.", szTitle, MB_OK | MB_ICONERROR);
+    AppMsgBox(hWndMain, L"The requested view could not be shown.", szTitle, MB_OK | MB_ICONERROR);
 }
 
 
@@ -8488,12 +12982,12 @@ void ApplyView(void)
         DWORD cch = 0;
         DWORD dwSrcOff = 0, dwSrcLen = 0;
         bool bPreNorm = false;                // 6.14: a big page is decoded and normalized in parallel cells
-        if (!BuildViewText(iView, pFileBytes, cbDecode, g_cbFileTotal, g_qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen, nullptr, &bPreNorm))
+        if (!BuildViewText(iView, pFileBytes, cbDecode, g_cbFileTotal, g_qwBase, &pText, &cch, &dwSrcOff, &dwSrcLen, &bPreNorm))
         {
             // 3.05: out of memory in the decode — an honest FALSE with
             // its message, where a null block used to be written through.
             SetCursor(hcurOld);
-            MessageBox(hWndMain, L"Not enough memory to show this view.", szTitle, MB_OK | MB_ICONERROR);
+            AppMsgBox(hWndMain, L"Not enough memory to show this view.", szTitle, MB_OK | MB_ICONERROR);
             return;
         }
         // 3.05: the CRLF pass is planned on the RAW BYTES, the same
@@ -8521,7 +13015,7 @@ void ApplyView(void)
         SendMessage(hEdit, WM_SETREDRAW, TRUE, 0);
         InvalidateRect(hEdit, nullptr, TRUE);
         SetCursor(hcurOld);
-        MessageBox(hWndMain, L"Not enough memory to show this view.", szTitle, MB_OK | MB_ICONERROR);
+        AppMsgBox(hWndMain, L"Not enough memory to show this view.", szTitle, MB_OK | MB_ICONERROR);
     }
 }
 
@@ -8936,7 +13430,18 @@ void UpdateStatusBar(bool bForce)
         dwLineStart = 0;
     }
     WCHAR szLine[32], szCol[32];
-    FormatU64Locale(szLine, _countof(szLine), (ULONGLONG)iLine + 1);
+    // 6.22: the filter shows a SUBSET of the page: its line numbers lie. The
+    // gutter override (the original line of each kept line) labels the status
+    // bar too, and the file percent (computed from the FULL page's share) is
+    // replaced by the honest filter counts.
+    if (g_bFilter && g_pFilterOrig != nullptr && iLine >= 0 && iLine < g_cFilterShown)
+    {
+        FormatU64Locale(szLine, _countof(szLine), (ULONGLONG)g_pFilterOrig[iLine] + 1);
+    }
+    else
+    {
+        FormatU64Locale(szLine, _countof(szLine), (ULONGLONG)iLine + 1);
+    }
     int iVisCol = TV_VisCol((int)dwLineStart, (int)dwSelEnd);      // 6.09: tab stops count as columns
     if (iVisCol < 0) iVisCol = 0;
     FormatU64Locale(szCol, _countof(szCol), (ULONGLONG)iVisCol + 1);
@@ -8945,7 +13450,7 @@ void UpdateStatusBar(bool bForce)
     if (iView == VIEW_HEX)
     {
         // 6.17: the FILE offset of the byte under the caret (the dump's own line / column say nothing about the file)
-        ULONGLONG qwOff = g_qwBase + (ULONGLONG)iLine * 16 + (ULONGLONG)HexByteOfCol((int)(dwSelEnd - dwLineStart));
+        ULONGLONG qwOff = g_qwBase + (ULONGLONG)iLine * (ULONGLONG)(HexBpl()) + (ULONGLONG)HexByteOfCol((int)(dwSelEnd - dwLineStart));
         if (g_cbFileTotal > 0 && qwOff >= g_cbFileTotal)
         {
             qwOff = g_cbFileTotal - 1;
@@ -8954,6 +13459,20 @@ void UpdateStatusBar(bool bForce)
         U64ToHex(szHex, qwOff);
         FormatU64Locale(szDec, _countof(szDec), qwOff);
         wsprintfW(szPos, L"Offset 0x%s (%s)  |  %d%%", szHex, szDec, iPct);
+    }
+    else if (g_bFilter)
+    {
+        // 6.22: the percent is a full-page notion; the counts are the truth
+        WCHAR szSel2[48];
+        if (dwSelStart != dwSelEnd)
+        {
+            FormatU64Locale(szSel2, _countof(szSel2), (ULONGLONG)((dwSelStart > dwSelEnd) ? dwSelStart - dwSelEnd : dwSelEnd - dwSelStart));
+            wsprintfW(szPos, L"FILTER %d/%d  |  Line %s, Column %s  |  Sel %s", g_cFilterShown, g_cFilterTotal, szLine, szCol, szSel2);
+        }
+        else
+        {
+            wsprintfW(szPos, L"FILTER %d/%d  |  Line %s, Column %s", g_cFilterShown, g_cFilterTotal, szLine, szCol);
+        }
     }
     else
     {
@@ -8973,7 +13492,7 @@ void UpdateStatusBar(bool bForce)
 
     WCHAR szNum[40], szSize[120];
     FormatU64Locale(szNum, _countof(szNum), g_cbFileTotal); // REAL size on disk (64-bit: any file opens now)
-    wsprintfW(szSize, L"%s%s  |  %s%s", ViewLabel(iView), g_bCsvMode ? L" (CSV)" : L"", szNum, (g_cbFileTotal == 1) ? L" byte" : L" bytes");   // 6.17: the encoding too
+    wsprintfW(szSize, L"%s%s%s  |  %s%s", ViewLabel(iView), g_bCsvMode ? L" (CSV)" : L"", g_bFilter ? L" (filtered)" : L"", szNum, (g_cbFileTotal == 1) ? L" byte" : L" bytes");   // 6.17: the encoding too (6.22: the filter)
     SendMessage(hStatusBar, SB_SETTEXT, 1, (LPARAM)szSize);
 }
 
@@ -8988,7 +13507,7 @@ void OpenFindDialog(HWND hWnd)
         SetFocus(hDlgFind);
         return;
     }
-    DWORD dwKeepCase = fr.Flags & FR_MATCHCASE;     // 5.9.14: reopening the dialog no longer forgets "Match case"
+    DWORD dwKeepCase = fr.Flags & (FR_MATCHCASE | FR_WHOLEWORD);    // 5.9.14: reopening the dialog no longer forgets "Match case" (6.22: nor "Whole word")
     ZeroMemory(&fr, sizeof(FINDREPLACEW));
     fr.lStructSize = sizeof(FINDREPLACEW);
     fr.hwndOwner = hWnd;
@@ -9167,6 +13686,20 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
         }
         if (pHit != nullptr)
         {
+            // 6.22: Whole word (the Find dialog's own flag). The char before
+            // and after the hit must not be word characters; a segment edge
+            // (text start, embedded NUL, or the text end) is a break.
+            if (fr.Flags & FR_WHOLEWORD)
+            {
+                const int cchPat = lstrlenW(szFind);
+                const bool bLeftOk = (pHit <= pszText) || (pHit[-1] == L'\0') || !FxIsWordChar(pHit[-1]);
+                const bool bRightOk = (pHit + cchPat >= pEnd) || (pHit[cchPat] == L'\0') || !FxIsWordChar(pHit[cchPat]);
+                if (!bLeftOk || !bRightOk)
+                {
+                    p = pHit + 1;               // not a whole-word hit: keep scanning the same segment
+                    continue;
+                }
+            }
             return(pHit);
         }
         p += lstrlenW(p) + 1;                       // past the NUL that ended this segment
@@ -9238,11 +13771,26 @@ void SearchNext(HWND hWnd, bool bShowError)
     {
         SelectHit(iPos, true);
     }
+    else if (g_szCurrentFile[0] != L'\0' && bShowError && !g_bInByteSearch && iView != VIEW_HEX)
+    {
+        // 6.22: the page does not hold the pattern — the WHOLE FILE continues
+        // the search in a worker (ESC cancels, progress in the status bar).
+        // The hit's page is loaded and the hit itself selected on landing.
+        // Piped input and the clipboard keep the classic message below; the
+        // hex view keeps it too (Find Bytes is the whole-file search there).
+        StartWholeFileFind();
+        if (!g_bInByteSearch)
+        {
+            WCHAR szText2[160];
+            wsprintfW(szText2, L"Cannot find \"%s\" on the page.", szFind);
+            AppMsgBox(hWnd, szText2, L"Find", MB_OK | MB_ICONINFORMATION);
+        }
+    }
     else if (bShowError)
     {
         WCHAR szText[160];
         wsprintfW(szText, L"Cannot find \"%s\".", szFind);
-        MessageBox(hWnd, szText, L"Find", MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWnd, szText, L"Find", MB_OK | MB_ICONINFORMATION);
     }
 }
 /* ============================================================================================
@@ -9347,7 +13895,7 @@ void SearchPrev(bool bShowError)
         {
             WCHAR szText[160];
             wsprintfW(szText, L"Cannot find \"%s\".", szFind);
-            MessageBoxW((hDlgFind != nullptr) ? hDlgFind : hWndMain, szText, L"Find", MB_OK | MB_ICONINFORMATION);
+            AppMsgBox((hDlgFind != nullptr) ? hDlgFind : hWndMain, szText, L"Find", MB_OK | MB_ICONINFORMATION);
         }
         return;
     }
@@ -9368,6 +13916,7 @@ void SearchPrev(bool bShowError)
 // window): Find Next / Enter still search there.
 #define FINDDLG_EDIT_ID   0x0480      // edt1
 #define FINDDLG_CASE_ID   0x0410      // chx1
+#define FINDDLG_WORD_ID   0x0411      // chx2: 6.22, the Whole-word checkbox
 #define FINDDLG_TIMER_ID  0x4D46      // big texts: search 200 ms after the last keystroke
 
 static void IncrementalFind(void)
@@ -9408,6 +13957,20 @@ static LRESULT CALLBACK FindDlgSubclassProc(HWND hDlg, UINT message, WPARAM wPar
         else
         {
             fr.Flags &= ~(DWORD)FR_MATCHCASE;
+        }
+        // 6.22: the Whole-word checkbox syncs too (chx2), and the highlight
+        // overlay of the visible rows follows the new pattern at once.
+        if (IsDlgButtonChecked(hDlg, FINDDLG_WORD_ID) == BST_CHECKED)
+        {
+            fr.Flags |= FR_WHOLEWORD;
+        }
+        else
+        {
+            fr.Flags &= ~(DWORD)FR_WHOLEWORD;
+        }
+        if (hEdit != nullptr)
+        {
+            InvalidateRect(hEdit, nullptr, FALSE);
         }
         if (g_tv.cch > (2 << 20))
         {
@@ -9451,7 +14014,7 @@ void FindAllMatches(void)
         const std::wregex* pre = GetCachedRegex();
         if (pre == nullptr)
         {
-            MessageBoxW(hWndMain, L"Invalid regular expression.", L"Find All", MB_OK | MB_ICONWARNING);
+            AppMsgBox(hWndMain, L"Invalid regular expression.", L"Find All", MB_OK | MB_ICONWARNING);
             return;
         }
         const WCHAR* p = g_tv.pText;
@@ -9482,7 +14045,7 @@ void FindAllMatches(void)
         }
         catch (...)
         {
-            MessageBoxW(hWndMain, L"The regular expression is too complex for this text.", L"Find All", MB_OK | MB_ICONWARNING);   // 6.01: was an unhandled exception
+            AppMsgBox(hWndMain, L"The regular expression is too complex for this text.", L"Find All", MB_OK | MB_ICONWARNING);   // 6.01: was an unhandled exception
             return;
         }
     }
@@ -9506,7 +14069,7 @@ void FindAllMatches(void)
     if (cHits == 0)
     {
         wsprintfW(sz, L"Cannot find \"%s\"", szFind);
-        MessageBoxW(hWndMain, sz, L"Find All", MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, sz, L"Find All", MB_OK | MB_ICONINFORMATION);
         return;
     }
     wsprintfW(sz, L"%d match(es)", cHits);
@@ -9524,7 +14087,7 @@ void PrintCurrentView(void)
 {
     if (g_tv.pText == nullptr || g_tv.cch <= 0 || g_tv.pLineStarts == nullptr)
     {
-        MessageBoxW(hWndMain, L"Nothing to print.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"Nothing to print.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     PRINTDLGW pd = {};
@@ -9987,7 +14550,7 @@ bool LoadPage(ULONGLONG qwBase, bool bTailJump)
     }
     if (iView == VIEW_HEX)
     {
-        qwBase = (qwBase / 16) * 16;     // hex pages start 16-byte aligned
+        qwBase = (qwBase / (ULONGLONG)(HexBpl())) * (ULONGLONG)(HexBpl()); // hex page align
     }
     WCHAR szPath[MAX_PATH];
     (void)lstrcpynW(szPath, g_szCurrentFile, MAX_PATH);
@@ -10300,6 +14863,10 @@ static int TailIndexExtend(const WCHAR* pTmp, int cchTmp, int k, int cchTotal, i
 
 static bool TailAppend(ULONGLONG cbSize)
 {
+    if (g_bFilter)
+    {
+        return false;                     // 6.22: the on-screen text is the filtered subset — the splice would corrupt it; the full reload re-applies the filter
+    }
     if (g_szCurrentFile[0] == L'\0' || g_bCsvMode || (iView != VIEW_ANSI && iView != VIEW_UTF8) || hEdit == nullptr ||
         pFileBytes == nullptr || cbFile == 0 || g_tv.pText == nullptr || g_tv.pText != g_pViewText ||
         g_tv.pLineStarts == nullptr || g_tv.cLines <= 0 || g_tv.cch <= 0 || g_tv.bTabs)
@@ -10447,7 +15014,7 @@ void RefreshPage(bool bTailJump)
 {
     if (g_szCurrentFile[0] == L'\0')
     {
-        MessageBox(hWndMain, L"There is no file loaded to refresh (piped input and the clipboard cannot be reloaded).", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"There is no file loaded to refresh (piped input and the clipboard cannot be reloaded).", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     LoadPage(g_qwBase, bTailJump);
@@ -10477,7 +15044,8 @@ void ToggleTail(void)
     }
     else if (hWndMain != nullptr)
     {
-        KillTimer(hWndMain, 1);
+        // 6.22: the timer STAYS armed — with tail off it drives the change
+        // watcher (WatchTick); it idles for free when no file is loaded.
     }
 }
 
@@ -10544,7 +15112,7 @@ bool OffsetOfLine(DWORD iLine, ULONGLONG& rqw)
     }
     if (iView == VIEW_HEX)
     {
-        ULONGLONG qwOff = g_qwBase + (ULONGLONG)iLine * 16;
+        ULONGLONG qwOff = g_qwBase + (ULONGLONG)iLine * (ULONGLONG)(HexBpl());
         if (qwOff >= g_qwBase + (ULONGLONG)cbFile)
         {
             qwOff = g_qwBase + (ULONGLONG)cbFile - 1;   // past the dump: the last byte
@@ -10696,11 +15264,11 @@ void RebindBookmarksToView(void)
             ULONGLONG qwRel = g_pBookmarkOffs[i] - g_qwBase;
             if (qwRel < (ULONGLONG)cbFile)
             {
-                iLine = (int)(qwRel / 16);
+                iLine = (int)(qwRel / (ULONGLONG)HexBpl());
             }
             else
             {
-                iLine = (cbFile > 0) ? (int)((ULONGLONG)(cbFile - 1) / 16) : 0;
+                iLine = (cbFile > 0) ? (int)((ULONGLONG)(cbFile - 1) / (ULONGLONG)HexBpl()) : 0;
             }
         }
         else if (iView == VIEW_EBCDIC)
@@ -10739,6 +15307,13 @@ void ToggleBookmark(void)
 {
     if (hEdit == nullptr)
     {
+        return;
+    }
+    if (g_bFilter)
+    {
+        // 6.22: a bookmark's line number means nothing in the filtered subset;
+        // leaving it on would anchor to the wrong line of the full page.
+        StatusFlash(L"Turn the filter off first (Ctrl+Shift+G), then bookmark.");
         return;
     }
     if (pFileBytes == nullptr || cbFile == 0)
@@ -10822,6 +15397,12 @@ void NextBookmark(bool bForward)
 {
     if (hEdit == nullptr)
     {
+        return;
+    }
+    if (g_bFilter)
+    {
+        // 6.22: bookmark lines mean nothing in the filtered subset (see ToggleBookmark)
+        StatusFlash(L"Turn the filter off first (Ctrl+Shift+G), then jump to bookmarks.");
         return;
     }
     if (g_cBookmarks == 0)
@@ -10913,7 +15494,7 @@ INT_PTR CALLBACK GoToProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
             const int iKind = ParseGotoText(szValue, &qwVal);
             if (iKind == 0)
             {
-                MessageBoxW(hDlg, L"Enter a number (0x prefix = hexadecimal), a percentage of the file (50%) or a relative line (+10 / -5).", L"Go To", MB_OK | MB_ICONWARNING);
+                AppMsgBox(hDlg, L"Enter a number (0x prefix = hexadecimal), a percentage of the file (50%) or a relative line (+10 / -5).", L"Go To", MB_OK | MB_ICONWARNING);
                 return (INT_PTR)TRUE;
             }
             bool bLine = (IsDlgButtonChecked(hDlg, IDC_GOTO_LINE) == BST_CHECKED);
@@ -10993,19 +15574,19 @@ void GoToOffset(ULONGLONG qwOff)
 {
     if (g_szCurrentFile[0] == L'\0')
     {
-        MessageBox(hWndMain, L"There is no file loaded.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"There is no file loaded.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g_pJob != nullptr)
     {
-        MessageBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g_bInByteSearch)
     {
         // 3.02: LoadPage rechazaría en silencio el trabajo; sin este aviso
         // el usuario no sabe por qué el Go To no hace nada.
-        MessageBox(hWndMain, L"A raw-file search is running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"A raw-file search is running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g_cbFileTotal == 0)
@@ -11184,12 +15765,12 @@ void PositionAtOffset(ULONGLONG qwOff)
     }
     if (iView == VIEW_HEX)
     {
-        DWORD cbRel = (DWORD)(qwOff - g_qwBase);
-        DWORD iLine = cbRel / 16;
-        DWORD iByte = cbRel % 16;
-        DWORD cchLine = 49 + 1 + 16 + 2;                // same arithmetic as BuildHexText
-        DWORD iCol = iByte * 3 + ((iByte >= 8) ? 1 : 0);
-        DWORD iPos = iLine * cchLine + iCol;
+        const DWORD cbRel = (DWORD)(qwOff - g_qwBase);
+        const DWORD iLine = cbRel / (DWORD)HexBpl();
+        const DWORD iByte = cbRel % (DWORD)HexBpl();
+        const DWORD cchLine = (DWORD)HexLineChars();    // same geometry as BuildHexText (7.01: 8/16/32 + groups)
+        const DWORD iCol = iByte * 3 + iByte / (DWORD)HexGrp();   // "XX " per byte + one gap per completed group
+        const DWORD iPos = iLine * cchLine + iCol;
         TV_SetSel((int)iPos, (int)iPos);   // V5
         TV_ScrollCaret();
     }
@@ -11240,7 +15821,7 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
             GetDlgItemTextW(hDlg, IDC_BYTES_EDIT, szPat, _countof(szPat));
             if (szPat[0] == L'\0')
             {
-                MessageBoxW(hDlg, L"Enter a pattern.", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                AppMsgBox(hDlg, L"Enter a pattern.", L"Find Bytes", MB_OK | MB_ICONWARNING);
                 return (INT_PTR)TRUE;
             }
             bool bHex = (IsDlgButtonChecked(hDlg, IDC_BYTES_HEX) == BST_CHECKED);
@@ -11275,7 +15856,7 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                     }
                     else
                     {
-                        MessageBoxW(hDlg, L"The hex pattern may only contain digits 0-9 and letters A-F.", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                        AppMsgBox(hDlg, L"The hex pattern may only contain digits 0-9 and letters A-F.", L"Find Bytes", MB_OK | MB_ICONWARNING);
                         return (INT_PTR)TRUE;
                     }
                     if (cDigits == 0)
@@ -11298,12 +15879,12 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                 }
                 if (bOverflow)
                 {
-                    MessageBoxW(hDlg, L"The pattern is too long (128 bytes maximum).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                    AppMsgBox(hDlg, L"The pattern is too long (128 bytes maximum).", L"Find Bytes", MB_OK | MB_ICONWARNING);
                     return (INT_PTR)TRUE;
                 }
                 if (cDigits != 0)
                 {
-                    MessageBoxW(hDlg, L"The hex pattern needs an even number of digits.", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                    AppMsgBox(hDlg, L"The hex pattern needs an even number of digits.", L"Find Bytes", MB_OK | MB_ICONWARNING);
                     return (INT_PTR)TRUE;
                 }
             }
@@ -11329,7 +15910,7 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                         }
                         if (cbPat + 4 > sizeof(bPat))
                         {
-                            MessageBoxW(hDlg, L"The pattern is too long (32 characters maximum in UTF-32).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                            AppMsgBox(hDlg, L"The pattern is too long (32 characters maximum in UTF-32).", L"Find Bytes", MB_OK | MB_ICONWARNING);
                             return (INT_PTR)TRUE;
                         }
                         if (iView == VIEW_UTF32BE)
@@ -11348,7 +15929,7 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                     const int nUnits = lstrlenW(szPat);
                     if ((size_t)nUnits * 2 > sizeof(bPat))
                     {
-                        MessageBoxW(hDlg, L"The pattern is too long (64 characters maximum in UTF-16).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                        AppMsgBox(hDlg, L"The pattern is too long (64 characters maximum in UTF-16).", L"Find Bytes", MB_OK | MB_ICONWARNING);
                         return (INT_PTR)TRUE;
                     }
                     for (int k = 0; k < nUnits; k++)
@@ -11383,7 +15964,7 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                         // than the ones typed (accents/emoji): say so instead.
                         if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
                         {
-                            MessageBoxW(hDlg, L"The pattern is too long (127 bytes maximum).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                            AppMsgBox(hDlg, L"The pattern is too long (127 bytes maximum).", L"Find Bytes", MB_OK | MB_ICONWARNING);
                             return (INT_PTR)TRUE;
                         }
                         cb = WideCharToMultiByte(CP_ACP, 0, szPat, -1, (LPSTR)bPat, (int)sizeof(bPat) - 1, nullptr, nullptr);
@@ -11393,7 +15974,7 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
             }
             if (cbPat == 0)
             {
-                MessageBoxW(hDlg, L"Enter a pattern.", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                AppMsgBox(hDlg, L"Enter a pattern.", L"Find Bytes", MB_OK | MB_ICONWARNING);
                 return (INT_PTR)TRUE;
             }
             (void)lstrcpynW(g_szBytesPattern, szPat, _countof(g_szBytesPattern));  // dialog default next time
@@ -11418,19 +15999,19 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
 {
     if (g_szCurrentFile[0] == L'\0')
     {
-        MessageBox(hWndMain, L"There is no file loaded: piped input and the clipboard cannot be searched on disk.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"There is no file loaded: piped input and the clipboard cannot be searched on disk.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g_pJob != nullptr)
     {
-        MessageBox(hWndMain, L"Still loading the file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"Still loading the file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g_bInByteSearch)
     {
         // 3.04: a silent return read as "the button did nothing". Same
         // courtesy Go To has shown since 3.02.
-        MessageBox(hWndMain, L"A raw-file search is already running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"A raw-file search is already running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     // The pattern dies with the dialog call: copy it to the worker's slot.
@@ -11454,7 +16035,7 @@ void RunByteSearch(const BYTE* pPat, DWORD cbPat)
     if (uThread == 0)
     {
         g_bInByteSearch = false;        // could not start: say so and stay alive
-        MessageBox(hWndMain, L"Not enough memory to start the search.", szTitle, MB_OK | MB_ICONWARNING);
+        AppMsgBox(hWndMain, L"Not enough memory to start the search.", szTitle, MB_OK | MB_ICONWARNING);
     }
     else
     {
@@ -11741,7 +16322,7 @@ void ViewClipboardAsFile(void)
         // view swaps all the content under it. It waits, like every
         // other load. (3.05: the worker no longer reads g_szCurrentFile
         // at all — it scans its own snapshot — so this is pure UX.)
-        MessageBox(hWndMain, L"A raw-file search is running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"A raw-file search is running; press ESC to cancel it or wait for it to finish.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g_pJob != nullptr)
@@ -11753,12 +16334,12 @@ void ViewClipboardAsFile(void)
         // and LEAKED its buffer (it overwrites pFileBytes, and only the
         // ResetViewer of BeginLoadJob frees the previous one). Same
         // courtesy as Load File: wait for the load.
-        MessageBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"Still loading the previous file; try again in a moment.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (!OpenClipboard(hWndMain))
     {
-        MessageBox(hWndMain, L"Could not open the clipboard.", szTitle, MB_OK | MB_ICONWARNING);
+        AppMsgBox(hWndMain, L"Could not open the clipboard.", szTitle, MB_OK | MB_ICONWARNING);
         return;
     }
     BYTE* pClip = nullptr;                 // synthesized raw bytes: BOM + UTF-16 LE text
@@ -11848,7 +16429,7 @@ void ViewClipboardAsFile(void)
     CloseClipboard();
     if (pClip == nullptr)
     {
-        MessageBox(hWndMain, L"The clipboard holds no text to view.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"The clipboard holds no text to view.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     ResetViewer();                         // clears whatever was on screen (and the current file)
@@ -11886,13 +16467,13 @@ void ViewClipboardAsFile(void)
         {
             // 3.05: OOM in the decode answers FALSE now: say so,
             // like the catch below.
-            MessageBox(hWndMain, L"Not enough memory to show the clipboard.", szTitle, MB_OK | MB_ICONERROR);
+            AppMsgBox(hWndMain, L"Not enough memory to show the clipboard.", szTitle, MB_OK | MB_ICONERROR);
             ResetViewer();
         }
     }
     catch (const std::bad_alloc&)
     {
-        MessageBox(hWndMain, L"Not enough memory to show the clipboard.", szTitle, MB_OK | MB_ICONERROR);
+        AppMsgBox(hWndMain, L"Not enough memory to show the clipboard.", szTitle, MB_OK | MB_ICONERROR);
         ResetViewer();
     }
 }
@@ -11908,7 +16489,7 @@ void ListAlternateStreams(void)
 {
     if (g_szCurrentFile[0] == L'\0')
     {
-        MessageBox(hWndMain, L"Load a file first: alternate streams belong to a file.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"Load a file first: alternate streams belong to a file.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     typedef HANDLE(WINAPI* PFN_FindFirstStreamW)(LPCWSTR, DWORD, LPVOID, DWORD);
@@ -11918,7 +16499,7 @@ void ListAlternateStreams(void)
     PFN_FindNextStreamW pfnFNS = (hK32 != nullptr) ? (PFN_FindNextStreamW)GetProcAddress(hK32, "FindNextStreamW") : nullptr;
     if (pfnFFS == nullptr || pfnFNS == nullptr)
     {
-        MessageBox(hWndMain, L"Listing alternate data streams is not available on this system (Windows Vista or later is required).", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"Listing alternate data streams is not available on this system (Windows Vista or later is required).", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     struct STREAM_DATA { LARGE_INTEGER StreamSize; WCHAR cStreamName[MAX_PATH + 36]; };        // WIN32_FIND_STREAM_DATA
@@ -11926,7 +16507,7 @@ void ListAlternateStreams(void)
     HANDLE hFind = pfnFFS(g_szCurrentFile, 0 /* FindStreamInfoStandard */, &sd, 0);
     if (hFind == INVALID_HANDLE_VALUE)
     {
-        MessageBox(hWndMain, L"The file has no alternate data streams, or its file system does not support them (NTFS does).", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"The file has no alternate data streams, or its file system does not support them (NTFS does).", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     WCHAR szList[4096];
@@ -11967,11 +16548,11 @@ void ListAlternateStreams(void)
     FindClose(hFind);
     if (cStreams == 0)
     {
-        MessageBox(hWndMain, L"The file has no alternate data streams (only the default stream exists).", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"The file has no alternate data streams (only the default stream exists).", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     lstrcatW(szList, L"\r\nTo view a stream, use File > Open... and type\r\nthe full path as:  <file>:<stream name>");
-    MessageBoxW(hWndMain, szList, szTitle, MB_OK | MB_ICONINFORMATION);
+    AppMsgBox(hWndMain, szList, szTitle, MB_OK | MB_ICONINFORMATION);
 }
 
 
@@ -12078,7 +16659,7 @@ static int GutterLineAt(int x, int y)
     if (bHex)
     {
         const DWORD cbUse = (cbFile > (DWORD)CB_HEX_MAX) ? (DWORD)CB_HEX_MAX : cbFile;
-        const int cRows = (int)((cbUse + 15) / 16);                         // the notice line has no offset
+        const int cRows = (int)((cbUse + (DWORD)HexBpl() - 1) / (DWORD)HexBpl());                         // the notice line has no offset
         if (cRows < cLines) cLines = cRows;
     }
     const int iRow = yRel / iHexLineH;
@@ -12224,7 +16805,7 @@ void PaintGutter(void)
     if (bHex)
     {
         DWORD cbUse = (cbFile > (DWORD)CB_HEX_MAX) ? (DWORD)CB_HEX_MAX : cbFile;
-        cLines = (int)((cbUse + 15) / 16);
+        cLines = (int)((cbUse + (DWORD)HexBpl() - 1) / (DWORD)HexBpl());
     }
     else
     {
@@ -12256,7 +16837,7 @@ void PaintGutter(void)
     int iBm = 0;
     HBRUSH hbrBm = nullptr;
     HPEN hpenBm = nullptr;
-    if (g_cBookmarks > 0)
+    if (g_cBookmarks > 0 && !g_bFilter)     // 6.22: the filter hides the dots (their line numbers mean nothing in the subset)
     {
         // 5.9.1: the dot tools are created ONCE and cached in the view
         // state (they used to be created and deleted on EVERY repaint:
@@ -12314,7 +16895,7 @@ void PaintGutter(void)
             // column must still name the byte it describes (V-style,
             // right-aligned on the character grid). 3.00: written
             // forward into the final slot, no in-place reversal.
-            ULONGLONG qwOff = g_qwBase + (ULONGLONG)iLine * 16;
+            ULONGLONG qwOff = g_qwBase + (ULONGLONG)iLine * (ULONGLONG)(HexBpl());
             WCHAR szRev[24];
             cch = 0;
             do
@@ -12329,8 +16910,18 @@ void PaintGutter(void)
         }
         else
         {
-            WCHAR* pEnd = U64ToWide(szLabel, (ULONGLONG)(iLine + 1));
-            cch = (int)(pEnd - szLabel);
+            // 6.22: the filter shows a subset — each gutter label is the
+            // ORIGINAL line number of the kept line (the status bar agrees).
+            if (g_bFilter && g_pFilterOrig != nullptr && iLine < g_cFilterShown)
+            {
+                WCHAR* pEndO = U64ToWide(szLabel, (ULONGLONG)(g_pFilterOrig[iLine] + 1));
+                cch = (int)(pEndO - szLabel);
+            }
+            else
+            {
+                WCHAR* pEnd = U64ToWide(szLabel, (ULONGLONG)(iLine + 1));
+                cch = (int)(pEnd - szLabel);
+            }
         }
         // 5.8/5.9: a bookmarked line gets a blue dot in the left zone of
         // the column, before its number (or its hex offset). The dot never
@@ -12641,9 +17232,9 @@ void PaintHexRuler(HDC hdc, RECT rcRuler, int xOrigin)
     // fixed column is drawn where the view draws it, the scrolled ones hide under the frozen block.
     const int iFreeze = (!g_tv.bWrap && g_iFreezeCols > 0) ? g_iFreezeCols : 0;
     const int xFreezeEnd = xOrigin + iFreeze * iHexCharW;
-    for (int i = 0; i < 16; i += 4)
+    for (int i = 0; i < HexBpl(); i += 4)
     {
-        int iCol = (i < 8) ? (i * 3) : (i * 3 + 1);   // first digit's column (the mid-gap shifts the second half)
+        const int iCol = i * 3 + i / HexGrp();        // first digit's column (7.01: the group gaps shift the later bytes)
         const bool bFixed = (iCol < iFreeze);
         int x = xOrigin + iCol * iHexCharW - (bFixed ? 0 : iScrollX);
         if (iFreeze > 0 && !bFixed && x < xFreezeEnd)
@@ -12663,8 +17254,9 @@ void PaintHexRuler(HDC hdc, RECT rcRuler, int xOrigin)
         DrawTextW(hdc, szLabel, 2, &rcCell, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
     // The ASCII block's name, on its first column.
-    const bool bAsciiFixed = (50 < iFreeze);
-    int xAscii = xOrigin + 50 * iHexCharW - (bAsciiFixed ? 0 : iScrollX);
+    const int iAsciiCol = HexAsciiCol();
+    const bool bAsciiFixed = (iAsciiCol < iFreeze);
+    int xAscii = xOrigin + iAsciiCol * iHexCharW - (bAsciiFixed ? 0 : iScrollX);
     if (xAscii < rcRuler.right && xAscii + 5 * iHexCharW >= rcRuler.left && !(iFreeze > 0 && !bAsciiFixed && xAscii < xFreezeEnd))
     {
         RECT rcCell = { xAscii, rcRuler.top, xAscii + 5 * iHexCharW, rcRuler.bottom };
@@ -13009,8 +17601,22 @@ void LoadSettings(void)
     g_bShowWS = (ProfileLong(L"ShowWhitespace", 0) != 0);
     g_bPrefetch = (ProfileLong(L"Prefetch", 1) != 0);                        // 6.14
     g_iTabWidth = (int)ProfileLong(L"TabWidth", 8);
+    g_iHexBpl = (int)ProfileLong(L"HexBpl", 16);
+    if (g_iHexBpl != 8 && g_iHexBpl != 16 && g_iHexBpl != 32) g_iHexBpl = 16;
+    g_iHexGroup = (int)ProfileLong(L"HexGroup", 8);
+    if (g_iHexGroup != 1 && g_iHexGroup != 2 && g_iHexGroup != 4 && g_iHexGroup != 8) g_iHexGroup = 8;
     if (g_iTabWidth < 1 || g_iTabWidth > 16) g_iTabWidth = 8;
     g_bRegexFind = (ProfileLong(L"RegexFind", 0) != 0);
+    // 6.22: the new keys (defaults keep the shipped behavior: highlight on,
+    // watcher on, no reopen, whole word off)
+    g_bHiliteAll = (ProfileLong(L"HighlightAll", 1) != 0);
+    g_bWatch = (ProfileLong(L"WatchChanges", 1) != 0);
+    g_bReopenLast = (ProfileLong(L"ReopenLastFile", 0) != 0);
+    if (ProfileLong(L"WholeWord", 0) != 0)
+    {
+        fr.Flags |= FR_WHOLEWORD;               // the Find dialog starts checked (it reports its own flags at Find Next)
+    }
+    GetPrivateProfileStringW(L"Session", L"LastFile", L"", g_szLastSession, MAX_PATH, g_szIniPath);
     // Colors: -1 in INI means default (stored as signed long); absent = default
     {
         long v;
@@ -13073,7 +17679,7 @@ void SaveSettings(void)
     // section block is "key=value" strings separated by NUL, ended by a double
     // NUL. Placement: GetWindowPlacement reports the RESTORED rect even while
     // maximized, which is exactly what the next start should restore.
-    WCHAR szSec[640];   // 6.03: was 320; worst-case (negative window coords + four colors) came within a few characters
+    WCHAR szSec[768];   // 6.22: was 640; the four new keys joined the worst case (still one section write)
     WCHAR* p = szSec;
     p += wsprintfW(p, L"FontSize=%d", 0 - g_iFontSizes[g_iFontIndex]) + 1;     // positive point size
     p += wsprintfW(p, L"LineNumbers=%d", g_bLineNums ? 1 : 0) + 1;
@@ -13090,8 +17696,15 @@ void SaveSettings(void)
     p += wsprintfW(p, L"Theme=%d", g_iTheme) + 1;                            // 6.18
     p += wsprintfW(p, L"ShowWhitespace=%d", g_bShowWS ? 1 : 0) + 1;
     p += wsprintfW(p, L"Prefetch=%d", g_bPrefetch ? 1 : 0) + 1;              // 6.14
-    p += wsprintfW(p, L"TabWidth=%d", g_iTabWidth) + 1;                   // 6.08
+    p += wsprintfW(p, L"TabWidth=%d", g_iTabWidth) + 1;
+    p += wsprintfW(p, L"HexBpl=%d", g_iHexBpl) + 1;
+    p += wsprintfW(p, L"HexGroup=%d", g_iHexGroup) + 1;                   // 6.08
     p += wsprintfW(p, L"RegexFind=%d", g_bRegexFind ? 1 : 0) + 1;
+    // 6.22: the new toggles
+    p += wsprintfW(p, L"HighlightAll=%d", g_bHiliteAll ? 1 : 0) + 1;
+    p += wsprintfW(p, L"WatchChanges=%d", g_bWatch ? 1 : 0) + 1;
+    p += wsprintfW(p, L"ReopenLastFile=%d", g_bReopenLast ? 1 : 0) + 1;
+    p += wsprintfW(p, L"WholeWord=%d", (fr.Flags & FR_WHOLEWORD) ? 1 : 0) + 1;
     if (g_clrWindow != 0xFFFFFFFF) p += wsprintfW(p, L"ColorWindow=%d", (int)g_clrWindow) + 1;
     if (g_clrText != 0xFFFFFFFF) p += wsprintfW(p, L"ColorText=%d", (int)g_clrText) + 1;
     if (g_clrGreenbar != 0xFFFFFFFF) p += wsprintfW(p, L"ColorGreenbar=%d", (int)g_clrGreenbar) + 1;
@@ -13125,6 +17738,19 @@ void SaveSettings(void)
     else
     {
         WritePrivateProfileStringW(L"Recent", nullptr, nullptr, g_szIniPath);     // no entries: drop the section
+    }
+    // 6.22: the last session's file (ReopenLastFile=1 restarts on it when no
+    // argument arrives). Only a REAL file that still exists qualifies.
+    if (g_szCurrentFile[0] != L'\0' && g_szCurrentFile[0] != L'(' &&
+        GetFileAttributesW(g_szCurrentFile) != INVALID_FILE_ATTRIBUTES)
+    {
+        WCHAR szSes[MAX_PATH + 16];
+        wsprintfW(szSes, L"LastFile=%s", g_szCurrentFile);
+        WritePrivateProfileSectionW(L"Session", szSes, g_szIniPath);
+    }
+    else
+    {
+        WritePrivateProfileStringW(L"Session", nullptr, nullptr, g_szIniPath);
     }
 }
 
@@ -13283,6 +17909,13 @@ void AddRecentEntry(LPCWSTR pszEntry)
     }
     (void)lstrcpynW(g_szRecent[0], pszEntry, MAX_PATH);
     RebuildRecentMenu();
+    // 6.22: the taskbar's Jump List mirrors the MRU: SHAddToRecentDocs feeds
+    // the shell's "Recent" category for this executable (the synthetic
+    // "(clipboard)" / "(stdin)" entries and bare names are not paths and stay out).
+    if (pszEntry[0] != L'(' && wcschr(pszEntry, L'\\') != nullptr)
+    {
+        SHAddToRecentDocs(SHARD_PATHW, pszEntry);
+    }
 }
 
 
@@ -13305,7 +17938,7 @@ void OpenRecentEntry(int iRecent)
     }
     if (lstrcmpiW(pszEntry, RECENT_STDIN) == 0)
     {
-        MessageBox(hWndMain, L"The piped input of a previous session cannot be reopened.\r\nUse the pipe again (4More < file.txt) or pick a file.", szTitle, MB_OK | MB_ICONINFORMATION);
+        AppMsgBox(hWndMain, L"The piped input of a previous session cannot be reopened.\r\nUse the pipe again (4More < file.txt) or pick a file.", szTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     LoadFile(pszEntry);

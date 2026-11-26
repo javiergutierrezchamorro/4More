@@ -1,4 +1,20 @@
-// 4More.rc — recursos del visor (Build 6.21)
+// 4More.rc — recursos del visor (Build 7.01)
+//
+// 7.01: ACELERADORES NUEVOS: F4 / Mayús+F4 (siguiente / anterior diferencia de Compare; el menú ya
+// los anunciaba y no existían). Sin cambios de menús ni de diálogos. El .cpp 7.01 abre por fin el
+// diálogo IDD_COMPARE al terminar la comparación. resource.h pierde tres IDs sin uso
+// (IDD_MY4MORE_DIALOG, IDR_MAINFRAME, ID_VIEW_HEXCOLS). Manifest 7.01.0.0.
+// MENÚ Edit: submenús "Find More" (Find Next / Find with Regex / Find All) y "Bookmarks"
+// (Next / Previous Bookmark); "Bookmark" (F2) sigue directo en Edit. Mismos IDs y aceleradores.
+// Compilar junto al 4More.cpp 7.01.
+//
+// 6.22: MENÚ + DIÁLOGO NUEVOS. File gana Export View... (Ctrl+E, diálogo IDD_EXPORT:
+// página actual o fichero completo), File Hash (SHA-256)... y Properties. Edit gana
+// Copy as C Array / Copy as Base64 (solo hex; grises fuera de él). Search gana
+// Statistics... y Character at Caret (Ctrl+Q). Options gana Highlight Matches y
+// Filter Lines (Ctrl+Shift+G). Aceleradores nuevos: Ctrl+E, Ctrl+Q, Ctrl+Shift+G,
+// Ctrl+Shift+H. resource.h trae sus IDs. Manifest 6.22.0.0. Compilar junto al
+// 4More.cpp 6.22.
 //
 // 6.21: SIN CAMBIOS DE MENÚS NI DIÁLOGOS. Revisión del .cpp: tema al arrancar maximizado, code page
 // ANSI conservada al paginar, Shift+F3 regex a una pasada, CSV con saltos dentro de comillas,
@@ -288,6 +304,19 @@ BEGIN
         MENUITEM "&View Clipboard as File",             ID_FILE_VIEWCLIP
         MENUITEM "&Alternate Data Streams...",          ID_FILE_ADS
         MENUITEM SEPARATOR
+        POPUP "E&xport"
+        BEGIN
+            MENUITEM "&View...\tCtrl+E",                ID_FILE_EXPORT
+            MENUITEM "&Selection...",                   ID_FILE_EXPORTSEL
+        END
+        MENUITEM "&Properties...\tCtrl+Shift+H",       ID_FILE_PROPERTIES
+        POPUP "&Compare"
+        BEGIN
+            MENUITEM "Compare &with...",                ID_FILE_COMPARE
+            MENUITEM "&Next Difference\tF4",           ID_COMPARE_NEXT
+            MENUITEM "&Previous Difference\tShift+F4", ID_COMPARE_PREV
+        END
+        MENUITEM SEPARATOR
         // Recent Files (2.96) se inserta aquí en ejecución: EnsureRecentMenu
         // añade el popup antes de Exit (3.13: SIN separador propio — el
         // separador estático de arriba ya separa el bloque del popup).
@@ -297,23 +326,43 @@ BEGIN
     POPUP "&Edit"
     BEGIN
         MENUITEM "&Copy\tCtrl+C",                       ID_COPY
-        MENUITEM "Copy &Append\tCtrl+Shift+C",          ID_COPY_APPEND
-        MENUITEM "Copy Colu&mn\tCtrl+Shift+M",          ID_COPY_COLUMN
+        POPUP "Copy &Advanced"
+        BEGIN
+            MENUITEM "Copy &Append\tCtrl+Shift+C",      ID_COPY_APPEND
+            MENUITEM "Copy Colu&mn\tCtrl+Shift+M",      ID_COPY_COLUMN
+            MENUITEM "Copy as C &Array\tCtrl+Alt+C",    ID_COPY_CARRAY
+            MENUITEM "Copy as A&SM Array",               ID_COPY_ASMARRAY
+            MENUITEM "Copy as &PHP Array",               ID_COPY_PHPARRAY
+            MENUITEM "Copy as &JS Array",                ID_COPY_JSARRAY
+            MENUITEM "Copy as P&ython Array",            ID_COPY_PYARRAY
+            MENUITEM "Copy as &Base64\tCtrl+Alt+B",     ID_COPY_B64
+        END
         MENUITEM "Select &All\tCtrl+A",                 ID_SELECTALL
         MENUITEM SEPARATOR
         MENUITEM "&Find...\tCtrl+F",                    ID_FIND
-        MENUITEM "Find &Next\tF3",                      ID_FINDNEXT
-        MENUITEM "Find with &Regex",                    ID_FIND_REGEX
-        MENUITEM "Find &All\tCtrl+Shift+F3",            ID_FIND_ALL
+        POPUP "Find &More"
+        BEGIN
+            MENUITEM "Find &Next\tF3",                  ID_FINDNEXT
+            MENUITEM "Find with &Regex",                ID_FIND_REGEX
+            MENUITEM "Find &All\tCtrl+Shift+F3",        ID_FIND_ALL
+        END
         MENUITEM SEPARATOR
         MENUITEM "&Bookmark\tF2",                       ID_EDIT_BOOKMARK
-        MENUITEM "&Next Bookmark\tShift+F2",            ID_EDIT_NEXTBOOKMARK
-        MENUITEM "&Previous Bookmark\tCtrl+F2",         ID_EDIT_PREVBOOKMARK
+        POPUP "Book&marks"
+        BEGIN
+            MENUITEM "&Next Bookmark\tShift+F2",        ID_EDIT_NEXTBOOKMARK
+            MENUITEM "&Previous Bookmark\tCtrl+F2",     ID_EDIT_PREVBOOKMARK
+        END
+        MENUITEM SEPARATOR
+        MENUITEM "&Highlight Matches",                  ID_OPTIONS_HILITEALL
     END
     POPUP "&Search"
     BEGIN
         MENUITEM "&Go To...\tCtrl+G",                   ID_SEARCH_GOTO
         MENUITEM "Find &Bytes...\tCtrl+Shift+F",        ID_SEARCH_BYTES
+        MENUITEM "&Statistics...",                      ID_SEARCH_STATS
+        MENUITEM "Character at &Caret...\tCtrl+Q",      ID_INSPECT_CHAR
+        MENUITEM "Find in &Files...",                   ID_SEARCH_FINDINFILES
     END
     POPUP "&View"
     BEGIN
@@ -364,6 +413,19 @@ BEGIN
         MENUITEM "&Refresh\tF5",                        ID_VIEW_REFRESH
         MENUITEM "&Tail File\tCtrl+T",                  ID_VIEW_TAIL
         MENUITEM SEPARATOR
+        POPUP "He&x Layout"
+        BEGIN
+            MENUITEM "8 bytes / line",                  ID_HEX_BPL8
+            MENUITEM "16 bytes / line",                 ID_HEX_BPL16
+            MENUITEM "32 bytes / line",                 ID_HEX_BPL32
+            MENUITEM SEPARATOR
+            MENUITEM "Group by 1",                      ID_HEX_GRP1
+            MENUITEM "Group by 2",                      ID_HEX_GRP2
+            MENUITEM "Group by 4",                      ID_HEX_GRP4
+            MENUITEM "Group by 8",                      ID_HEX_GRP8
+        END
+        MENUITEM "S&plit View",                         ID_VIEW_SPLIT
+        MENUITEM SEPARATOR
         MENUITEM "Font &+\tCtrl++",                     ID_VIEW_FONTPLUS
         MENUITEM "Font &-\tCtrl+-",                      ID_VIEW_FONTMINUS
     END
@@ -377,6 +439,7 @@ BEGIN
         MENUITEM "&Greenbar",                            ID_VIEW_GREENBAR
         MENUITEM "&Ruler",                              ID_VIEW_RULER
         MENUITEM "Show White&space",                  ID_VIEW_WHITESPACE
+        MENUITEM "Filter &Lines\tCtrl+Shift+G",          ID_OPTIONS_FILTER
         POPUP "&Theme"
         BEGIN
             MENUITEM "&Auto (follow Windows)",       ID_THEME_AUTO
@@ -412,11 +475,19 @@ BEGIN
     "G",            ID_SEARCH_GOTO,         VIRTKEY, CONTROL, NOINVERT
     "T",            ID_VIEW_TAIL,           VIRTKEY, CONTROL, NOINVERT
     "F",            ID_SEARCH_BYTES,        VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "E",            ID_FILE_EXPORT,         VIRTKEY, CONTROL, NOINVERT
+    "Q",            ID_INSPECT_CHAR,        VIRTKEY, CONTROL, NOINVERT
+    "G",            ID_OPTIONS_FILTER,      VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "H",            ID_FILE_PROPERTIES,     VIRTKEY, CONTROL, SHIFT, NOINVERT
+    "C",            ID_COPY_CARRAY,         VIRTKEY, CONTROL, ALT, NOINVERT
+    "B",            ID_COPY_B64,            VIRTKEY, CONTROL, ALT, NOINVERT
     VK_F2,          ID_EDIT_BOOKMARK,       VIRTKEY, NOINVERT
     VK_F2,          ID_EDIT_NEXTBOOKMARK,   VIRTKEY, SHIFT, NOINVERT
     VK_F2,          ID_EDIT_PREVBOOKMARK,   VIRTKEY, CONTROL, NOINVERT
     VK_F3,          ID_FINDNEXT,             VIRTKEY, NOINVERT
     VK_F5,          ID_VIEW_REFRESH,        VIRTKEY, NOINVERT
+    VK_F4,          ID_COMPARE_NEXT,        VIRTKEY, NOINVERT
+    VK_F4,          ID_COMPARE_PREV,        VIRTKEY, SHIFT, NOINVERT
     // 3.03: VK_NEXT / VK_PRIOR (con o sin CONTROL) ya NO están aquí: un
     // acelerador intercepta la tecla en el bucle de mensajes, ANTES de
     // que el subclass del EDIT pueda decidir si toca desplazar la página
@@ -535,6 +606,60 @@ BEGIN
     LTEXT           "Keep this many columns fixed while scrolling horizontally (0 = off, max 200).", IDC_STATIC, 12, 34, 186, 16
     DEFPUSHBUTTON   "OK", IDOK, 96, 50, 50, 14
     PUSHBUTTON      "Cancel", IDCANCEL, 152, 50, 50, 14
+END
+
+
+/////////////////////////////////////////////////////////////////////////////
+// 6.22: Export View (página en pantalla o fichero completo)
+
+IDD_EXPORT DIALOGEX 0, 0, 230, 92
+STYLE DS_MODALFRAME | WS_CAPTION | WS_SYSMENU | WS_POPUP
+CAPTION "Export View"
+FONT 8, "MS Shell Dlg 2", 400, 0, 0x1
+BEGIN
+    CONTROL         "&Current page only", IDC_EXPORT_PAGE, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 14, 12, 200, 10
+    CONTROL         "&Selection", IDC_EXPORT_SEL, "Button", BS_AUTORADIOBUTTON, 14, 26, 200, 10
+    CONTROL         "&Whole file (text views)", IDC_EXPORT_ALL, "Button", BS_AUTORADIOBUTTON, 14, 40, 200, 10
+    LTEXT           "Writes UTF-8. Whole-file uses a worker (ESC cancels).", IDC_STATIC, 14, 56, 202, 12
+    DEFPUSHBUTTON   "&Export", IDOK, 114, 76, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 170, 76, 50, 14
+END
+
+/////////////////////////////////////////////////////////////////////////////
+// 6.24: Find in Files
+
+IDD_FINDINFILES DIALOGEX 0, 0, 280, 110
+STYLE DS_MODALFRAME | WS_CAPTION | WS_SYSMENU | WS_POPUP
+CAPTION "Find in Files"
+FONT 8, "MS Shell Dlg 2", 400, 0, 0x1
+BEGIN
+    LTEXT           "&Pattern:", IDC_STATIC, 12, 14, 40, 8
+    EDITTEXT        IDC_FIF_PATTERN, 56, 12, 208, 14, ES_AUTOHSCROLL
+    LTEXT           "&Folder:", IDC_STATIC, 12, 34, 40, 8
+    EDITTEXT        IDC_FIF_FOLDER, 56, 32, 168, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "&Browse...", IDC_FIF_BROWSE, 230, 31, 36, 14
+    CONTROL         "Include &subfolders", IDC_FIF_SUBDIRS, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 56, 52, 160, 10
+    LTEXT           "Plain text match on each file (UTF-8 / ANSI). ESC cancels the worker.", IDC_STATIC, 12, 68, 252, 12
+    DEFPUSHBUTTON   "&Find", IDOK, 158, 88, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 214, 88, 50, 14
+END
+
+/////////////////////////////////////////////////////////////////////////////
+// 6.25: Compare results
+
+IDD_COMPARE DIALOGEX 0, 0, 420, 240
+STYLE DS_MODALFRAME | WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_MINIMIZEBOX
+CAPTION "Compare"
+FONT 8, "MS Shell Dlg 2", 400, 0, 0x1
+BEGIN
+    CONTROL         "&Bytes", IDC_CMP_MODE_BYTES, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 12, 8, 50, 10
+    CONTROL         "&Lines", IDC_CMP_MODE_LINES, "Button", BS_AUTORADIOBUTTON, 70, 8, 50, 10
+    LISTBOX         IDC_CMP_LIST, 12, 24, 396, 140, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP | WS_BORDER
+    LTEXT           "", IDC_CMP_PREVIEW, 12, 168, 396, 36, SS_LEFT
+    PUSHBUTTON      "&Go", IDC_CMP_GO, 198, 214, 50, 14
+    PUSHBUTTON      "&Next", IDC_CMP_NEXT, 252, 214, 50, 14
+    PUSHBUTTON      "&Prev", IDC_CMP_PREV, 306, 214, 50, 14
+    DEFPUSHBUTTON   "Close", IDCANCEL, 360, 214, 50, 14
 END
 
 /////////////////////////////////////////////////////////////////////////////

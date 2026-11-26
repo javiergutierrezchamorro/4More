@@ -1,4 +1,9 @@
-// 4More.rc — recursos del visor (Build 6.20)
+// 4More.rc — recursos del visor (Build 6.21)
+//
+// 6.21: SIN CAMBIOS DE MENÚS NI DIÁLOGOS. Revisión del .cpp: tema al arrancar maximizado, code page
+// ANSI conservada al paginar, Shift+F3 regex a una pasada, CSV con saltos dentro de comillas,
+// coordenadas de ventana negativas en el INI, y más (ver el changelog del .cpp). Sin ficheros nuevos.
+// Manifest 6.21.0.0. Compilar junto al 4More.cpp 6.21.
 //
 // 6.20: SIN CAMBIOS DE MENÚS NI DIÁLOGOS. Caché de APIs de tema y formato de status bar en el .cpp.
 // Manifest 6.20.0.0. Compilar junto al 4More.cpp 6.20.

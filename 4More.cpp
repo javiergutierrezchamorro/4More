@@ -1,6 +1,55 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 6.20
+   Build 6.21
+
+   Version 6.21 (review round):
+   - FIX: a start that restores a MAXIMIZED window skipped ThemeApply entirely (it lived in the
+     plain-show branch only): Theme=Dark in the INI, or /dark, opened light — content, scroll bars
+     and title bar — until the user touched Options > Theme. It now runs once for every start.
+   - FIX: the ANSI code page chosen in Encoding (or /cp:N) was reset to the command-line / system
+     one by EVERY page change, F5, Go To offset and tail reload of the same file (BeginLoadJob
+     resets it for fresh loads). LoadPage preserves it now, like it preserves the view.
+   - SPEED/FIX: Shift+F3 with a REGULAR EXPRESSION asked FindPatternFrom once per match, and each
+     call re-scanned the whole remaining text for its next NUL segment: a frequent pattern
+     (".", "e") on a big page paid O(matches x text) and froze the UI. One segmented pass now
+     (the Find All pattern), same enumeration order, same 4,000,000 cap.
+   - FIX: Find Next / incremental find with a regex that matches the EMPTY string selected
+     lstrlenW(pattern) characters that are not part of the hit (a false highlight, and the next
+     search skipped matches inside them). One cell now, like Find Previous and Find All already
+     did — and the shared SelectHit tail replaces the two duplicated copies.
+   - FIX: CSV/TSV: a newline INSIDE a quoted field ended the row mid-cell (every Excel export
+     with a multiline cell tore the table). The field keeps it (rendered as a space), like
+     standard CSV readers (RFC 4180).
+   - FIX: window placement could not be RESTORED when a monitor sits left of / above the primary:
+     GetPrivateProfileIntW cannot read negative numbers, so WinLeft/WinTop came back 0 and the
+     rect failed its checks (or reopened shifted). The four edges parse as signed strings.
+   - FIX: /cp:N with a code page Windows does not know silently decoded an EMPTY ANSI view; the
+     switch is now ignored when IsValidCodePage refuses it (same guard the menu applies).
+   - FIX: Copy / Copy Append on a huge selection could throw bad_alloc through the view's window
+     procedure: the clipboard was left OPEN and the last-chance filter killed the process. Caught
+     now — it degrades like any other clipboard failure.
+   - FIX (rare): the load's mapped view (detection head or page) leaked its mapping object and
+     address space when the copy raised EXCEPTION_IN_PAGE_ERROR (disk dropping a sector, writer
+     truncating a shared log): the SEH jacket skipped the UnmapFileRange. The job owns the view
+     now (mvPending) and its destructor releases whatever was still mapped.
+   - FIX (rare): a load worker that gave up posting its result (20 retries over 2 s) freed the
+     job while the progress poll and a queued preview still dereferenced g_pJob — a use-after-free
+     every 16 ms, and the loader wedged until exit. The poll retires the marker; the preview
+     checks the worker-freed flag before touching g_pJob.
+   - FIX: Freeze Columns invalidated only the view, not the ruler trigger: with the view scrolled
+     sideways, the column / byte ruler kept the OLD freeze layout until the next scroll. The
+     gutter-dirty hook now forces the ruler too.
+   - FIX: the worker-built line index leaked when the delivery found the edit control gone
+     (CreateTextView failure, SEH before adoption): DeliverTextToEdit frees it, like TV_SetText.
+   - SPEED (perceived): WM_SETCURSOR caches the hand cursor (a LoadCursor per mouse move is
+     gone); the wheel caches SPI_GETWHEELSCROLLLINES (refreshed on WM_SETTINGCHANGE; the old code
+     queried the system on every notch).
+   - Simplification: two dead `if (!bParDone) cch = 0;` blocks (cch is already 0 there) and the
+     redundant `!bStdin` test inside RunLoadJob's file-only branch are gone; FindPatternFrom
+     spells its segment end directly; a static_assert pins the code-page ID block (ID_ENC_CP00..)
+     to the kCodePages table, like the recent-files one.
+   - No functional changes to load, encodings, hex, printing, or the INI format (values written
+     are unchanged; the four placement keys just read back correctly).
 
    Version 6.20 (review round):
    - SPEED / simplification: ThemeApply caches the DwmSetWindowAttribute and SetWindowTheme entry points
@@ -350,7 +399,7 @@
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"6.20"
+#define APP_VERSION L"6.21"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -604,6 +653,7 @@ static const CpEntry kCodePages[] =                      // the order of the Opt
     { 850, L"CP850" }, { 932, L"Shift-JIS" }, { 936, L"GBK" }, { 949, L"CP949" }, { 950, L"Big5" }
 };
 #define CP_TABLE_COUNT ((int)(sizeof(kCodePages) / sizeof(kCodePages[0])))
+static_assert(ID_ENC_CP20 - ID_ENC_CP00 + 1 == CP_TABLE_COUNT, "resource.h code-page-ID block must match kCodePages");
 
 static const WCHAR* AnsiLabel(void)
 {
@@ -764,6 +814,23 @@ static const COLORREF s_clrGutter = RGB(0x8A, 0x92, 0x9E);
 WCHAR* AllocViewText(DWORD cch);
 void FreeViewText(WCHAR* psz);
 
+// 6.21: TVMappedView moved above LoadJob: the job now carries the mapped view
+// the read is copying from (mvPending), so an EXCEPTION_IN_PAGE_ERROR during a
+// mapped copy — which unwinds through LoadThreadProc's SEH jacket, past the
+// local UnmapFileRange call — still gets its view and mapping object released
+// by ~LoadJob instead of leaking them for the process lifetime.
+struct TVMappedView
+{
+    HANDLE hMap;            // the mapping object (CloseHandle when done)
+    const BYTE* pView;      // the view base (UnmapViewOfFile when done)
+    ULONGLONG qwStart;      // file offset of pView[0]
+    DWORD cbView;           // view length in bytes
+};
+
+// Defined next to MapFileRange (below). Idempotent: a zeroed struct makes the
+// call a harmless no-op, so the destructor can always run it.
+static void UnmapFileRange(TVMappedView* pV);
+
 struct LoadJob
 {
     WCHAR  szPath[MAX_PATH] = {};               // file to load (bStdin uses stdin instead)
@@ -807,11 +874,21 @@ struct LoadJob
     // store is tear-free on Win32 and x64 alike, which a plain 64-bit
     // field is not (it splits in two halves on the 32-bit build).
     volatile LONG pmProgress = -2;
+    // 6.21: the mapped view the read is currently copying from (the phase 1
+    // detection head or the phase 2 page). MapFileRange's caller hands the
+    // struct in directly; UnmapFileRange zeroes it. Whatever was still mapped
+    // when an exception unwound the read (EXCEPTION_IN_PAGE_ERROR: a disk
+    // dropping a sector mid-copy, a writer truncating a shared log) is
+    // released here — before this, that path leaked the mapping object and
+    // up to the whole page of address space for the process lifetime.
+    TVMappedView mvPending = {};
+
     // The single exit door for every failure path: a cancelled load, a job
     // freed without ApplyLoadResult ever running, an exception during the
     // read. Whatever was not adopted by the UI is released here.
     ~LoadJob()
     {
+        UnmapFileRange(&mvPending);      // 6.21: SEH unwound mid-copy: release the view the read was on
         delete[] pBytes;
         FreeViewText(pText);             // the worker's text is HGLOBAL-backed since 2.98
         delete[] pLineStarts;            // 5.6: worker-built line index, if never adopted
@@ -847,6 +924,10 @@ struct LoadPreview
 ATOM MyRegisterClass(HINSTANCE hInstance);
 bool InitInstance(HINSTANCE, int);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+
+// 6.21: the wheel's cached "lines per notch" (defined with the TextView);
+// WM_SETTINGCHANGE in WndProc refreshes the cache.
+static void WheelLinesPerNotchRefresh(void);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void ShowCommandLineHelp(void);
 void LoadFile(const WCHAR* pacFilename);
@@ -1204,13 +1285,18 @@ bool InitInstance(HINSTANCE hInstance, int nCmdShow)
     // window in normal state. SW_SHOWMAXIMIZED is applied only when the
     // shell did not ask for something more specific (a "Minimized"
     // shortcut keeps winning), and a plain nCmdShow covers the rest.
+    // 6.21: ThemeApply runs for EVERY start. It used to live in the plain-show
+    // branch only, so a restored-maximized window skipped it: with Theme=Dark
+    // in the INI (or /dark) the program opened light — content colours, scroll
+    // bars and title bar — until the user touched Options > Theme. hWndMain is
+    // already set here (WM_CREATE ran inside CreateWindow).
+    ThemeApply();
     if (g_bWinMax && (nCmdShow == SW_SHOWNORMAL || nCmdShow == SW_SHOW || nCmdShow == SW_SHOWDEFAULT))
     {
         ShowWindow(hWnd, SW_SHOWMAXIMIZED);
     }
     else
     {
-        ThemeApply();                      // 6.18: the theme in effect (INI / command line / Windows) before the first paint
     ShowWindow(hWnd, nCmdShow);
     }
     UpdateWindow(hWnd);
@@ -1533,7 +1619,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     else if (!_wcsnicmp(pszArg + 1, L"cp:", 3))
                     {
                         ULONGLONG qw = 0;                                       // /cp:1252 /cp:28591 ...: the ANSI view decodes with that code page
-                        if (ParseU64(pszArg + 1 + 3, qw) && qw > 0 && qw < 65536)
+                        // 6.21: the same guard the menu applies (SetAnsiCodePage). A code page
+                        // Windows does not know made MultiByteToWideChar fail and the ANSI view
+                        // came out EMPTY, silently. Unknown switches are ignored: never punish
+                        // a typo.
+                        if (ParseU64(pszArg + 1 + 3, qw) && qw > 0 && qw < 65536 && IsValidCodePage((UINT)qw))
                         {
                             g_uCliCP = (UINT)qw;
                             g_uAnsiCP = g_uCliCP;
@@ -1799,7 +1889,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         LoadPreview* pPv = (LoadPreview*)lParam;
         if (pPv != nullptr)
         {
-            if (g_pJob != nullptr && !LoadCancelled() && pPv->uSeq == g_pJob->uSeq && pPv->pText != nullptr)
+            // 6.21: a worker that freed its job (post retries exhausted) set
+            // g_bLoadJobWorkerFreed while a preview it posted earlier is still
+            // in the queue: g_pJob dangles, so the flag is checked before any
+            // dereference (the preview falls through to the free below).
+            if (g_pJob != nullptr && !LoadCancelled()
+                && InterlockedCompareExchange(&g_bLoadJobWorkerFreed, 0, 0) == 0
+                && pPv->uSeq == g_pJob->uSeq && pPv->pText != nullptr)
             {
                 // 3.09: stage the window the preview shows (view, base,
                 // byte count) BEFORE delivering: GutterWidth answers 0
@@ -1930,6 +2026,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             ThemeApply();
         }
+        WheelLinesPerNotchRefresh();            // 6.21: the wheel's "lines per notch" may have changed
         return DefWindowProc(hWnd, message, wParam, lParam);
     }
     case WM_LBUTTONDOWN:
@@ -1947,7 +2044,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             ScreenToClient(hWnd, &pt);
             if (GutterLineAt(pt.x, pt.y) >= 0)
             {
-                SetCursor(LoadCursor(nullptr, IDC_HAND));      // 6.16: the column is clickable
+                static HCURSOR s_hcurHand = LoadCursor(nullptr, IDC_HAND);   // 6.21: one lookup, not one per mouse move
+                SetCursor(s_hcurHand);                          // 6.16: the column is clickable
                 return TRUE;
             }
         }
@@ -3056,14 +3154,9 @@ static void PostLoadPreview(LoadJob* pJob, int iViewPrev, DWORD cbPrev)
 // empty file) the caller falls back to the ReadFile loops, which stay in
 // place unchanged. A page-in error (EXCEPTION_IN_PAGE_ERROR, e.g. the disk
 // dropping a sector mid-copy) raises SEH: LoadThreadProc's existing
-// __try/__except jacket catches it, same last-resort contract as before.
-struct TVMappedView
-{
-    HANDLE hMap;            // the mapping object (CloseHandle when done)
-    const BYTE* pView;      // the view base (UnmapViewOfFile when done)
-    ULONGLONG qwStart;      // file offset of pView[0]
-    DWORD cbView;           // view length in bytes
-};
+// __try/__except jacket catches it, same last-resort contract as before;
+// 6.21: the view itself rides pJob->mvPending, so the jacket's unwind leaves
+// nothing mapped (~LoadJob releases it).
 
 // Maps [qwOff, qwOff + cbLen) of hFile read-only. MapViewOfFile requires the
 // offset to be a multiple of the system's allocation granularity: the start
@@ -3240,11 +3333,10 @@ void RunLoadJob(LoadJob* pJob)
         // round trips (a 64 KB window is at most one page-in). The view is
         // released immediately; the loop below is skipped entirely. A
         // refused mapping leaves the ReadFile loop in charge, unchanged.
-        TVMappedView mvHead;
-        if (!pJob->bStdin && cbHead > 0 && MapFileRange(hFile, pJob->qwBase, cbHead, dwGran, &mvHead))
+        if (!pJob->bStdin && cbHead > 0 && MapFileRange(hFile, pJob->qwBase, cbHead, dwGran, &pJob->mvPending))
         {
-            CopyMemory(pJob->pBytes, mvHead.pView + (pJob->qwBase - mvHead.qwStart), cbHead);
-            UnmapFileRange(&mvHead);
+            CopyMemory(pJob->pBytes, pJob->mvPending.pView + (pJob->qwBase - pJob->mvPending.qwStart), cbHead);
+            UnmapFileRange(&pJob->mvPending);
             cbTotal = cbHead;
             // 5.9.14: a mapped copy does not move the file pointer. If phase 2 cannot map the page
             // and falls back to ReadFile, it must continue AFTER the head, not re-read it.
@@ -3455,8 +3547,8 @@ void RunLoadJob(LoadJob* pJob)
                     // covers [qwBase, qwBase+cbFinal) exactly (cbFinal is
                     // min(rest on disk, cap), derived from cbOnDisk), so
                     // neither EOF nor short reads exist on this path.
-                    TVMappedView mvPage;
-                    const bool bMapped = (!pJob->bStdin) && MapFileRange(hFile, pJob->qwBase, cbFinal, dwGran, &mvPage);
+                    TVMappedView* pPg = &pJob->mvPending;   // 6.21: the job owns it: an in-page fault still unmaps
+                    const bool bMapped = MapFileRange(hFile, pJob->qwBase, cbFinal, dwGran, pPg);
                     if (bMapped)
                     {
                         // 6.00: one memcpy for the remainder (head is already in the
@@ -3468,14 +3560,14 @@ void RunLoadJob(LoadJob* pJob)
                         }
                         else if (cbTotal < cbFinal)
                         {
-                            PrefetchRange(mvPage.pView + (pJob->qwBase - mvPage.qwStart) + cbTotal, (SIZE_T)(cbFinal - cbTotal));   // 6.14: one big read-ahead before the copy walks the pages
+                            PrefetchRange(pPg->pView + (pJob->qwBase - pPg->qwStart) + cbTotal, (SIZE_T)(cbFinal - cbTotal));   // 6.14: one big read-ahead before the copy walks the pages
                             CopyMemory(pJob->pBytes + cbTotal,
-                                mvPage.pView + (pJob->qwBase - mvPage.qwStart) + cbTotal,
+                                pPg->pView + (pJob->qwBase - pPg->qwStart) + cbTotal,
                                 cbFinal - cbTotal);
                             cbTotal = cbFinal;
                             LoadProgressPublish(pJob, cbTotal, cbPage + cchExp);
                         }
-                        UnmapFileRange(&mvPage);
+                        UnmapFileRange(pPg);
                     }
                     else
                     {
@@ -4861,10 +4953,8 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
             return(false);                          // 3.05: OOM answers FALSE, not a null store
         }
-        if (!bParDone)
-        {
-            cch = 0;
-        }
+        // (6.21: the old `if (!bParDone) cch = 0;` was dead — cch is 0 unless
+        // the parallel decode above ran, and that path already set it.)
         if (cbSrc > 0 && !bParDone)
         {
             // cbMultiByte is only ever called with a byte count > 0:
@@ -5130,10 +5220,7 @@ bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll
         {
             return(false);                          // 3.05: OOM answers FALSE, not a null store
         }
-        if (!bParDone)
-        {
-            cch = 0;
-        }
+        // (6.21: the twin dead `if (!bParDone) cch = 0;` of the UTF-8 path.)
         if (cbSrc > 0 && !bParDone)                 // defensive symmetry with the UTF-8 path
         {
             cch = MultiByteToWideChar(g_uAnsiCP, 0, (LPCCH)pBytes, cbSrc, pText, cbSrc);   // 6.18: the chosen code page
@@ -6240,34 +6327,49 @@ static bool ClipboardSetText(HWND hOwner, const WCHAR* psz, int cch, bool bAppen
 {
     if (psz == nullptr || cch < 0) return false;
     if (!OpenClipboard(hOwner != nullptr ? hOwner : hWndMain)) return false;
-    std::wstring out;
-    if (bAppend)
+    // 6.21: the std::wstring work can throw bad_alloc on a huge selection, and
+    // ClipboardSetText runs inside the view's window procedure — an escaping
+    // exception left the clipboard OPEN and reached the last-chance filter
+    // (the process died over a Ctrl+C). Every other big allocation in the file
+    // is guarded; this one joins them and fails like any clipboard failure.
+    HGLOBAL hMem = nullptr;
+    bool bOk = false;
+    try
     {
-        HANDLE hExisting = GetClipboardData(CF_UNICODETEXT);
-        if (hExisting != nullptr)
+        std::wstring out;
+        if (bAppend)
         {
-            const WCHAR* pOld = (const WCHAR*)GlobalLock(hExisting);
-            if (pOld != nullptr)
+            HANDLE hExisting = GetClipboardData(CF_UNICODETEXT);
+            if (hExisting != nullptr)
             {
-                out.assign(pOld);
-                GlobalUnlock(hExisting);
+                const WCHAR* pOld = (const WCHAR*)GlobalLock(hExisting);
+                if (pOld != nullptr)
+                {
+                    out.assign(pOld);
+                    GlobalUnlock(hExisting);
+                }
             }
+            if (!out.empty() && out.back() != L'\n')
+                out += L"\r\n";
         }
-        if (!out.empty() && out.back() != L'\n')
-            out += L"\r\n";
+        out.append(psz, psz + cch);
+        hMem = GlobalAlloc(GMEM_MOVEABLE, (out.size() + 1) * sizeof(WCHAR));
+        if (hMem == nullptr) { CloseClipboard(); return false; }
+        WCHAR* pDst = (WCHAR*)GlobalLock(hMem);
+        if (pDst == nullptr) { GlobalFree(hMem); CloseClipboard(); return false; }
+        memcpy(pDst, out.c_str(), (out.size() + 1) * sizeof(WCHAR));
+        GlobalUnlock(hMem);
+        EmptyClipboard();
+        bOk = (SetClipboardData(CF_UNICODETEXT, hMem) != nullptr);
+        if (!bOk)
+        {
+            GlobalFree(hMem);               // 6.01: the clipboard did not take the block: it is still ours
+        }
     }
-    out.append(psz, psz + cch);
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (out.size() + 1) * sizeof(WCHAR));
-    if (hMem == nullptr) { CloseClipboard(); return false; }
-    WCHAR* pDst = (WCHAR*)GlobalLock(hMem);
-    if (pDst == nullptr) { GlobalFree(hMem); CloseClipboard(); return false; }
-    memcpy(pDst, out.c_str(), (out.size() + 1) * sizeof(WCHAR));
-    GlobalUnlock(hMem);
-    EmptyClipboard();
-    const bool bOk = (SetClipboardData(CF_UNICODETEXT, hMem) != nullptr);
-    if (!bOk)
+    catch (...)
     {
-        GlobalFree(hMem);               // 6.01: the clipboard did not take the block: it is still ours
+        CloseClipboard();                   // the OpenClipboard above is the only resource the throw can leave behind
+        return false;
     }
     CloseClipboard();
     return bOk;
@@ -7418,6 +7520,30 @@ static void TV_MoveCaretChars(TextViewState* pState, int iDir, int cSteps, bool 
 #define WM_MOUSEHWHEEL 0x020E
 #endif
 
+// 6.21: the user's "lines per notch" (SPI_GETWHEELSCROLLLINES), cached. The
+// wheel handler used to query the system on EVERY notch; the first wheel
+// message fills the cache and WM_SETTINGCHANGE (which the main window
+// receives, the view does not) refreshes it.
+static UINT s_uWheelLines = 3;                 // 6.01: the fallback when the query fails
+static bool s_bWheelLinesValid = false;
+static void WheelLinesPerNotchRefresh(void)
+{
+    UINT u = 3;
+    if (SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &u, 0))
+    {
+        s_uWheelLines = u;
+        s_bWheelLinesValid = true;
+    }
+}
+static UINT WheelLinesPerNotch(void)
+{
+    if (!s_bWheelLinesValid)
+    {
+        WheelLinesPerNotchRefresh();
+    }
+    return s_uWheelLines;
+}
+
 // 6.03: the double-buffer bitmap is kept between paints (it grows, never
 // shrinks): every selection tick, caret move or scroll step used to create and
 // destroy a bitmap as big as the whole client area.
@@ -7911,8 +8037,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         }
         SCROLLINFO si = {}; si.cbSize = sizeof(si); si.fMask = SIF_ALL;
         GetScrollInfo(hWnd, SB_VERT, &si);
-        UINT uLines = 3;                // 6.01: the user's "lines per notch" (WHEEL_PAGESCROLL = a page)
-        SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &uLines, 0);
+        UINT uLines = WheelLinesPerNotch();     // 6.21: cached (was a SystemParametersInfoW per notch)
         if (uLines == 0)
         {
             return 0;                   // wheel scrolling switched off in Windows
@@ -8067,6 +8192,7 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
 {
     if (hEdit == nullptr)
     {
+        delete[] pLineStarts;           // 6.21: adopt-or-free like TV_SetText — the worker's index is ours here too
         FreeViewText(pText);
         return;
     }
@@ -8501,6 +8627,14 @@ void PositionProgress(void)
 // flashes it); -1: unknown total (stdin) — marquee; 0..1000: the position.
 void OnLoadProgressTimer(void)
 {
+    // 6.21: the worker may have given up posting its result (20 failed retries
+    // over 2 s) and freed the job — then g_pJob dangles and every tick read
+    // freed memory. The flag is the worker's own notice: retire the marker
+    // with it, so the loader is not wedged ("one load at a time") until exit.
+    if (g_pJob != nullptr && InterlockedCompareExchange(&g_bLoadJobWorkerFreed, 0, 0) != 0)
+    {
+        g_pJob = nullptr;
+    }
     if (g_hProgress == nullptr || g_pJob == nullptr)
     {
         // The job landed between fires (ApplyLoadResult painted the final
@@ -8961,10 +9095,9 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
         {
             while (p < pEnd)
             {
-                const WCHAR* segEnd = p + (size_t)(pEnd - p);
+                // (6.21: the wmemchr never answers past pEnd, so a hit IS the segment end.)
                 const WCHAR* z = (const WCHAR*)wmemchr(p, L'\0', (size_t)(pEnd - p));
-                if (z != nullptr && z < segEnd)
-                    segEnd = z;
+                const WCHAR* segEnd = (z != nullptr) ? z : pEnd;
                 std::wcmatch m;
                 // 6.01: when the search starts inside the text, the character before p exists:
                 // without match_prev_avail ^ and \b matched at the caret as if it were a line start
@@ -9046,6 +9179,37 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
 
 
 /* -------------------------------------------------------------------------------------------- */
+// 6.21: the select-and-show tail that SearchNext and IncrementalFind kept as
+// two near-copies (and Find All doubles). One regex empty-match rule lives
+// here too: a match of length 0 selects ONE cell (what Find Previous and
+// Find All already did), not lstrlenW(pattern) characters that are not part
+// of the hit — and the next search continues right after the hit, so no
+// pattern of the x* family skips real matches or paints a false selection.
+static void SelectHit(int iPos, bool bFocus)
+{
+    int cchHit;
+    if (g_bRegexFind)
+    {
+        cchHit = (g_cchLastRegexMatch > 0) ? g_cchLastRegexMatch : 1;
+    }
+    else
+    {
+        cchHit = lstrlenW(szFind);
+    }
+    TV_SetSel(iPos, iPos + cchHit);
+    TV_ScrollCaret();
+    // 5.8: the focus belongs to the DIALOG while it is open. The old
+    // unconditional SetFocus(hEdit) stole it after every Find Next, so
+    // the user was left "in the results" with the dialog still up and
+    // ESC (and every other key) went to the viewer, not the dialog.
+    if (bFocus && hDlgFind == nullptr)
+    {
+        SetFocus(hEdit);
+    }
+    UpdateStatusBar();
+}
+
+
 void SearchNext(HWND hWnd, bool bShowError)
 {
     if (szFind[0] == L'\0')
@@ -9072,18 +9236,7 @@ void SearchNext(HWND hWnd, bool bShowError)
 
     if (iPos >= 0)
     {
-        int cchHit = (g_bRegexFind && g_cchLastRegexMatch > 0) ? g_cchLastRegexMatch : lstrlenW(szFind);
-        TV_SetSel(iPos, iPos + cchHit);
-        TV_ScrollCaret();
-        // 5.8: the focus belongs to the DIALOG while it is open. The old
-        // unconditional SetFocus(hEdit) stole it after every Find Next, so
-        // the user was left "in the results" with the dialog still up and
-        // ESC (and every other key) went to the viewer, not the dialog.
-        if (hDlgFind == nullptr)
-        {
-            SetFocus(hEdit);
-        }
-        UpdateStatusBar();
+        SelectHit(iPos, true);
     }
     else if (bShowError)
     {
@@ -9117,29 +9270,56 @@ void SearchPrev(bool bShowError)
     int cchHit = lstrlenW(szFind);
     if (g_bRegexFind)
     {
+        // 6.21: ONE segmented pass, the Find All pattern. The old loop asked
+        // FindPatternFrom for EVERY match, and each call re-ran its wmemchr of
+        // NUL segments over the whole REMAINING text before searching: a
+        // frequent pattern (".", "e") on a big page paid O(matches x text) —
+        // minutes of UI freeze on Shift+F3. The enumeration order, the
+        // prev_avail semantics, the empty-match handling and the 4,000,000
+        // cap are the old ones; only the cost changes.
         int iBefore = -1, cBefore = 0, iAny = -1, cAny = 0;
-        DWORD dwPos = 0;
-        for (int guard = 0; guard < 4000000; guard++)
+        const std::wregex* pre = GetCachedRegex();
+        if (pre == nullptr)
         {
-            const WCHAR* p = FindPatternFrom(g_tv.pText, dwPos);
-            if (p == nullptr)
+            StatusFlash(L"Invalid regular expression.");
+            return;
+        }
+        const WCHAR* pSeg = g_tv.pText;
+        const WCHAR* pEnd = g_tv.pText + g_tv.cch;
+        int cGuard = 4000000;
+        try
+        {
+            while (pSeg < pEnd)
             {
-                break;
+                const WCHAR* segEnd = pSeg + lstrlenW(pSeg);
+                const WCHAR* cur = pSeg;
+                std::wcmatch m;
+                while (cur < segEnd && cGuard > 0 && RegexSearchSeg(*pre, cur, segEnd, g_tv.pText, m))
+                {
+                    const int iPos = (int)(m[0].first - g_tv.pText);
+                    const int c = (m.length(0) > 0) ? (int)m.length(0) : 1;
+                    iAny = iPos;
+                    cAny = c;
+                    if (iPos < iFrom)
+                    {
+                        iBefore = iPos;
+                        cBefore = c;
+                    }
+                    cGuard--;
+                    cur = m[0].first + 1;           // the old dwPos = iPos + 1: overlapping matches enumerated too
+                }
+                if (segEnd >= pEnd)
+                {
+                    break;
+                }
+                pSeg = segEnd + 1;                  // past embedded NUL
             }
-            const int iPos = (int)(p - g_tv.pText);
-            const int c = (g_cchLastRegexMatch > 0) ? g_cchLastRegexMatch : 1;
-            iAny = iPos;
-            cAny = c;
-            if (iPos < iFrom)
-            {
-                iBefore = iPos;
-                cBefore = c;
-            }
-            dwPos = (DWORD)iPos + 1;
-            if (dwPos > (DWORD)g_tv.cch)
-            {
-                break;
-            }
+        }
+        catch (...)
+        {
+            // 6.01: std::regex_error (complexity / stack) or bad_alloc on a huge segment:
+            // before, the exception left the window procedure and killed the program.
+            StatusFlash(L"The regular expression is too complex for this text.");
         }
         if (iBefore >= 0)
         {
@@ -9213,10 +9393,7 @@ static void IncrementalFind(void)
         return;
     }
     const int iPos = (int)(pFound - g_tv.pText);
-    const int cchHit = (g_bRegexFind && g_cchLastRegexMatch > 0) ? g_cchLastRegexMatch : lstrlenW(szFind);
-    TV_SetSel(iPos, iPos + cchHit);
-    TV_ScrollCaret();
-    UpdateStatusBar();
+    SelectHit(iPos, false);                 // 6.21: same tail as SearchNext (no focus move: the box keeps typing)
 }
 
 static LRESULT CALLBACK FindDlgSubclassProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR uId, DWORD_PTR)
@@ -9520,6 +9697,12 @@ void OpenFreezeColsDialog(HWND hWnd)
 {
     if (DialogBoxW(hInst, MAKEINTRESOURCE(IDD_FREEZECOLS), hWnd, FreezeColsProc) == IDOK)
     {
+        // 6.21: the ruler strip (column / byte header) only repaints when the
+        // gutter is dirty or the horizontal scroll moved. A freeze change with
+        // the view scrolled sideways left the OLD ruler on screen until the
+        // next scroll: mark the gutter dirty so the control's paint refreshes
+        // both the labels and the ruler (same hook ThemeApply uses).
+        g_tv.bGutterDirty = true;
         if (g_tv.hWnd) InvalidateRect(g_tv.hWnd, nullptr, FALSE);
         WCHAR sz[64];
         if (g_iFreezeCols > 0)
@@ -9596,7 +9779,12 @@ void ApplyCsvMode(bool bOn)
             const WCHAR ch = pText[i];
             if (ch == L'\r') continue;
             if (ch == L'"') { bQuote = !bQuote; continue; }
-            if (ch == L'\n')
+            // 6.21: a newline INSIDE a quoted field is field content (RFC 4180,
+            // every Excel export with a multiline cell), not a row end. The old
+            // code cut the row mid-cell and the rest of the field started a
+            // phantom row: the whole table below it lost its alignment. The
+            // field keeps it now; the copy below renders it as a space.
+            if (ch == L'\n' && !bQuote)
             {
                 fields.push_back(Field{ iField, i - iField });
                 i++;
@@ -9640,13 +9828,15 @@ void ApplyCsvMode(bool bOn)
         for (size_t c = 0; c < rows[r].size() && c < (size_t)kMaxCols; c++)
         {
             const Field& f = rows[r][c];
-            // Copy field bytes but drop CR (lengths/widths were counted with CR skipped below).
+            // Copy field bytes but drop CR (lengths/widths were counted with CR skipped below);
+            // 6.21: a newline kept inside a quoted field renders as a space — a raw one would
+            // tear the table rows the same way the old parser did.
             int copied = 0;
             for (int k = 0; k < f.n && copied < widths[c]; k++)
             {
                 const WCHAR ch = pText[f.i0 + k];
                 if (ch == L'\r') continue;
-                out += ch;
+                out += (ch == L'\n') ? L' ' : ch;
                 copied++;
             }
             for (int pad = widths[c] - copied; pad > 0; pad--)
@@ -9802,11 +9992,14 @@ bool LoadPage(ULONGLONG qwBase, bool bTailJump)
     WCHAR szPath[MAX_PATH];
     (void)lstrcpynW(szPath, g_szCurrentFile, MAX_PATH);
     int iKeepView = iView;
-    LoadJob* pJob = BeginLoadJob(false);     // clears the viewer (also g_szCurrentFile)
+    UINT uKeepCP = g_uAnsiCP;               // 6.21: a page of the SAME file keeps the ANSI code page the user picked
+    LoadJob* pJob = BeginLoadJob(false);     // clears the viewer (also g_szCurrentFile; resets g_uAnsiCP to the CLI one)
     if (pJob == nullptr)
     {
         return(false);                  // out of memory: BeginLoadJob already said so
     }
+    g_uAnsiCP = uKeepCP;                    // 6.21: BeginLoadJob's reset is for fresh loads; paging, F5, Go To and the
+                                            // tail reload must keep decoding with the chosen page (the view is kept too)
     (void)lstrcpynW(pJob->szPath, szPath, MAX_PATH);
     pJob->qwBase = qwBase;
     pJob->iDetected = iKeepView;            // keep the view the user is reading
@@ -12693,6 +12886,39 @@ static long ProfileLong(LPCWSTR pszKey, long lDefault)
 }
 
 
+// 6.21: the four window-placement keys are the only INI values that can be
+// NEGATIVE (a monitor left of / above the primary), and GetPrivateProfileIntW
+// cannot read negative numbers — WinLeft came back 0, the rect failed the
+// monitor check (or reopened shifted) and the placement was silently lost on
+// every restart. They read as strings with an explicit signed parse instead;
+// every other key is non-negative and keeps ProfileLong.
+static long ProfileCoord(LPCWSTR pszKey)
+{
+    WCHAR sz[32];
+    GetPrivateProfileStringW(L"4More", pszKey, L"", sz, _countof(sz), g_szIniPath);
+    const WCHAR* p = sz;
+    while (*p == L' ')
+    {
+        p++;                                    // GetPrivateProfileInt skipped leading spaces too
+    }
+    if (*p == L'\0')
+    {
+        return INI_WINPOS_INVALID;              // missing (or empty) key: same answer as the old default
+    }
+    const bool bNeg = (*p == L'-');
+    if (bNeg)
+    {
+        p++;
+    }
+    ULONGLONG qw = 0;
+    if (!ParseU64(p, qw) || qw >= (ULONGLONG)INI_WINPOS_INVALID)
+    {
+        return INI_WINPOS_INVALID;              // garbage degrades: the placement is dropped
+    }
+    return bNeg ? -(long)qw : (long)qw;
+}
+
+
 /* -------------------------------------------------------------------------------------------- */
 // The INI lives beside the executable (like 4DOS/4NT), not in a roaming
 // profile: a viewer is per-installation state, and a portable directory
@@ -12795,10 +13021,10 @@ void LoadSettings(void)
     }
     // Window placement: all four edges must be present AND land on a
     // monitor that exists right now.
-    long lLeft = ProfileLong(L"WinLeft", INI_WINPOS_INVALID);
-    long lTop = ProfileLong(L"WinTop", INI_WINPOS_INVALID);
-    long lRight = ProfileLong(L"WinRight", INI_WINPOS_INVALID);
-    long lBottom = ProfileLong(L"WinBottom", INI_WINPOS_INVALID);
+    long lLeft = ProfileCoord(L"WinLeft");      // 6.21: signed — monitors left of / above the primary
+    long lTop = ProfileCoord(L"WinTop");
+    long lRight = ProfileCoord(L"WinRight");
+    long lBottom = ProfileCoord(L"WinBottom");
     if (lLeft != INI_WINPOS_INVALID && lTop != INI_WINPOS_INVALID &&
         lRight != INI_WINPOS_INVALID && lBottom != INI_WINPOS_INVALID)
     {

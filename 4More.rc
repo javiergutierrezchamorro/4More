@@ -1,4 +1,6 @@
-// 4More.rc — recursos del visor (Build 7.01)
+// 4More.rc — recursos del visor (Build 7.02)
+//
+// 7.02: sin cambios de recursos (solo el número de versión).
 //
 // 7.01: ACELERADORES NUEVOS: F4 / Mayús+F4 (siguiente / anterior diferencia de Compare; el menú ya
 // los anunciaba y no existían). Sin cambios de menús ni de diálogos. El .cpp 7.01 abre por fin el

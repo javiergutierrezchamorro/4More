@@ -1,6 +1,18 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 7.01
+   Build 7.02
+
+   Version 7.02 (review of the rest of the code):
+   - FIX: "Remember position" restored NOTHING from entries written by 6.22 and later: PosLookup handed
+     ParseU64 the whole "offset|view|cp|font|bookmarks" string and ParseU64 refuses the bar, so every such
+     entry was dropped (only the old two-field "offset|path" entries worked). wcstok_s also skips EMPTY
+     tokens, so an empty code-page field (every non-ANSI view) shifted the font and bookmark fields. The
+     fields are split by hand now, empties kept.
+   - FIX: 4More.ini is a UTF-16 LE file from now on (EnsureUnicodeIni: a missing or ANSI INI is rewritten once
+     per run before the first write). The Win32 profile API stores ANSI otherwise: a path outside the ANSI
+     code page became '?' in [Recent], [Session] and [Positions] and could not be reopened.
+   - SPEED: a pipe whose last growth overshoots only slightly no longer copies up to CB_TEXT_MAX bytes to
+     shrink the buffer (the copy runs only when the waste is above 1/8 + 64 KB).
 
    Version 7.01 (review round):
    - FIX: File > Compare never showed its result: the worker posted WM_APP+11 but no window
@@ -712,7 +724,7 @@ int AppMsgBox(HWND hWnd, LPCWSTR pszText, LPCWSTR pszTitle, UINT uType)
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"7.01"
+#define APP_VERSION L"7.02"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -7985,9 +7997,10 @@ void RunLoadJob(LoadJob* pJob)
         delete[] pJob->pBytes;
         pJob->pBytes = nullptr;
     }
-    else if (cbAlloc > cbTotal)
+    else if (cbAlloc - cbTotal > (cbTotal >> 3) + 65536)
     {
-        // Shrink an over-sized buffer (pipe growth or early EOF) to the
+        // 7.02: only when the waste is worth a copy (a pipe that stopped just past a doubling used to copy up to
+        // CB_TEXT_MAX bytes to give back a few KB). Shrink an over-sized buffer (pipe growth or early EOF) to the
         // exact data size. A failed allocation is no reason to lose
         // the bytes already read: keep the bigger buffer instead.
         BYTE* pExact = new (std::nothrow) BYTE[cbTotal];
@@ -11692,6 +11705,86 @@ static void TV_MoveCaretWord(TextViewState* pState, int iDir, bool bShift)
     TV_ScrollCaret();
 }
 
+// 7.02: the Win32 profile API stores ANSI unless the file is UTF-16 LE (BOM FF FE): every path outside the ANSI
+// code page became '?' in [Recent], [Session] and [Positions] and could not be reopened. A missing or ANSI INI is
+// rewritten as UTF-16 LE once per run, before the first write (temp file + replace, so a failure keeps the old
+// INI); the API reads both. A UTF-8 or UTF-16 BE file, or one that cannot be read, is left alone.
+static void EnsureUnicodeIni(void)
+{
+    static bool s_bDone = false;
+    if (s_bDone || g_szIniPath[0] == L'\0')
+    {
+        return;
+    }
+    s_bDone = true;
+    BYTE* pRaw = nullptr;
+    DWORD cb = 0;
+    HANDLE h = CreateFileW(g_szIniPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        LARGE_INTEGER li;
+        const bool bSized = GetFileSizeEx(h, &li) != FALSE && li.QuadPart >= 0 && li.QuadPart < (16 << 20);
+        if (bSized && li.QuadPart > 0)
+        {
+            cb = (DWORD)li.QuadPart;
+            DWORD got = 0;
+            pRaw = new (std::nothrow) BYTE[cb];
+            if (pRaw == nullptr || !ReadFile(h, pRaw, cb, &got, nullptr) || got != cb)
+            {
+                delete[] pRaw;
+                CloseHandle(h);
+                return;
+            }
+        }
+        CloseHandle(h);
+        if (!bSized)
+        {
+            return;
+        }
+    }
+    else if (GetLastError() != ERROR_FILE_NOT_FOUND)
+    {
+        return;                                 // access denied, sharing violation...: leave it as it is
+    }
+    if ((cb >= 2 && ((pRaw[0] == 0xFF && pRaw[1] == 0xFE) || (pRaw[0] == 0xFE && pRaw[1] == 0xFF))) ||
+        (cb >= 3 && pRaw[0] == 0xEF && pRaw[1] == 0xBB && pRaw[2] == 0xBF))
+    {
+        delete[] pRaw;
+        return;                                 // already Unicode (or a UTF-8 file the profile API cannot read anyway)
+    }
+    int cch = 0;
+    WCHAR* pW = nullptr;
+    if (cb > 0)
+    {
+        cch = MultiByteToWideChar(CP_ACP, 0, (LPCSTR)pRaw, (int)cb, nullptr, 0);
+        pW = (cch > 0) ? new (std::nothrow) WCHAR[(size_t)cch] : nullptr;
+        if (pW == nullptr || MultiByteToWideChar(CP_ACP, 0, (LPCSTR)pRaw, (int)cb, pW, cch) != cch)
+        {
+            delete[] pW;
+            delete[] pRaw;
+            return;
+        }
+    }
+    delete[] pRaw;
+    WCHAR szTmp[MAX_PATH + 8];
+    wnsprintfW(szTmp, (int)_countof(szTmp), L"%s.tmp", g_szIniPath);
+    HANDLE hw = CreateFileW(szTmp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool bOk = false;
+    if (hw != INVALID_HANDLE_VALUE)
+    {
+        static const WCHAR kBom = 0xFEFF;
+        DWORD w1 = 0, w2 = 0;
+        bOk = WriteFile(hw, &kBom, sizeof(kBom), &w1, nullptr) && w1 == sizeof(kBom) &&
+              (cch == 0 || (WriteFile(hw, pW, (DWORD)cch * sizeof(WCHAR), &w2, nullptr) && w2 == (DWORD)cch * sizeof(WCHAR)));
+        CloseHandle(hw);
+    }
+    delete[] pW;
+    if (!bOk || !MoveFileExW(szTmp, g_szIniPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        DeleteFileW(szTmp);
+    }
+}
+
 // ---- remember where I was (INI [Positions]: P1 = "offset|view|cp|font|bms|path", most recent first) ----
 
 static bool PosLookup(const WCHAR* pszPath, PosEntry* pE)
@@ -11713,58 +11806,49 @@ static bool PosLookup(const WCHAR* pszPath, PosEntry* pE)
         if (pLast != nullptr && lstrcmpiW(pLast + 1, pszPath) == 0)
         {
             *pLast = L'\0';
-            if (!ParseU64(szVal, pE->qwOff))
+            // 7.02: split at the bars KEEPING the empty fields. Two bugs stood here since 6.22: ParseU64 was
+            // handed the WHOLE "offset|view|cp|font|bms" string and refused it (the bar), so every entry written
+            // by 6.22+ was dropped and Remember Position restored nothing; and wcstok_s skips empty tokens, so
+            // an empty code-page field (every non-ANSI view) shifted the font and the bookmarks one field up.
+            WCHAR* f[5] = {};
+            int nf = 0;
+            f[nf++] = szVal;
+            for (WCHAR* q = szVal; *q != L'\0' && nf < 5; q++)
+            {
+                if (*q == L'|')
+                {
+                    *q = L'\0';
+                    f[nf++] = q + 1;
+                }
+            }
+            if (!ParseU64(f[0], pE->qwOff))
             {
                 return false;
             }
             // the extras (tolerant: an old entry or a hand-edited one degrades to offsets only)
-            WCHAR* pCtx = nullptr;
-            WCHAR* pTok = wcstok_s(szVal, L"|", &pCtx);   // token 0 = the offset (already parsed): skip it
-            if (pTok != nullptr)
+            ULONGLONG q = 0;
+            if (nf > 1 && ParseU64(f[1], q) && q >= (ULONGLONG)VIEW_ANSI && q <= (ULONGLONG)VIEW_UTF32BE)
             {
-                pTok = wcstok_s(nullptr, L"|", &pCtx);
+                pE->iView = (int)q;                 // the view
             }
-            int iField = 0;
-            while (pTok != nullptr && iField < 4)
+            if (nf > 2 && ParseU64(f[2], q) && q > 0 && q < 65536)
             {
-                ULONGLONG q = 0;
-                switch (iField)
+                pE->uCP = (UINT)q;                  // the ANSI code page
+            }
+            if (nf > 3 && ParseU64(f[3], q) && q < (ULONGLONG)_countof(g_iFontSizes))
+            {
+                pE->iFont = (int)q;                 // the font size slot
+            }
+            if (nf > 4)
+            {
+                WCHAR* pCtx2 = nullptr;             // bookmarks, comma-separated absolute offsets
+                for (WCHAR* pTok2 = wcstok_s(f[4], L",", &pCtx2); pTok2 != nullptr && pE->cBm < POS_BM_MAX; pTok2 = wcstok_s(nullptr, L",", &pCtx2))
                 {
-                case 0:                             // the view
-                    if (ParseU64(pTok, q) && q >= (ULONGLONG)VIEW_ANSI && q <= (ULONGLONG)VIEW_UTF32BE)
+                    if (ParseU64(pTok2, q))
                     {
-                        pE->iView = (int)q;
+                        pE->qwbm[pE->cBm++] = q;
                     }
-                    break;
-                case 1:                             // the ANSI code page
-                    if (ParseU64(pTok, q) && q > 0 && q < 65536)
-                    {
-                        pE->uCP = (UINT)q;
-                    }
-                    break;
-                case 2:                             // the font size slot
-                    if (ParseU64(pTok, q) && q < (ULONGLONG)_countof(g_iFontSizes))
-                    {
-                        pE->iFont = (int)q;
-                    }
-                    break;
-                case 3:                             // bookmarks, comma-separated absolute offsets
-                {
-                    WCHAR* pCtx2 = nullptr;
-                    WCHAR* pTok2 = wcstok_s(pTok, L",", &pCtx2);
-                    while (pTok2 != nullptr && pE->cBm < POS_BM_MAX)
-                    {
-                        if (ParseU64(pTok2, q))
-                        {
-                            pE->qwbm[pE->cBm++] = q;
-                        }
-                        pTok2 = wcstok_s(nullptr, L",", &pCtx2);
-                    }
-                    break;
                 }
-                }
-                iField++;
-                pTok = wcstok_s(nullptr, L"|", &pCtx);
             }
             return true;
         }
@@ -11825,6 +11909,7 @@ static void PosStore(const WCHAR* pszPath, const PosEntry* pE)
             entry += pszPath;
         }
         PosMruMerge(v, entry, pszPath, POS_MAX);
+        EnsureUnicodeIni();
         std::wstring sec;
         for (size_t i = 0; i < v.size(); i++)
         {
@@ -17679,6 +17764,7 @@ void SaveSettings(void)
     // section block is "key=value" strings separated by NUL, ended by a double
     // NUL. Placement: GetWindowPlacement reports the RESTORED rect even while
     // maximized, which is exactly what the next start should restore.
+    EnsureUnicodeIni();                         // 7.02: before the first write of this run
     WCHAR szSec[768];   // 6.22: was 640; the four new keys joined the worst case (still one section write)
     WCHAR* p = szSec;
     p += wsprintfW(p, L"FontSize=%d", 0 - g_iFontSizes[g_iFontIndex]) + 1;     // positive point size

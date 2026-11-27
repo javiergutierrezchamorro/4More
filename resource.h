@@ -67,6 +67,7 @@
 #define ID_THEME_AUTO                   32835
 #define ID_THEME_LIGHT                  32836
 #define ID_THEME_DARK                   32837
+#define ID_THEME_TURBO                  32838   // Options > Theme > Turbo Vision
 // the code page items are consecutive: ID_ENC_CP00 + k = kCodePages[k] in 4More.cpp
 #define ID_ENC_CP00                      32840
 #define ID_ENC_CP01                      32841
@@ -114,16 +115,57 @@
 #define ID_INSPECT_CHAR                 32865   // Search > Character at Caret (Ctrl+Q)
 #define ID_OPTIONS_FILTER               32866   // Options > Filter Lines (Ctrl+Shift+G)
 #define ID_OPTIONS_HILITEALL            32867   // Options > Highlight Matches
-#define ID_COPY_CARRAY                  32868   // hex: Copy as C array
-#define ID_COPY_B64                     32869   // hex: Copy as Base64
+#define ID_COPY_CARRAY                  32868   // hex: Copy as C/C++ array
+#define ID_COPY_B64                     32869   // hex: Copy as Base64 (RFC 4648)
 #define IDD_EXPORT                      133
 #define IDC_EXPORT_PAGE                 1111
 #define IDC_EXPORT_ALL                  1112
 // 6.23: more hex "Copy as" formats
-#define ID_COPY_ASMARRAY                32870   // hex: Copy as ASM db
-#define ID_COPY_PHPARRAY                32871   // hex: Copy as PHP array
-#define ID_COPY_JSARRAY                 32872   // hex: Copy as JS Uint8Array
-#define ID_COPY_PYARRAY                 32873   // hex: Copy as Python bytes
+#define ID_COPY_ASMARRAY                32870
+#define ID_COPY_PHPARRAY                32871
+#define ID_COPY_JSARRAY                 32872
+#define ID_COPY_PYARRAY                 32873
+// Extra language arrays + Base64 family
+#define ID_COPY_PASCALARRAY             32889
+#define ID_COPY_JSONARRAY               32890
+#define ID_COPY_JAVAARRAY               32891
+#define ID_COPY_RUSTARRAY               32892
+#define ID_COPY_GOARRAY                 32893
+#define ID_COPY_CSHARPARRAY             32894
+#define ID_COPY_SWIFTARRAY              32895
+#define ID_COPY_KOTLINARRAY             32896
+#define ID_COPY_RUBYARRAY               32897
+#define ID_COPY_B64URL                  32898
+#define ID_COPY_B64MIME                 32899
+#define ID_COPY_DATAURI                 32900
+#define ID_COPY_BASE32                  32901
+#define ID_COPY_HEXSTR                  32902
+#define ID_COPY_BASICARRAY              32903   // hex: Copy as Basic/VB array
+#define ID_COPY_SQLARRAY                32904
+#define ID_COPY_HTMLARRAY               32905
+#define ID_COPY_LOGARRAY                32906
+// Syntax Highlight (View): consecutive, ID_SYN_NONE + index, alpha order after None
+#define ID_SYN_NONE                     32910
+#define ID_SYN_ASM                      32911
+#define ID_SYN_BASIC                    32912
+#define ID_SYN_CPP                      32913
+#define ID_SYN_CSHARP                   32914
+#define ID_SYN_GO                       32915
+#define ID_SYN_HTML                     32916
+#define ID_SYN_JAVA                     32917
+#define ID_SYN_JS                       32918
+#define ID_SYN_JSON                     32919
+#define ID_SYN_KOTLIN                   32920
+#define ID_SYN_LOG                      32921
+#define ID_SYN_PASCAL                   32922
+#define ID_SYN_PHP                      32923
+#define ID_SYN_PYTHON                   32924
+#define ID_SYN_RUBY                     32925
+#define ID_SYN_RUST                     32926
+#define ID_SYN_SQL                      32927
+#define ID_SYN_SWIFT                    32928
+#define ID_SYN_FIRST                    ID_SYN_NONE
+#define ID_SYN_LAST                     ID_SYN_SWIFT
 // 6.24
 #define ID_SEARCH_FINDINFILES           32874   // Search > Find in Files...
 #define ID_HEX_BPL8                     32876
@@ -160,7 +202,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
 #define _APS_NEXT_RESOURCE_VALUE        136
-#define _APS_NEXT_COMMAND_VALUE         32889
+#define _APS_NEXT_COMMAND_VALUE         32929
 #define _APS_NEXT_CONTROL_VALUE         1125
 #define _APS_NEXT_SYMED_VALUE           110
 #endif

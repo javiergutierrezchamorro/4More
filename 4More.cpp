@@ -2,7 +2,15 @@
    4More - file viewer (Win32)
    Build 7.03
 
-   Version 7.03 (review round):
+   Version 8.00:
+   - NEW: Options > Theme > Turbo Vision — classic Borland/DOS palette: blue editor
+     background (CGA colour 1 = RGB 0,0,170), white text, cyan selection, yellow/cyan/
+     green/red syntax colours. INI Theme=3, CLI /turbo.
+   - Syntax Highlight / Copy as parity, extension-based language detection, Shift+page
+     selection, Base64 family, multi-line comment state, freeze-column syntax fix.
+   - Cleanup: dead Autodetect path removed; paint seeds comment state once per frame.
+
+   Version 8.00 (review round):
    - SPEED: FxIsWordChar / TvCharClass ASCII fast path (no IsCharAlphaNumericW
      per character on Latin text); FindPatternFrom caches pattern length;
      theme colour helpers and TV getters are static inline; pure utilities
@@ -793,7 +801,7 @@ static void AllowDropFromUnelevated(HWND hWnd)
 }
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"7.03"
+#define APP_VERSION L"8.00"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -869,12 +877,25 @@ static volatile LONG g_lPrefetchSeq = 0;         // 6.14: bumped by every load: 
 UINT g_uAnsiCP = CP_ACP;                        // 6.18: the code page of the ANSI view (CP_ACP = the system's; the menu / /cp:N pick others)
 UINT g_uCliCP = CP_ACP;                         // 6.18: /cp:N from the command line (what every fresh load starts with)
 bool g_bShowWS = false;                         // 6.18: Options > Show Whitespace (INI ShowWhitespace, /ws)
-int g_iTheme = 0;                               // 6.18: 0 = follow Windows, 1 = light, 2 = dark (INI Theme, /dark /light)
-bool g_bDark = false;                           // 6.18: the theme in effect
+int g_iTheme = 0;                               // 0=Auto, 1=Light, 2=Dark, 3=Turbo Vision (INI Theme, /dark /light /turbo)
+bool g_bDark = false;                           // effective dark chrome (Dark or Turbo)
+bool g_bTurbo = false;                          // 8.00: Turbo Vision palette (blue bg, white text)
 ULONGLONG g_qwPendingLine = 0;                  // 6.18: +N on the command line: the line to go to once the first load is shown
 bool g_bRememberPos = true;                    // 6.17: INI RememberPosition=0: do not reopen files where they were left
 // --- 6.22: highlight-all, filter, whole-file find, hash, watcher, session ---
 bool g_bHiliteAll = true;                      // Options > Highlight Matches: paint every hit of the Find pattern (INI HighlightAll)
+// Syntax Highlight language (View menu). SynLang enum is declared just below.
+enum SynLang {
+    // Must match ID_SYN_NONE.. and the alphabetical View > Syntax menu (None first).
+    SYN_LANG_NONE = 0,
+    SYN_LANG_ASM, SYN_LANG_BASIC, SYN_LANG_CPP, SYN_LANG_CSHARP, SYN_LANG_GO,
+    SYN_LANG_HTML, SYN_LANG_JAVA, SYN_LANG_JS, SYN_LANG_JSON, SYN_LANG_KOTLIN,
+    SYN_LANG_LOG, SYN_LANG_PASCAL, SYN_LANG_PHP, SYN_LANG_PYTHON, SYN_LANG_RUBY,
+    SYN_LANG_RUST, SYN_LANG_SQL, SYN_LANG_SWIFT,
+    SYN_LANG_COUNT
+};
+int  g_iSyntaxLang = 0;                        // 0=None, 1..=languages (set from extension on open)
+
 bool g_bFilter = false;                        // Options > Filter Lines: the page shows ONLY the lines matching the Find pattern
 int* g_pFilterOrig = nullptr;                  // while filtered: original line number of each shown line (gutter labels + status)
 int g_cFilterShown = 0;                        // lines the filter kept ("n of m")
@@ -1143,18 +1164,70 @@ static HBRUSH ThBrush(COLORREF c)
     return h;
 }
 
-static inline COLORREF ThWindow(void)    { return g_bDark ? RGB(30, 30, 30)    : GetSysColor(COLOR_WINDOW); }
-static inline COLORREF ThText(void)      { return g_bDark ? RGB(224, 224, 224) : GetSysColor(COLOR_WINDOWTEXT); }
-static inline COLORREF ThSelBg(void)     { return g_bDark ? RGB(38, 79, 120)   : GetSysColor(COLOR_HIGHLIGHT); }
-static inline COLORREF ThSelTx(void)     { return g_bDark ? RGB(255, 255, 255) : GetSysColor(COLOR_HIGHLIGHTTEXT); }
-static inline COLORREF ThGreenbar(void)  { return g_bDark ? RGB(38, 46, 38)    : RGB(0xE8, 0xF0, 0xE8); }
-static inline COLORREF ThHilite(void)    { return g_bDark ? RGB(60, 60, 30)    : RGB(0xFF, 0xF0, 0xB0); }
-static inline COLORREF ThBookmark(void)  { return g_bDark ? RGB(31, 58, 92)    : RGB(0xB8, 0xD4, 0xF0); }
-static inline COLORREF ThWhitespace(void){ return g_bDark ? RGB(100, 100, 100) : RGB(170, 170, 170); }
-static inline HBRUSH ThBrushWindow(void) { return g_bDark ? ThBrush(RGB(30, 30, 30))    : GetSysColorBrush(COLOR_WINDOW); }
-static inline HBRUSH ThBrushFace(void)   { return g_bDark ? ThBrush(RGB(45, 45, 48))    : GetSysColorBrush(COLOR_3DFACE); }
-static inline HBRUSH ThBrushShadow(void) { return g_bDark ? ThBrush(RGB(90, 90, 90))    : GetSysColorBrush(COLOR_3DSHADOW); }
-static inline HBRUSH ThBrushLight(void)  { return g_bDark ? ThBrush(RGB(62, 62, 62))    : GetSysColorBrush(COLOR_3DLIGHT); }
+// 8.00 Turbo Vision palette uses the classic DOS CGA/EGA/VGA text-mode colours
+// (IBM): Blue 1=(0,0,170), Cyan 3=(0,170,170), Light Blue 9=(85,85,255),
+// Yellow 14=(255,255,85), White 15=(255,255,255). Borland's IDE editor was
+// white text on blue; selection is typically black on cyan.
+static inline COLORREF ThWindow(void)
+{
+    if (g_bTurbo) return RGB(0, 0, 170);
+    return g_bDark ? RGB(30, 30, 30) : GetSysColor(COLOR_WINDOW);
+}
+static inline COLORREF ThText(void)
+{
+    if (g_bTurbo) return RGB(255, 255, 255);
+    return g_bDark ? RGB(224, 224, 224) : GetSysColor(COLOR_WINDOWTEXT);
+}
+static inline COLORREF ThSelBg(void)
+{
+    if (g_bTurbo) return RGB(0, 170, 170);
+    return g_bDark ? RGB(38, 79, 120) : GetSysColor(COLOR_HIGHLIGHT);
+}
+static inline COLORREF ThSelTx(void)
+{
+    if (g_bTurbo) return RGB(0, 0, 0);
+    return g_bDark ? RGB(255, 255, 255) : GetSysColor(COLOR_HIGHLIGHTTEXT);
+}
+static inline COLORREF ThGreenbar(void)
+{
+    if (g_bTurbo) return RGB(0, 0, 128);
+    return g_bDark ? RGB(38, 46, 38) : RGB(0xE8, 0xF0, 0xE8);
+}
+static inline COLORREF ThHilite(void)
+{
+    if (g_bTurbo) return RGB(0, 0, 128);
+    return g_bDark ? RGB(60, 60, 30) : RGB(0xFF, 0xF0, 0xB0);
+}
+static inline COLORREF ThBookmark(void)
+{
+    if (g_bTurbo) return RGB(0, 85, 170);
+    return g_bDark ? RGB(31, 58, 92) : RGB(0xB8, 0xD4, 0xF0);
+}
+static inline COLORREF ThWhitespace(void)
+{
+    if (g_bTurbo) return RGB(85, 85, 255);
+    return g_bDark ? RGB(100, 100, 100) : RGB(170, 170, 170);
+}
+static inline HBRUSH ThBrushWindow(void)
+{
+    if (g_bTurbo) return ThBrush(RGB(0, 0, 170));
+    return g_bDark ? ThBrush(RGB(30, 30, 30)) : GetSysColorBrush(COLOR_WINDOW);
+}
+static inline HBRUSH ThBrushFace(void)
+{
+    if (g_bTurbo) return ThBrush(RGB(0, 0, 128));
+    return g_bDark ? ThBrush(RGB(45, 45, 48)) : GetSysColorBrush(COLOR_3DFACE);
+}
+static inline HBRUSH ThBrushShadow(void)
+{
+    if (g_bTurbo) return ThBrush(RGB(0, 0, 85));
+    return g_bDark ? ThBrush(RGB(90, 90, 90)) : GetSysColorBrush(COLOR_3DSHADOW);
+}
+static inline HBRUSH ThBrushLight(void)
+{
+    if (g_bTurbo) return ThBrush(RGB(85, 85, 255));
+    return g_bDark ? ThBrush(RGB(62, 62, 62)) : GetSysColorBrush(COLOR_3DLIGHT);
+}
 
 static bool SystemWantsDark(void)
 {
@@ -1201,8 +1274,10 @@ static void ResolveThemeApis(void)
 
 static void ThemeApply(void)
 {
-    g_bDark = (g_iTheme == 2) || (g_iTheme == 0 && SystemWantsDark());
-    // the title bar (Windows 10 20H1+ / 11: attribute 20; 1809-1909: attribute 19) and the scroll bars (DarkMode_Explorer)
+    // Effective mode: Turbo is its own palette; Dark covers forced dark and Auto+Windows-dark.
+    g_bTurbo = (g_iTheme == 3);
+    g_bDark = g_bTurbo || (g_iTheme == 2) || (g_iTheme == 0 && SystemWantsDark());
+    // Title bar + scroll bars (DarkMode_Explorer); Turbo uses dark chrome around the blue view.
     ResolveThemeApis();
     if (s_pfnDwmSetAttr != nullptr && hWndMain != nullptr)
     {
@@ -1380,6 +1455,7 @@ static void WheelLinesPerNotchRefresh(void);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
 void ShowCommandLineHelp(void);
 void LoadFile(const WCHAR* pacFilename);
+static void SynApplyFromPath(const WCHAR* pszPath);  // syntax from file extension
 LoadJob* BeginLoadJob(bool bStdin);            // shared setup of both load paths
 void LoadStdin(void);                          // stdin path (startup); 3.02: async like the file loads
 void StartAsyncLoad(const WCHAR* pacFilename);  // file path: worker thread + WM_APP_LOADDONE
@@ -2389,12 +2465,30 @@ void ToggleHiliteAll(void);
 // 6.23: format selectors for hex "Copy as ..." (must be visible to WM_COMMAND)
 enum CopyFmt
 {
-    COPYFMT_C = 0,
+    COPYFMT_C = 0,          // C/C++
     COPYFMT_ASM,
     COPYFMT_PHP,
     COPYFMT_JS,
     COPYFMT_PYTHON,
-    COPYFMT_BASE64
+    COPYFMT_PASCAL,
+    COPYFMT_JSON,
+    COPYFMT_JAVA,
+    COPYFMT_RUST,
+    COPYFMT_GO,
+    COPYFMT_CSHARP,
+    COPYFMT_SWIFT,
+    COPYFMT_KOTLIN,
+    COPYFMT_RUBY,
+    COPYFMT_BASIC,
+    COPYFMT_SQL,
+    COPYFMT_HTML,
+    COPYFMT_LOG,
+    COPYFMT_BASE64,
+    COPYFMT_BASE64URL,
+    COPYFMT_BASE64MIME,
+    COPYFMT_DATAURI,
+    COPYFMT_BASE32,
+    COPYFMT_HEXSTR
 };
 
 void CopyHexAs(int iFmt);
@@ -2961,20 +3055,60 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case ID_COPY_CARRAY:                  // 6.22/6.23 (hex view only)
             CopyHexAs(COPYFMT_C);
             break;
-        case ID_COPY_ASMARRAY:                // 6.23
+        case ID_COPY_ASMARRAY:
             CopyHexAs(COPYFMT_ASM);
             break;
-        case ID_COPY_PHPARRAY:                // 6.23
+        case ID_COPY_PHPARRAY:
             CopyHexAs(COPYFMT_PHP);
             break;
-        case ID_COPY_JSARRAY:                 // 6.23
+        case ID_COPY_JSARRAY:
             CopyHexAs(COPYFMT_JS);
             break;
-        case ID_COPY_PYARRAY:                 // 6.23
+        case ID_COPY_PYARRAY:
             CopyHexAs(COPYFMT_PYTHON);
             break;
-        case ID_COPY_B64:                     // 6.22 (hex view only)
+        case ID_COPY_PASCALARRAY: CopyHexAs(COPYFMT_PASCAL); break;
+        case ID_COPY_JSONARRAY:   CopyHexAs(COPYFMT_JSON); break;
+        case ID_COPY_JAVAARRAY:   CopyHexAs(COPYFMT_JAVA); break;
+        case ID_COPY_RUSTARRAY:   CopyHexAs(COPYFMT_RUST); break;
+        case ID_COPY_GOARRAY:     CopyHexAs(COPYFMT_GO); break;
+        case ID_COPY_CSHARPARRAY: CopyHexAs(COPYFMT_CSHARP); break;
+        case ID_COPY_SWIFTARRAY:  CopyHexAs(COPYFMT_SWIFT); break;
+        case ID_COPY_KOTLINARRAY: CopyHexAs(COPYFMT_KOTLIN); break;
+        case ID_COPY_RUBYARRAY:   CopyHexAs(COPYFMT_RUBY); break;
+        case ID_COPY_BASICARRAY:  CopyHexAs(COPYFMT_BASIC); break;
+        case ID_COPY_SQLARRAY:    CopyHexAs(COPYFMT_SQL); break;
+        case ID_COPY_HTMLARRAY:   CopyHexAs(COPYFMT_HTML); break;
+        case ID_COPY_LOGARRAY:    CopyHexAs(COPYFMT_LOG); break;
+        case ID_COPY_B64:
             CopyHexAs(COPYFMT_BASE64);
+            break;
+        case ID_COPY_B64URL:  CopyHexAs(COPYFMT_BASE64URL); break;
+        case ID_COPY_B64MIME: CopyHexAs(COPYFMT_BASE64MIME); break;
+        case ID_COPY_DATAURI: CopyHexAs(COPYFMT_DATAURI); break;
+        case ID_COPY_BASE32:  CopyHexAs(COPYFMT_BASE32); break;
+        case ID_COPY_HEXSTR:  CopyHexAs(COPYFMT_HEXSTR); break;
+        case ID_SYN_NONE: case ID_SYN_ASM: case ID_SYN_BASIC: case ID_SYN_CPP:
+        case ID_SYN_CSHARP: case ID_SYN_GO: case ID_SYN_HTML: case ID_SYN_JAVA:
+        case ID_SYN_JS: case ID_SYN_JSON: case ID_SYN_KOTLIN: case ID_SYN_LOG:
+        case ID_SYN_PASCAL: case ID_SYN_PHP: case ID_SYN_PYTHON: case ID_SYN_RUBY:
+        case ID_SYN_RUST: case ID_SYN_SQL: case ID_SYN_SWIFT:
+            {
+                const int iNew = (int)(wmId - ID_SYN_NONE);
+                if (iNew >= 0 && iNew < SYN_LANG_COUNT && iNew != g_iSyntaxLang)
+                {
+                    g_iSyntaxLang = iNew;
+                    if (hEdit != nullptr) InvalidateRect(hEdit, nullptr, FALSE);
+                    static const WCHAR* kNames[] = {
+                        L"Syntax: None", L"Syntax: ASM", L"Syntax: Basic/VB", L"Syntax: C/C++",
+                        L"Syntax: C#", L"Syntax: Go", L"Syntax: HTML/XML", L"Syntax: Java",
+                        L"Syntax: JavaScript", L"Syntax: JSON", L"Syntax: Kotlin", L"Syntax: Log",
+                        L"Syntax: Pascal", L"Syntax: PHP", L"Syntax: Python", L"Syntax: Ruby",
+                        L"Syntax: Rust", L"Syntax: SQL", L"Syntax: Swift"
+                    };
+                    StatusFlash(kNames[g_iSyntaxLang]);
+                }
+            }
             break;
         case ID_FILE_PRINT:
             PrintCurrentView();
@@ -3045,6 +3179,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case ID_THEME_AUTO:                   // 6.18
         case ID_THEME_LIGHT:
         case ID_THEME_DARK:
+        case ID_THEME_TURBO:                  // 8.00
             g_iTheme = wmId - ID_THEME_AUTO;
             ThemeApply();
             UpdateViewMenu();
@@ -3149,6 +3284,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     else if (!lstrcmpiW(pszArg + 1, L"utf32be")) { g_iForcedView = VIEW_UTF32BE; }
                     else if (!lstrcmpiW(pszArg + 1, L"dark")) { g_iTheme = 2; }
                     else if (!lstrcmpiW(pszArg + 1, L"light")) { g_iTheme = 1; }
+                    else if (!lstrcmpiW(pszArg + 1, L"turbo")) { g_iTheme = 3; }
                     else if (!lstrcmpiW(pszArg + 1, L"ws")) { g_bShowWS = true; }
                     else if (!_wcsnicmp(pszArg + 1, L"cp:", 3))
                     {
@@ -4012,7 +4148,7 @@ void ShowCommandLineHelp(void)
         L"  /csv              Format page as CSV/TSV table after load\r\n"
         L"  /freeze:N         Keep N columns fixed while scrolling (0-200)\r\n"
         L"  /ws               Show whitespace (spaces, tabs, line ends)\r\n"
-        L"  /dark /light      Force the theme (default: follow Windows)\r\n"
+        L"  /dark /light /turbo  Theme (default: follow Windows)\r\n"
         L"\r\n"
         L"Search / navigation\r\n"
         L"  /find:text        Seed the Find pattern\r\n"
@@ -6183,19 +6319,25 @@ static bool FxHexSelBytes(BYTE* pOut, DWORD cbOut, DWORD* pcbOut)
     return true;
 }
 
-static int FxBase64Encode(const BYTE* p, DWORD cb, WCHAR* pszOut, int cchOut)
+// iStyle: 0=standard +/, 1=URL-safe -_ no pad, 2=MIME wrap 76
+static int FxBase64Encode(const BYTE* p, DWORD cb, WCHAR* pszOut, int cchOut, int iStyle)
 {
-    static const WCHAR* kTbl = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    int w = 0;
+    static const WCHAR* kStd = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static const WCHAR* kUrl = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const WCHAR* kTbl = (iStyle == 1) ? kUrl : kStd;
+    const bool bPad = (iStyle != 1);
+    const bool bMime = (iStyle == 2);
+    int w = 0, col = 0;
+    #define FXB64_EMIT(ch) do { \
+        if (bMime && col == 76) { if (w + 2 >= cchOut) return -1; pszOut[w++] = L'\r'; pszOut[w++] = L'\n'; col = 0; } \
+        if (w + 1 >= cchOut) return -1; pszOut[w++] = (ch); col++; \
+    } while (0)
     DWORD i = 0;
     while (i + 3 <= cb)
     {
         const DWORD v = ((DWORD)p[i] << 16) | ((DWORD)p[i + 1] << 8) | (DWORD)p[i + 2];
-        if (w + 5 > cchOut) return -1;
-        pszOut[w++] = kTbl[(v >> 18) & 63];
-        pszOut[w++] = kTbl[(v >> 12) & 63];
-        pszOut[w++] = kTbl[(v >> 6) & 63];
-        pszOut[w++] = kTbl[v & 63];
+        FXB64_EMIT(kTbl[(v >> 18) & 63]); FXB64_EMIT(kTbl[(v >> 12) & 63]);
+        FXB64_EMIT(kTbl[(v >> 6) & 63]);  FXB64_EMIT(kTbl[v & 63]);
         i += 3;
     }
     if (i < cb)
@@ -6203,43 +6345,100 @@ static int FxBase64Encode(const BYTE* p, DWORD cb, WCHAR* pszOut, int cchOut)
         const DWORD c1 = p[i];
         const DWORD c2 = (i + 1 < cb) ? p[i + 1] : 0;
         const DWORD v = (c1 << 16) | (c2 << 8);
-        if (w + 5 > cchOut) return -1;
-        pszOut[w++] = kTbl[(v >> 18) & 63];
-        pszOut[w++] = kTbl[(v >> 12) & 63];
-        pszOut[w++] = (i + 1 < cb) ? kTbl[(v >> 6) & 63] : L'=';
-        pszOut[w++] = L'=';
+        FXB64_EMIT(kTbl[(v >> 18) & 63]); FXB64_EMIT(kTbl[(v >> 12) & 63]);
+        if (i + 1 < cb) { FXB64_EMIT(kTbl[(v >> 6) & 63]); if (bPad) FXB64_EMIT(L'='); }
+        else if (bPad) { FXB64_EMIT(L'='); FXB64_EMIT(L'='); }
     }
+    #undef FXB64_EMIT
     if (w >= cchOut) return -1;
     pszOut[w] = L'\0';
     return w;
 }
 
-// 7.03: the two hex digits come from the shared table. One wsprintfW per byte
-// cost up to 1M format calls for a 1 MB selection (the bulk of the copy time).
-// Same output: "0xC8" (C/PHP/JS/Python) and "0C8h" (ASM).
+static int FxBase32Encode(const BYTE* p, DWORD cb, WCHAR* pszOut, int cchOut)
+{
+    static const WCHAR* kTbl = L"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    int w = 0; DWORD bitBuf = 0; int bitCnt = 0;
+    for (DWORD i = 0; i < cb; i++)
+    {
+        bitBuf = (bitBuf << 8) | p[i]; bitCnt += 8;
+        while (bitCnt >= 5)
+        {
+            bitCnt -= 5;
+            if (w + 1 >= cchOut) return -1;
+            pszOut[w++] = kTbl[(bitBuf >> bitCnt) & 31];
+        }
+    }
+    if (bitCnt > 0)
+    {
+        if (w + 1 >= cchOut) return -1;
+        pszOut[w++] = kTbl[(bitBuf << (5 - bitCnt)) & 31];
+    }
+    while ((w & 7) != 0) { if (w + 1 >= cchOut) return -1; pszOut[w++] = L'='; }
+    if (w >= cchOut) return -1;
+    pszOut[w] = L'\0';
+    return w;
+}
+
+static int FxHexStringEncode(const BYTE* p, DWORD cb, WCHAR* pszOut, int cchOut)
+{
+    if ((int)cb * 2 + 1 > cchOut) return -1;
+    int w = 0;
+    for (DWORD i = 0; i < cb; i++)
+    {
+        pszOut[w++] = s_szHexDigits[(p[i] >> 4) & 15];
+        pszOut[w++] = s_szHexDigits[p[i] & 15];
+    }
+    pszOut[w] = L'\0';
+    return w;
+}
+
 static int CopyFmtAppendByte(WCHAR* psz, int w, int cchCap, int iFmt, BYTE b, bool bSep)
 {
-    if (w + 12 >= cchCap)
-    {
-        return w;
-    }
-    if (bSep)
-    {
-        psz[w++] = L',';
-        psz[w++] = L' ';
-    }
-    psz[w++] = L'0';
+    if (w + 18 >= cchCap) return w;
+    if (bSep) { psz[w++] = L','; psz[w++] = L' '; }
     if (iFmt == COPYFMT_ASM)
     {
+        psz[w++] = L'0';
         psz[w++] = s_szHexDigits[(b >> 4) & 15];
         psz[w++] = s_szHexDigits[b & 15];
         psz[w++] = L'h';
     }
-    else
+    else if (iFmt == COPYFMT_PASCAL)
     {
-        psz[w++] = L'x';
+        psz[w++] = L'$';
         psz[w++] = s_szHexDigits[(b >> 4) & 15];
         psz[w++] = s_szHexDigits[b & 15];
+    }
+    else if (iFmt == COPYFMT_JSON || iFmt == COPYFMT_SQL || iFmt == COPYFMT_LOG)
+    {
+        if (b >= 100) { psz[w++] = (WCHAR)(L'0' + b / 100); psz[w++] = (WCHAR)(L'0' + (b / 10) % 10); psz[w++] = (WCHAR)(L'0' + b % 10); }
+        else if (b >= 10) { psz[w++] = (WCHAR)(L'0' + b / 10); psz[w++] = (WCHAR)(L'0' + b % 10); }
+        else psz[w++] = (WCHAR)(L'0' + b);
+    }
+    else if (iFmt == COPYFMT_JAVA)
+    {
+        psz[w++] = L'('; psz[w++] = L'b'; psz[w++] = L'y'; psz[w++] = L't'; psz[w++] = L'e'; psz[w++] = L')';
+        psz[w++] = L'0'; psz[w++] = L'x';
+        psz[w++] = s_szHexDigits[(b >> 4) & 15]; psz[w++] = s_szHexDigits[b & 15];
+    }
+    else if (iFmt == COPYFMT_KOTLIN)
+    {
+        psz[w++] = L'0'; psz[w++] = L'x';
+        psz[w++] = s_szHexDigits[(b >> 4) & 15]; psz[w++] = s_szHexDigits[b & 15];
+        psz[w++] = L'.'; psz[w++] = L't'; psz[w++] = L'o'; psz[w++] = L'B';
+        psz[w++] = L'y'; psz[w++] = L't'; psz[w++] = L'e'; psz[w++] = L'('; psz[w++] = L')';
+    }
+    else if (iFmt == COPYFMT_BASIC)
+    {
+        // VB / FreeBASIC hex literal: &HFF
+        psz[w++] = L'&'; psz[w++] = L'H';
+        psz[w++] = s_szHexDigits[(b >> 4) & 15]; psz[w++] = s_szHexDigits[b & 15];
+    }
+    else
+    {
+        psz[w++] = L'0'; psz[w++] = L'x';
+        psz[w++] = s_szHexDigits[(b >> 4) & 15]; psz[w++] = s_szHexDigits[b & 15];
     }
     return w;
 }
@@ -6264,115 +6463,152 @@ void CopyHexAs(int iFmt)
         return;
     }
     bool bOk = false;
-    if (iFmt == COPYFMT_BASE64)
+    if (iFmt == COPYFMT_BASE64 || iFmt == COPYFMT_BASE64URL || iFmt == COPYFMT_BASE64MIME ||
+        iFmt == COPYFMT_DATAURI || iFmt == COPYFMT_BASE32 || iFmt == COPYFMT_HEXSTR)
     {
-        WCHAR* psz = new (std::nothrow) WCHAR[(size_t)((cb + 2) / 3) * 4 + 8];
+        const size_t cchNeed =
+            (iFmt == COPYFMT_HEXSTR) ? (size_t)cb * 2 + 8 :
+            (iFmt == COPYFMT_BASE32) ? ((size_t)cb * 8 + 4) / 5 + 16 :
+            (size_t)((cb + 2) / 3) * 4 + (size_t)(cb / 57) * 2 + 64;
+        WCHAR* psz = new (std::nothrow) WCHAR[cchNeed];
         if (psz != nullptr)
         {
-            const int n = FxBase64Encode(pBytes, cb, psz, (int)((size_t)((cb + 2) / 3) * 4 + 8));
-            if (n > 0)
+            int n = -1;
+            if (iFmt == COPYFMT_HEXSTR)
+                n = FxHexStringEncode(pBytes, cb, psz, (int)cchNeed);
+            else if (iFmt == COPYFMT_BASE32)
+                n = FxBase32Encode(pBytes, cb, psz, (int)cchNeed);
+            else if (iFmt == COPYFMT_DATAURI)
             {
-                bOk = ClipboardSetText(hWndMain, psz, n, false);
+                static const WCHAR kPref[] = L"data:application/octet-stream;base64,";
+                const int cchPref = (int)(sizeof(kPref) / sizeof(kPref[0]) - 1);
+                for (int k = 0; k < cchPref; k++) psz[k] = kPref[k];
+                const int nBody = FxBase64Encode(pBytes, cb, psz + cchPref, (int)cchNeed - cchPref, 0);
+                n = (nBody > 0) ? (cchPref + nBody) : -1;
             }
+            else
+            {
+                const int iStyle = (iFmt == COPYFMT_BASE64URL) ? 1 : (iFmt == COPYFMT_BASE64MIME) ? 2 : 0;
+                n = FxBase64Encode(pBytes, cb, psz, (int)cchNeed, iStyle);
+            }
+            if (n > 0) bOk = ClipboardSetText(hWndMain, psz, n, false);
             delete[] psz;
         }
         delete[] pBytes;
-        StatusFlash(bOk ? L"Base64 copied." : L"The clipboard refused the copy.");
+        static const WCHAR* kEnc[] = {
+            L"Base64 copied.", L"Base64 URL-safe copied.", L"Base64 MIME copied.",
+            L"Data URI copied.", L"Base32 copied.", L"Hex string copied."
+        };
+        int iMsg = 0;
+        if (iFmt == COPYFMT_BASE64URL) iMsg = 1;
+        else if (iFmt == COPYFMT_BASE64MIME) iMsg = 2;
+        else if (iFmt == COPYFMT_DATAURI) iMsg = 3;
+        else if (iFmt == COPYFMT_BASE32) iMsg = 4;
+        else if (iFmt == COPYFMT_HEXSTR) iMsg = 5;
+        StatusFlash(bOk ? kEnc[iMsg] : L"The clipboard refused the copy.");
         return;
     }
 
-    const int cchCap = (int)cb * 12 + 128;
+    const int cchCap = (int)cb * 18 + 192;
     WCHAR* psz = new (std::nothrow) WCHAR[(size_t)cchCap];
-    if (psz == nullptr)
-    {
-        delete[] pBytes;
-        return;
-    }
+    if (psz == nullptr) { delete[] pBytes; return; }
     int w = 0;
     if (iFmt == COPYFMT_C)
-    {
         w += wsprintfW(psz + w, L"unsigned char data[] = {\r\n");
-    }
     else if (iFmt == COPYFMT_ASM)
-    {
         w += wsprintfW(psz + w, L"db ");
-    }
     else if (iFmt == COPYFMT_PHP)
-    {
         w += wsprintfW(psz + w, L"$data = [\r\n");
-    }
     else if (iFmt == COPYFMT_JS)
-    {
         w += wsprintfW(psz + w, L"const data = new Uint8Array([\r\n");
-    }
     else if (iFmt == COPYFMT_PYTHON)
-    {
         w += wsprintfW(psz + w, L"data = bytes([\r\n");
-    }
+    else if (iFmt == COPYFMT_PASCAL)
+        w += wsprintfW(psz + w, L"const\r\n  data: array[0..%u] of Byte = (\r\n", (cb > 0) ? (unsigned)(cb - 1) : 0u);
+    else if (iFmt == COPYFMT_JSON)
+        w += wsprintfW(psz + w, L"[\r\n");
+    else if (iFmt == COPYFMT_JAVA)
+        w += wsprintfW(psz + w, L"byte[] data = {\r\n");
+    else if (iFmt == COPYFMT_RUST)
+        w += wsprintfW(psz + w, L"let data: [u8; %u] = [\r\n", (unsigned)cb);
+    else if (iFmt == COPYFMT_GO)
+        w += wsprintfW(psz + w, L"data := []byte{\r\n");
+    else if (iFmt == COPYFMT_CSHARP)
+        w += wsprintfW(psz + w, L"byte[] data = {\r\n");
+    else if (iFmt == COPYFMT_SWIFT)
+        w += wsprintfW(psz + w, L"let data: [UInt8] = [\r\n");
+    else if (iFmt == COPYFMT_KOTLIN)
+        w += wsprintfW(psz + w, L"val data = byteArrayOf(\r\n");
+    else if (iFmt == COPYFMT_RUBY)
+        w += wsprintfW(psz + w, L"data = [\r\n");
+    else if (iFmt == COPYFMT_BASIC)
+        w += wsprintfW(psz + w, L"Dim data() As Byte = {\r\n");
+    else if (iFmt == COPYFMT_SQL)
+        w += wsprintfW(psz + w, L"-- byte array\r\nARRAY[\r\n");
+    else if (iFmt == COPYFMT_HTML)
+        w += wsprintfW(psz + w, L"<!-- byte array -->\r\nconst data = [\r\n");
+    else if (iFmt == COPYFMT_LOG)
+        w += wsprintfW(psz + w, L"# log payload bytes\r\ndata = [\r\n");
 
     for (DWORD i = 0; i < cb; i++)
     {
-        if (w + 16 >= cchCap)
-        {
-            break;
-        }
+        if (w + 24 >= cchCap) break;
         if (iFmt == COPYFMT_ASM)
         {
-            if (i > 0 && (i % 16) == 0)
-            {
-                w += wsprintfW(psz + w, L"\r\ndb ");
-                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false);
-            }
-            else
-            {
-                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], (i % 16) != 0);
-            }
+            if (i > 0 && (i % 16) == 0) { w += wsprintfW(psz + w, L"\r\ndb "); w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false); }
+            else w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], (i % 16) != 0);
         }
         else
         {
-            if (i > 0 && (i % 16) == 0)
-            {
-                w += wsprintfW(psz + w, L",\r\n");
-                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false);
-            }
-            else
-            {
-                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], i > 0);
-            }
+            if (i > 0 && (i % 16) == 0) { w += wsprintfW(psz + w, L",\r\n"); w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false); }
+            else w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], i > 0);
         }
     }
 
-    if (iFmt == COPYFMT_C)
-    {
+    if (iFmt == COPYFMT_C || iFmt == COPYFMT_JAVA || iFmt == COPYFMT_CSHARP)
         w += wsprintfW(psz + w, L"\r\n};");
-    }
     else if (iFmt == COPYFMT_PHP)
-    {
         w += wsprintfW(psz + w, L"\r\n];");
-    }
     else if (iFmt == COPYFMT_JS)
-    {
         w += wsprintfW(psz + w, L"\r\n]);");
-    }
     else if (iFmt == COPYFMT_PYTHON)
-    {
         w += wsprintfW(psz + w, L"\r\n])");
-    }
+    else if (iFmt == COPYFMT_PASCAL)
+        w += wsprintfW(psz + w, L"\r\n  );");
+    else if (iFmt == COPYFMT_JSON)
+        w += wsprintfW(psz + w, L"\r\n]");
+    else if (iFmt == COPYFMT_RUST)
+        w += wsprintfW(psz + w, L"\r\n];");
+    else if (iFmt == COPYFMT_GO)
+        w += wsprintfW(psz + w, L"\r\n}");
+    else if (iFmt == COPYFMT_SWIFT)
+        w += wsprintfW(psz + w, L"\r\n]");
+    else if (iFmt == COPYFMT_KOTLIN)
+        w += wsprintfW(psz + w, L"\r\n)");
+    else if (iFmt == COPYFMT_RUBY)
+        w += wsprintfW(psz + w, L"\r\n].pack('C*')");
+    else if (iFmt == COPYFMT_BASIC)
+        w += wsprintfW(psz + w, L"\r\n}");
+    else if (iFmt == COPYFMT_SQL)
+        w += wsprintfW(psz + w, L"\r\n]::smallint[]");
+    else if (iFmt == COPYFMT_HTML)
+        w += wsprintfW(psz + w, L"\r\n];");
+    else if (iFmt == COPYFMT_LOG)
+        w += wsprintfW(psz + w, L"\r\n]");
     psz[w] = L'\0';
     bOk = ClipboardSetText(hWndMain, psz, w, false);
     delete[] psz;
     delete[] pBytes;
 
-    static const WCHAR* kDone[] =
-    {
-        L"C array copied.",
-        L"ASM array copied.",
-        L"PHP array copied.",
-        L"JS array copied.",
-        L"Python array copied.",
-        L"Base64 copied."
+    static const WCHAR* kDone[] = {
+        L"C/C++ array copied.", L"ASM array copied.", L"PHP array copied.",
+        L"JS array copied.", L"Python array copied.", L"Pascal array copied.",
+        L"JSON array copied.", L"Java array copied.", L"Rust array copied.",
+        L"Go array copied.", L"C# array copied.", L"Swift array copied.",
+        L"Kotlin array copied.", L"Ruby array copied.", L"Basic array copied.",
+        L"SQL array copied.", L"HTML array copied.", L"Log array copied."
     };
-    const WCHAR* pszDone = (iFmt >= 0 && iFmt <= COPYFMT_BASE64) ? kDone[iFmt] : kDone[0];
+    const WCHAR* pszDone = (iFmt >= 0 && iFmt <= COPYFMT_LOG) ? kDone[iFmt] : kDone[0];
     StatusFlash(bOk ? pszDone : L"The clipboard refused the copy.");
 }
 
@@ -8362,6 +8598,8 @@ void ApplyLoadResult(LoadJob* pJob)
     }
     if (bDelivered)
     {
+        SynApplyFromPath(g_szCurrentFile);
+
         if (g_bTailJumpFirst)
         {
             g_bTailJumpFirst = false;
@@ -11122,6 +11360,531 @@ static int TV_HitTest(TextViewState* pState, int x, int y)
 }
 
 /* -------------------------------------------------------------------------------------------- */
+// ============================================================================================
+// Syntax Highlight — keywords / numbers / strings / comments on visible rows.
+// ============================================================================================
+enum SynKind : BYTE { SYN_PLAIN = 0, SYN_KW = 1, SYN_NUM = 2, SYN_STR = 3, SYN_COMMENT = 4 };
+
+static COLORREF SynColor(SynKind k)
+{
+    // Turbo Vision: DOS yellow / cyan / light-green / light-red on blue.
+    if (g_bTurbo) {
+        switch (k) {
+        case SYN_KW: return RGB(255, 255, 85);     // yellow
+        case SYN_NUM: return RGB(85, 255, 255);    // light cyan
+        case SYN_STR: return RGB(255, 85, 85);     // light red
+        case SYN_COMMENT: return RGB(85, 255, 85); // light green
+        default: return ColorOrDefault(g_clrText, ThText());
+        }
+    }
+    if (g_bDark) {
+        switch (k) {
+        case SYN_KW: return RGB(0x56,0x9C,0xD6); case SYN_NUM: return RGB(0xB5,0xCE,0xA8);
+        case SYN_STR: return RGB(0xCE,0x91,0x78); case SYN_COMMENT: return RGB(0x6A,0x99,0x55);
+        default: return ColorOrDefault(g_clrText, ThText());
+        }
+    }
+    switch (k) {
+    case SYN_KW: return RGB(0,0,255); case SYN_NUM: return RGB(0x09,0x86,0x58);
+    case SYN_STR: return RGB(0xA3,0x15,0x15); case SYN_COMMENT: return RGB(0,0x80,0);
+    default: return ColorOrDefault(g_clrText, ThText());
+    }
+}
+
+static const WCHAR* const kKwCpp[] = {
+    L"alignas",L"alignof",L"and",L"asm",L"auto",L"bool",L"break",L"case",L"catch",L"char",L"class",
+    L"const",L"constexpr",L"continue",L"decltype",L"default",L"delete",L"do",L"double",L"else",L"enum",
+    L"explicit",L"export",L"extern",L"false",L"float",L"for",L"friend",L"goto",L"if",L"inline",L"int",
+    L"long",L"mutable",L"namespace",L"new",L"noexcept",L"nullptr",L"operator",L"or",L"private",
+    L"protected",L"public",L"register",L"return",L"short",L"signed",L"sizeof",L"static",L"struct",
+    L"switch",L"template",L"this",L"throw",L"true",L"try",L"typedef",L"typeid",L"typename",L"union",
+    L"unsigned",L"using",L"virtual",L"void",L"volatile",L"wchar_t",L"while",L"xor"
+};
+static const WCHAR* const kKwPascal[] = {
+    L"and",L"array",L"begin",L"case",L"const",L"div",L"do",L"downto",L"else",L"end",L"file",L"for",
+    L"function",L"goto",L"if",L"implementation",L"in",L"interface",L"label",L"mod",L"nil",L"not",
+    L"of",L"or",L"packed",L"procedure",L"program",L"record",L"repeat",L"set",L"shl",L"shr",L"string",
+    L"then",L"to",L"type",L"unit",L"until",L"uses",L"var",L"while",L"with",L"xor"
+};
+static const WCHAR* const kKwAsm[] = {
+    L"adc",L"add",L"and",L"call",L"cmp",L"dec",L"div",L"idiv",L"imul",L"inc",L"int",L"ja",L"jae",
+    L"jb",L"jbe",L"je",L"jg",L"jge",L"jl",L"jle",L"jmp",L"jne",L"jnz",L"jz",L"lea",L"loop",L"mov",
+    L"mul",L"neg",L"nop",L"not",L"or",L"pop",L"push",L"ret",L"rol",L"ror",L"sal",L"sar",L"sbb",
+    L"shl",L"shr",L"sub",L"test",L"xchg",L"xor",L"eax",L"ebx",L"ecx",L"edx",L"esi",L"edi",L"ebp",
+    L"esp",L"rax",L"rbx",L"rcx",L"rdx",L"rsi",L"rdi",L"rbp",L"rsp",L"db",L"dw",L"dd",L"dq",L"section",
+    L"global",L"extern",L"byte",L"word",L"dword",L"qword",L"ptr"
+};
+static const WCHAR* const kKwCSharp[] = {
+    L"abstract",L"as",L"async",L"await",L"base",L"bool",L"break",L"byte",L"case",L"catch",L"char",
+    L"checked",L"class",L"const",L"continue",L"decimal",L"default",L"delegate",L"do",L"double",L"else",
+    L"enum",L"event",L"explicit",L"extern",L"false",L"finally",L"fixed",L"float",L"for",L"foreach",
+    L"goto",L"if",L"implicit",L"in",L"int",L"interface",L"internal",L"is",L"lock",L"long",L"namespace",
+    L"new",L"null",L"object",L"operator",L"out",L"override",L"params",L"private",L"protected",L"public",
+    L"readonly",L"ref",L"return",L"sealed",L"short",L"sizeof",L"static",L"string",L"struct",L"switch",
+    L"this",L"throw",L"true",L"try",L"typeof",L"uint",L"ulong",L"unchecked",L"unsafe",L"ushort",L"using",
+    L"var",L"virtual",L"void",L"volatile",L"while",L"yield"
+};
+static const WCHAR* const kKwPhp[] = {
+    L"abstract",L"and",L"array",L"as",L"break",L"case",L"catch",L"class",L"clone",L"const",L"continue",
+    L"declare",L"default",L"die",L"do",L"echo",L"else",L"elseif",L"empty",L"enddeclare",L"endfor",
+    L"endforeach",L"endif",L"endswitch",L"endwhile",L"eval",L"exit",L"extends",L"final",L"finally",
+    L"fn",L"for",L"foreach",L"function",L"global",L"goto",L"if",L"implements",L"include",L"include_once",
+    L"instanceof",L"interface",L"isset",L"list",L"match",L"namespace",L"new",L"or",L"print",L"private",
+    L"protected",L"public",L"require",L"require_once",L"return",L"static",L"switch",L"throw",L"trait",
+    L"try",L"unset",L"use",L"var",L"while",L"xor",L"yield",L"true",L"false",L"null"
+};
+static const WCHAR* const kKwSql[] = {
+    L"add",L"all",L"alter",L"and",L"any",L"as",L"asc",L"between",L"by",L"case",L"check",L"column",
+    L"constraint",L"create",L"cross",L"database",L"default",L"delete",L"desc",L"distinct",L"drop",
+    L"else",L"end",L"except",L"exists",L"foreign",L"from",L"full",L"group",L"having",L"in",L"index",
+    L"inner",L"insert",L"intersect",L"into",L"is",L"join",L"key",L"left",L"like",L"limit",L"not",
+    L"null",L"on",L"or",L"order",L"outer",L"primary",L"references",L"right",L"select",L"set",L"table",
+    L"then",L"to",L"top",L"union",L"unique",L"update",L"values",L"view",L"when",L"where",L"with"
+};
+static const WCHAR* const kKwPython[] = {
+    L"False",L"None",L"True",L"and",L"as",L"assert",L"async",L"await",L"break",L"class",L"continue",
+    L"def",L"del",L"elif",L"else",L"except",L"finally",L"for",L"from",L"global",L"if",L"import",L"in",
+    L"is",L"lambda",L"nonlocal",L"not",L"or",L"pass",L"raise",L"return",L"try",L"while",L"with",L"yield"
+};
+static const WCHAR* const kKwJs[] = {
+    L"async",L"await",L"break",L"case",L"catch",L"class",L"const",L"continue",L"debugger",L"default",
+    L"delete",L"do",L"else",L"export",L"extends",L"false",L"finally",L"for",L"function",L"if",L"import",
+    L"in",L"instanceof",L"let",L"new",L"null",L"return",L"static",L"super",L"switch",L"this",L"throw",
+    L"true",L"try",L"typeof",L"var",L"void",L"while",L"with",L"yield",L"of",L"from",L"as"
+};
+static const WCHAR* const kKwJava[] = {
+    L"abstract",L"assert",L"boolean",L"break",L"byte",L"case",L"catch",L"char",L"class",L"const",
+    L"continue",L"default",L"do",L"double",L"else",L"enum",L"extends",L"final",L"finally",L"float",
+    L"for",L"goto",L"if",L"implements",L"import",L"instanceof",L"int",L"interface",L"long",L"native",
+    L"new",L"package",L"private",L"protected",L"public",L"return",L"short",L"static",L"strictfp",
+    L"super",L"switch",L"synchronized",L"this",L"throw",L"throws",L"transient",L"try",L"void",
+    L"volatile",L"while",L"true",L"false",L"null",L"var",L"record",L"sealed"
+};
+static const WCHAR* const kKwGo[] = {
+    L"break",L"case",L"chan",L"const",L"continue",L"default",L"defer",L"else",L"fallthrough",L"for",
+    L"func",L"go",L"goto",L"if",L"import",L"interface",L"map",L"package",L"range",L"return",L"select",
+    L"struct",L"switch",L"type",L"var",L"true",L"false",L"nil",L"iota"
+};
+static const WCHAR* const kKwRust[] = {
+    L"as",L"async",L"await",L"break",L"const",L"continue",L"crate",L"dyn",L"else",L"enum",L"extern",
+    L"false",L"fn",L"for",L"if",L"impl",L"in",L"let",L"loop",L"match",L"mod",L"move",L"mut",L"pub",
+    L"ref",L"return",L"self",L"Self",L"static",L"struct",L"super",L"trait",L"true",L"type",L"unsafe",
+    L"use",L"where",L"while"
+};
+static const WCHAR* const kKwRuby[] = {
+    L"BEGIN",L"END",L"alias",L"and",L"begin",L"break",L"case",L"class",L"def",L"defined?",L"do",
+    L"else",L"elsif",L"end",L"ensure",L"false",L"for",L"if",L"in",L"module",L"next",L"nil",L"not",
+    L"or",L"redo",L"rescue",L"retry",L"return",L"self",L"super",L"then",L"true",L"undef",L"unless",
+    L"until",L"when",L"while",L"yield"
+};
+
+static const WCHAR* const kKwLog[] = {
+    L"ERROR",L"ERR",L"FATAL",L"CRITICAL",L"CRIT",L"WARN",L"WARNING",L"INFO",
+    L"DEBUG",L"DBG",L"TRACE",L"NOTICE",L"VERBOSE",L"FAIL",L"FAILED",L"FAILURE",
+    L"SUCCESS",L"OK",L"SEVERE",L"ALERT",L"EMERGENCY",L"EMERG"
+};
+static const WCHAR* const kKwBasic[] = {
+    L"AND",L"AS",L"BOOLEAN",L"BYTE",L"BYREF",L"BYVAL",L"CALL",L"CASE",L"CBOOL",L"CBYTE",
+    L"CDBL",L"CINT",L"CLNG",L"CLOSE",L"CONST",L"CSNG",L"CSTR",L"CURRENCY",L"DATE",L"DIM",
+    L"DO",L"DOUBLE",L"EACH",L"ELSE",L"ELSEIF",L"END",L"ENUM",L"ERROR",L"EXIT",L"FALSE",
+    L"FOR",L"FUNCTION",L"GET",L"GOSUB",L"GOTO",L"IF",L"IN",L"INPUT",L"INTEGER",L"IS",
+    L"LET",L"LOOP",L"LONG",L"ME",L"MOD",L"NEW",L"NEXT",L"NOT",L"NOTHING",L"OBJECT",
+    L"ON",L"OPEN",L"OPTION",L"OR",L"PRINT",L"PRIVATE",L"PUBLIC",L"REDIM",L"REM",L"RESUME",
+    L"RETURN",L"SELECT",L"SET",L"SHARED",L"SINGLE",L"STATIC",L"STEP",L"STOP",L"STRING",
+    L"SUB",L"THEN",L"TO",L"TRUE",L"TYPE",L"UNTIL",L"VARIANT",L"WEND",L"WHILE",L"WITH",
+    L"XOR",L"CLASS",L"MODULE",L"NAMESPACE",L"IMPORTS",L"OVERLOADS",L"OVERRIDES",L"SHADOWS",
+    L"TRY",L"CATCH",L"FINALLY",L"THROW",L"USING",L"ASYNC",L"AWAIT",L"OF",L"CONTINUE"
+};
+
+static const WCHAR* const kKwJson[] = {
+    L"true", L"false", L"null"
+};
+static const WCHAR* const kKwSwift[] = {
+    L"associatedtype",L"class",L"deinit",L"enum",L"extension",L"fileprivate",L"func",L"import",
+    L"init",L"inout",L"internal",L"let",L"open",L"operator",L"private",L"protocol",L"public",
+    L"rethrows",L"static",L"struct",L"subscript",L"typealias",L"var",L"break",L"case",L"continue",
+    L"default",L"defer",L"do",L"else",L"fallthrough",L"for",L"guard",L"if",L"in",L"repeat",
+    L"return",L"switch",L"where",L"while",L"as",L"Any",L"catch",L"false",L"is",L"nil",L"super",
+    L"self",L"Self",L"throw",L"throws",L"true",L"try",L"async",L"await",L"some",L"actor"
+};
+static const WCHAR* const kKwKotlin[] = {
+    L"as",L"break",L"class",L"continue",L"do",L"else",L"false",L"for",L"fun",L"if",L"in",L"interface",
+    L"is",L"null",L"object",L"package",L"return",L"super",L"this",L"throw",L"true",L"try",L"typealias",
+    L"typeof",L"val",L"var",L"when",L"while",L"by",L"catch",L"constructor",L"delegate",L"dynamic",
+    L"field",L"file",L"finally",L"get",L"import",L"init",L"param",L"property",L"receiver",L"set",
+    L"setparam",L"where",L"actual",L"abstract",L"annotation",L"companion",L"const",L"crossinline",
+    L"data",L"enum",L"expect",L"external",L"final",L"infix",L"inline",L"inner",L"internal",L"lateinit",
+    L"noinline",L"open",L"operator",L"out",L"override",L"private",L"protected",L"public",L"reified",
+    L"sealed",L"suspend",L"tailrec",L"vararg"
+};
+struct SynKwTable { const WCHAR* const* p; int c; bool bFold; };
+// Index matches SynLang: NONE, AUTO unused, then CPP..HTML
+static const SynKwTable kSynTables[] = {
+    { nullptr, 0, false },  // NONE
+    { kKwAsm, (int)(sizeof(kKwAsm)/sizeof(kKwAsm[0])), true },
+    { kKwBasic, (int)(sizeof(kKwBasic)/sizeof(kKwBasic[0])), true },
+    { kKwCpp, (int)(sizeof(kKwCpp)/sizeof(kKwCpp[0])), false },
+    { kKwCSharp, (int)(sizeof(kKwCSharp)/sizeof(kKwCSharp[0])), false },
+    { kKwGo, (int)(sizeof(kKwGo)/sizeof(kKwGo[0])), false },
+    { nullptr, 0, false },  // HTML
+    { kKwJava, (int)(sizeof(kKwJava)/sizeof(kKwJava[0])), false },
+    { kKwJs, (int)(sizeof(kKwJs)/sizeof(kKwJs[0])), false },
+    { kKwJson, (int)(sizeof(kKwJson)/sizeof(kKwJson[0])), false },
+    { kKwKotlin, (int)(sizeof(kKwKotlin)/sizeof(kKwKotlin[0])), false },
+    { kKwLog, (int)(sizeof(kKwLog)/sizeof(kKwLog[0])), true },
+    { kKwPascal, (int)(sizeof(kKwPascal)/sizeof(kKwPascal[0])), true },
+    { kKwPhp, (int)(sizeof(kKwPhp)/sizeof(kKwPhp[0])), false },
+    { kKwPython, (int)(sizeof(kKwPython)/sizeof(kKwPython[0])), false },
+    { kKwRuby, (int)(sizeof(kKwRuby)/sizeof(kKwRuby[0])), false },
+    { kKwRust, (int)(sizeof(kKwRust)/sizeof(kKwRust[0])), false },
+    { kKwSql, (int)(sizeof(kKwSql)/sizeof(kKwSql[0])), true },
+    { kKwSwift, (int)(sizeof(kKwSwift)/sizeof(kKwSwift[0])), false },
+};
+
+static bool SynIsIdentStart(WCHAR c) {
+    return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || c == L'_' || c == L'$' || c == L'@';
+}
+static bool SynIsIdent(WCHAR c) {
+    return SynIsIdentStart(c) || (c >= L'0' && c <= L'9') || c == L'?';
+}
+static bool SynIsDigit(WCHAR c) { return c >= L'0' && c <= L'9'; }
+
+static int SynCmpFold(const WCHAR* a, int na, const WCHAR* b) {
+    int i = 0;
+    for (; i < na && b[i]; i++) {
+        WCHAR ca = a[i], cb = b[i];
+        if (ca >= L'A' && ca <= L'Z') ca = (WCHAR)(ca - L'A' + L'a');
+        if (cb >= L'A' && cb <= L'Z') cb = (WCHAR)(cb - L'A' + L'a');
+        if (ca != cb) return (ca < cb) ? -1 : 1;
+    }
+    if (i < na) return 1;
+    if (b[i]) return -1;
+    return 0;
+}
+
+static bool SynIsKeyword(int iLang, const WCHAR* p, int n) {
+    if (iLang < 0 || iLang >= (int)(sizeof(kSynTables)/sizeof(kSynTables[0]))) return false;
+    const SynKwTable& tb = kSynTables[iLang];
+    if (!tb.p || n <= 0 || n > 32) return false;   // no keyword longer than 32
+    const WCHAR c0 = p[0];
+    for (int i = 0; i < tb.c; i++) {
+        const WCHAR* kw = tb.p[i];
+        WCHAR k0 = kw[0];
+        if (tb.bFold) {
+            WCHAR a = c0, b = k0;
+            if (a >= L'A' && a <= L'Z') a = (WCHAR)(a - L'A' + L'a');
+            if (b >= L'A' && b <= L'Z') b = (WCHAR)(b - L'A' + L'a');
+            if (a != b) continue;
+            if (SynCmpFold(p, n, kw) == 0) return true;
+        } else {
+            if (c0 != k0) continue;
+            int j = 1;
+            for (; j < n && kw[j]; j++) if (p[j] != kw[j]) break;
+            if (j == n && kw[j] == 0) return true;
+        }
+    }
+    return false;
+}
+
+// Map file extension -> SynLang. Returns SYN_LANG_NONE if unknown.
+static int SynLangFromExt(const WCHAR* pszPath)
+{
+    if (pszPath == nullptr || !pszPath[0] || pszPath[0] == L'(') return SYN_LANG_NONE;
+    const WCHAR* ext = nullptr;
+    for (const WCHAR* q = pszPath; *q; q++) if (*q == L'.') ext = q + 1;
+    if (ext == nullptr || !ext[0]) return SYN_LANG_NONE;
+    WCHAR e[16]; int ne = 0;
+    while (ext[ne] && ne < 15) {
+        WCHAR c = ext[ne];
+        if (c >= L'A' && c <= L'Z') c = (WCHAR)(c - L'A' + L'a');
+        e[ne++] = c;
+    }
+    e[ne] = 0;
+    if (!lstrcmpW(e, L"asm") || !lstrcmpW(e, L"s") || !lstrcmpW(e, L"inc")) return SYN_LANG_ASM;
+    if (!lstrcmpW(e, L"bas") || !lstrcmpW(e, L"vb") || !lstrcmpW(e, L"vbs") ||
+        !lstrcmpW(e, L"frm") || !lstrcmpW(e, L"cls") || !lstrcmpW(e, L"bi")) return SYN_LANG_BASIC;
+    if (!lstrcmpW(e, L"c") || !lstrcmpW(e, L"h") || !lstrcmpW(e, L"cpp") || !lstrcmpW(e, L"cxx") ||
+        !lstrcmpW(e, L"cc") || !lstrcmpW(e, L"hpp") || !lstrcmpW(e, L"hxx") || !lstrcmpW(e, L"hh"))
+        return SYN_LANG_CPP;
+    if (!lstrcmpW(e, L"cs")) return SYN_LANG_CSHARP;
+    if (!lstrcmpW(e, L"go")) return SYN_LANG_GO;
+    if (!lstrcmpW(e, L"html") || !lstrcmpW(e, L"htm") || !lstrcmpW(e, L"xml") ||
+        !lstrcmpW(e, L"xhtml") || !lstrcmpW(e, L"svg")) return SYN_LANG_HTML;
+    if (!lstrcmpW(e, L"java")) return SYN_LANG_JAVA;
+    if (!lstrcmpW(e, L"js") || !lstrcmpW(e, L"mjs") || !lstrcmpW(e, L"cjs") ||
+        !lstrcmpW(e, L"ts") || !lstrcmpW(e, L"tsx") || !lstrcmpW(e, L"jsx")) return SYN_LANG_JS;
+    if (!lstrcmpW(e, L"json")) return SYN_LANG_JSON;
+    if (!lstrcmpW(e, L"kt") || !lstrcmpW(e, L"kts")) return SYN_LANG_KOTLIN;
+    if (!lstrcmpW(e, L"log") || !lstrcmpW(e, L"out") || !lstrcmpW(e, L"err")) return SYN_LANG_LOG;
+    if (!lstrcmpW(e, L"pas") || !lstrcmpW(e, L"pp") || !lstrcmpW(e, L"dpr") || !lstrcmpW(e, L"lpr"))
+        return SYN_LANG_PASCAL;
+    if (!lstrcmpW(e, L"php") || !lstrcmpW(e, L"phtml")) return SYN_LANG_PHP;
+    if (!lstrcmpW(e, L"py") || !lstrcmpW(e, L"pyw")) return SYN_LANG_PYTHON;
+    if (!lstrcmpW(e, L"rb")) return SYN_LANG_RUBY;
+    if (!lstrcmpW(e, L"rs")) return SYN_LANG_RUST;
+    if (!lstrcmpW(e, L"sql")) return SYN_LANG_SQL;
+    if (!lstrcmpW(e, L"swift")) return SYN_LANG_SWIFT;
+    return SYN_LANG_NONE;
+}
+
+// Apply syntax mode from the current file extension; check the matching menu item.
+static void SynApplyFromPath(const WCHAR* pszPath)
+{
+    const int iLang = SynLangFromExt(pszPath);
+    if (iLang == g_iSyntaxLang) return;
+    g_iSyntaxLang = iLang;
+    if (hEdit != nullptr) InvalidateRect(hEdit, nullptr, FALSE);
+    if (hWndMain != nullptr)
+    {
+        HMENU hBar = GetMenu(hWndMain);
+        if (hBar != nullptr)
+        {
+            for (int i = 0; i <= (ID_SYN_LAST - ID_SYN_FIRST); i++)
+                CheckMenuItem(hBar, ID_SYN_FIRST + i, MF_BYCOMMAND |
+                    ((g_iSyntaxLang == i) ? MF_CHECKED : MF_UNCHECKED));
+        }
+    }
+}
+
+static bool SynHasBlockSlash(int iLang)
+{
+    return iLang == SYN_LANG_CPP || iLang == SYN_LANG_CSHARP || iLang == SYN_LANG_PHP ||
+        iLang == SYN_LANG_JS || iLang == SYN_LANG_JAVA || iLang == SYN_LANG_GO ||
+        iLang == SYN_LANG_RUST || iLang == SYN_LANG_SQL || iLang == SYN_LANG_SWIFT ||
+        iLang == SYN_LANG_KOTLIN;
+}
+static bool SynHasBlockPascal(int iLang) { return iLang == SYN_LANG_PASCAL; }
+
+// Approximate "inside /* */ at iPos?" — scans up to 64 KB before iPos.
+static bool SynBlockStateAt(const WCHAR* p, int iPos, int iLang)
+{
+    if (p == nullptr || iPos <= 0) return false;
+    int i = iPos - 16384;
+    if (i < 0) i = 0;
+    bool in = false;
+    bool inStr = false;
+    WCHAR q = 0;
+    if (SynHasBlockSlash(iLang))
+    {
+        for (; i < iPos; i++)
+        {
+            if (inStr)
+            {
+                if (p[i] == L'\\' && i + 1 < iPos) { i++; continue; }
+                if (p[i] == q) inStr = false;
+                continue;
+            }
+            if (p[i] == L'"' || p[i] == L'\'') { inStr = true; q = p[i]; continue; }
+            if (!in && p[i] == L'/' && i + 1 < iPos && p[i + 1] == L'*') { in = true; i++; continue; }
+            if (in && p[i] == L'*' && i + 1 < iPos && p[i + 1] == L'/') { in = false; i++; continue; }
+        }
+        return in;
+    }
+    if (SynHasBlockPascal(iLang))
+    {
+        for (; i < iPos; i++)
+        {
+            if (inStr)
+            {
+                if (p[i] == q) inStr = false;
+                continue;
+            }
+            if (p[i] == L'\'' || p[i] == L'"') { inStr = true; q = p[i]; continue; }
+            if (!in && p[i] == L'{') { in = true; continue; }
+            if (!in && p[i] == L'(' && i + 1 < iPos && p[i + 1] == L'*') { in = true; i++; continue; }
+            if (in && p[i] == L'}') { in = false; continue; }
+            if (in && p[i] == L'*' && i + 1 < iPos && p[i + 1] == L')') { in = false; i++; continue; }
+        }
+        return in;
+    }
+    return false;
+}
+
+static bool s_bSynInBlock = false;
+
+static int SynTokenize(const WCHAR* p, int iLo, int iHi, int iLang, bool* pbInBlock,
+    int* pStart, int* pEnd, BYTE* pKind, int cMax)
+{
+    if (iLang <= SYN_LANG_NONE || iLang >= SYN_LANG_COUNT ||
+        p == nullptr || iHi <= iLo || cMax <= 0)
+        return 0;
+    int c = 0, i = iLo;
+    bool bIn = (pbInBlock != nullptr) ? *pbInBlock : false;
+
+    const bool bCppStyle = (iLang == SYN_LANG_CPP || iLang == SYN_LANG_CSHARP ||
+        iLang == SYN_LANG_PHP || iLang == SYN_LANG_JS || iLang == SYN_LANG_JAVA ||
+        iLang == SYN_LANG_GO || iLang == SYN_LANG_RUST || iLang == SYN_LANG_SWIFT ||
+        iLang == SYN_LANG_KOTLIN);
+    const bool bHash = (iLang == SYN_LANG_PYTHON || iLang == SYN_LANG_RUBY || iLang == SYN_LANG_PHP ||
+        iLang == SYN_LANG_LOG);
+    const bool bDash = (iLang == SYN_LANG_SQL);
+    const bool bSemi = (iLang == SYN_LANG_ASM);
+    const bool bPas = (iLang == SYN_LANG_PASCAL);
+    const bool bHtml = (iLang == SYN_LANG_HTML);
+    const bool bLog = (iLang == SYN_LANG_LOG);
+    const bool bBasic = (iLang == SYN_LANG_BASIC);
+    const bool bBlockSlash = SynHasBlockSlash(iLang);
+
+    if (bIn)
+    {
+        const int a = i;
+        if (bBlockSlash)
+        {
+            while (i + 1 < iHi && !(p[i] == L'*' && p[i + 1] == L'/')) i++;
+            if (i + 1 < iHi) { i += 2; bIn = false; }
+            else i = iHi;
+        }
+        else if (bPas)
+        {
+            while (i < iHi)
+            {
+                if (p[i] == L'}') { i++; bIn = false; break; }
+                if (p[i] == L'*' && i + 1 < iHi && p[i + 1] == L')') { i += 2; bIn = false; break; }
+                i++;
+            }
+        }
+        else
+            i = iHi;
+        if (c < cMax && i > a) { pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_COMMENT; c++; }
+        if (bIn) { if (pbInBlock) *pbInBlock = true; return c; }
+    }
+
+    while (i < iHi && c < cMax)
+    {
+        const WCHAR ch = p[i];
+        if (ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n') { i++; continue; }
+
+        if (bHtml && ch == L'<' && i + 3 < iHi && p[i + 1] == L'!' && p[i + 2] == L'-' && p[i + 3] == L'-')
+        {
+            const int a = i; i += 4;
+            while (i + 2 < iHi && !(p[i] == L'-' && p[i + 1] == L'-' && p[i + 2] == L'>')) i++;
+            if (i + 2 < iHi) i += 3; else i = iHi;
+            pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_COMMENT; c++; continue;
+        }
+        if (bHtml && ch == L'<')
+        {
+            const int a = i++;
+            if (i < iHi && (p[i] == L'/' || p[i] == L'!')) i++;
+            while (i < iHi && p[i] != L'>' && p[i] != L' ' && p[i] != L'\t') i++;
+            pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_KW; c++; continue;
+        }
+
+        if ((bCppStyle || bBlockSlash) && ch == L'/' && i + 1 < iHi && p[i + 1] == L'/')
+        {
+            pStart[c] = i; pEnd[c] = iHi; pKind[c] = SYN_COMMENT; c++; i = iHi; continue;
+        }
+        if (bBlockSlash && ch == L'/' && i + 1 < iHi && p[i + 1] == L'*')
+        {
+            const int a = i; i += 2;
+            while (i + 1 < iHi && !(p[i] == L'*' && p[i + 1] == L'/')) i++;
+            if (i + 1 < iHi) i += 2;
+            else { i = iHi; bIn = true; }
+            pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_COMMENT; c++; continue;
+        }
+        if (bHash && ch == L'#')
+        {
+            pStart[c] = i; pEnd[c] = iHi; pKind[c] = SYN_COMMENT; c++; i = iHi; continue;
+        }
+        if (bDash && ch == L'-' && i + 1 < iHi && p[i + 1] == L'-')
+        {
+            pStart[c] = i; pEnd[c] = iHi; pKind[c] = SYN_COMMENT; c++; i = iHi; continue;
+        }
+        if (bSemi && ch == L';')
+        {
+            pStart[c] = i; pEnd[c] = iHi; pKind[c] = SYN_COMMENT; c++; i = iHi; continue;
+        }
+        // Basic / VB: apostrophe comment to end of line
+        if (bBasic && ch == L'\'')
+        {
+            pStart[c] = i; pEnd[c] = iHi; pKind[c] = SYN_COMMENT; c++; i = iHi; continue;
+        }
+        // Basic: REM at start of an identifier token is handled as keyword+rest;
+        // also treat "REM " after whitespace as full-line comment when REM is alone.
+        if (bPas && ch == L'{')
+        {
+            const int a = i++; while (i < iHi && p[i] != L'}') i++;
+            if (i < iHi) i++; else bIn = true;
+            pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_COMMENT; c++; continue;
+        }
+        if (bPas && ch == L'(' && i + 1 < iHi && p[i + 1] == L'*')
+        {
+            const int a = i; i += 2;
+            while (i + 1 < iHi && !(p[i] == L'*' && p[i + 1] == L')')) i++;
+            if (i + 1 < iHi) i += 2; else { i = iHi; bIn = true; }
+            pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_COMMENT; c++; continue;
+        }
+
+        if (ch == L'"' || ch == L'\'')
+        {
+            const WCHAR qch = ch;
+            const int a = i++;
+            while (i < iHi && p[i] != qch)
+            {
+                if (p[i] == L'\\' && i + 1 < iHi) i += 2;
+                else i++;
+            }
+            if (i < iHi) i++;
+            pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_STR; c++; continue;
+        }
+
+        if (bLog && ch == L'[')
+        {
+            const int a = i++;
+            while (i < iHi && p[i] != L']' && p[i] != L'\r' && p[i] != L'\n') i++;
+            if (i < iHi && p[i] == L']') i++;
+            BYTE k = SYN_NUM;
+            if (i - a >= 3)
+            {
+                const int inner = a + 1;
+                const int nInner = (i > a + 1 && p[i - 1] == L']') ? (i - 1 - inner) : (i - inner);
+                if (nInner > 0 && SynIsKeyword(SYN_LANG_LOG, p + inner, nInner))
+                    k = SYN_KW;
+            }
+            pStart[c] = a; pEnd[c] = i; pKind[c] = k; c++; continue;
+        }
+
+        if (SynIsDigit(ch) || (ch == L'.' && i + 1 < iHi && SynIsDigit(p[i + 1])))
+        {
+            const int a = i++;
+            if (a + 1 < iHi && p[a] == L'0' && (p[a + 1] == L'x' || p[a + 1] == L'X'))
+            {
+                i++;
+                while (i < iHi && ((p[i] >= L'0' && p[i] <= L'9') ||
+                    (p[i] >= L'a' && p[i] <= L'f') || (p[i] >= L'A' && p[i] <= L'F'))) i++;
+            }
+            else
+            {
+                while (i < iHi && (SynIsDigit(p[i]) || p[i] == L'.' || p[i] == L'_' ||
+                    p[i] == L':' || p[i] == L'-' || p[i] == L'T' || p[i] == L'Z')) i++;
+            }
+            pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_NUM; c++; continue;
+        }
+
+        if (SynIsIdentStart(ch))
+        {
+            const int a = i++;
+            while (i < iHi && SynIsIdent(p[i])) i++;
+            if (bBasic && (i - a) == 3 &&
+                ((p[a] == L'R' || p[a] == L'r') && (p[a+1] == L'E' || p[a+1] == L'e') &&
+                 (p[a+2] == L'M' || p[a+2] == L'm')))
+            {
+                // REM comments out the rest of the line (classic Basic)
+                pStart[c] = a; pEnd[c] = iHi; pKind[c] = SYN_COMMENT; c++; i = iHi; continue;
+            }
+            if (SynIsKeyword(iLang, p + a, i - a))
+            {
+                pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_KW; c++;
+            }
+            continue;
+        }
+
+        i++;
+    }
+    if (pbInBlock) *pbInBlock = bIn;
+    return c;
+}
+
+/* -------------------------------------------------------------------------------------------- */
 // 6.01: draws n characters at (x, y). The font is monospace (one cell = iHexCharW), so a run
 // longer than 4096 characters (a minified file is ONE line of megabytes) only needs its visible
 // columns: before, every repaint pushed the whole line through ExtTextOutW for every visible row.
@@ -11146,24 +11909,60 @@ static void TV_DrawRun(HDC hdc, int x, int y, UINT uOptions, const RECT* prc, co
             prc = &rcLocal;
         }
     }
-    ExtTextOutW(hdc, x, y, uOptions, prc, p, n, nullptr);
+    ExtTextOutW(hdc, x, y, uOptions, prc, p, (UINT)n, nullptr);
 }
 
-// 6.01: paints ONE visual row chunk [iPos, iChunkEnd) with its first column at pixel xBase. The
-// body is the old inline code of WM_PAINT (one-call plain row / three-part selection row); it
-// lives here so Freeze Columns can paint the same row twice under two clip rectangles.
+static void TV_PaintSynRuns(HDC hdc, const WCHAR* pText, int xBase, int y, int iA, int iB,
+    COLORREF clrText, int cxClient, int iLang)
+{
+    if (iB <= iA) return;
+    if (iLang <= SYN_LANG_NONE || iView == VIEW_HEX)
+    {
+        SetTextColor(hdc, clrText);
+        TV_DrawRun(hdc, xBase, y, 0, nullptr, pText + iA, iB - iA, cxClient);
+        return;
+    }
+    enum { kMaxTok = 192 };
+    int aS[kMaxTok], aE[kMaxTok]; BYTE aK[kMaxTok];
+    const int cTok = SynTokenize(pText, iA, iB, iLang, &s_bSynInBlock, aS, aE, aK, kMaxTok);
+    int x = xBase, i = iA;
+    SetBkMode(hdc, TRANSPARENT);
+    for (int tk = 0; tk < cTok; tk++)
+    {
+        if (aS[tk] > i)
+        {
+            SetTextColor(hdc, clrText);
+            TV_DrawRun(hdc, x, y, 0, nullptr, pText + i, aS[tk] - i, cxClient);
+            x += (aS[tk] - i) * iHexCharW; i = aS[tk];
+        }
+        const int nn = aE[tk] - aS[tk];
+        if (nn > 0)
+        {
+            SetTextColor(hdc, SynColor((SynKind)aK[tk]));
+            TV_DrawRun(hdc, x, y, 0, nullptr, pText + aS[tk], nn, cxClient);
+            x += nn * iHexCharW; i = aE[tk];
+        }
+    }
+    if (i < iB)
+    {
+        SetTextColor(hdc, clrText);
+        TV_DrawRun(hdc, x, y, 0, nullptr, pText + i, iB - i, cxClient);
+    }
+    SetTextColor(hdc, clrText);
+}
+
 static void TV_PaintChunkText(HDC hdc, const WCHAR* pText, int xBase, int y, int iPos, int iChunkEnd,
     int iSelLo, int iSelHi, HBRUSH hbrBg, COLORREF clrBg, COLORREF clrText, COLORREF clrSelBg, COLORREF clrSelTx, int cxClient)
 {
+    const int iLang = (iView != VIEW_HEX && g_iSyntaxLang > SYN_LANG_NONE && g_iSyntaxLang < SYN_LANG_COUNT) ? g_iSyntaxLang : SYN_LANG_NONE;
     int x = xBase;
     if (iSelLo < iSelHi && iChunkEnd > iSelLo && iPos < iSelHi)
     {
         RECT rcRow = { 0, y, cxClient, y + iHexLineH };
         FillRect(hdc, &rcRow, hbrBg);
-        // Selection overlaps this chunk - draw in parts
         if (iPos < iSelLo)
         {
-            TV_DrawRun(hdc, x, y, 0, nullptr, pText + iPos, iSelLo - iPos, cxClient);
+            TV_PaintSynRuns(hdc, pText, x, y, iPos, iSelLo, clrText, cxClient, iLang);
             x += (iSelLo - iPos) * iHexCharW;
         }
         const int iSelCS = (iPos > iSelLo) ? iPos : iSelLo;
@@ -11173,7 +11972,6 @@ static void TV_PaintChunkText(HDC hdc, const WCHAR* pText, int xBase, int y, int
         {
             SetBkColor(hdc, clrSelBg);
             SetTextColor(hdc, clrSelTx);
-            // V5: tight rect for selection - only fill behind selected text
             RECT rcSel = { x, y, x + cchSel * iHexCharW, y + iHexLineH };
             TV_DrawRun(hdc, x, y, ETO_OPAQUE, &rcSel, pText + iSelCS, cchSel, cxClient);
             SetBkMode(hdc, TRANSPARENT);
@@ -11181,18 +11979,23 @@ static void TV_PaintChunkText(HDC hdc, const WCHAR* pText, int xBase, int y, int
             x += cchSel * iHexCharW;
         }
         if (iChunkEnd > iSelHi)
-        {
-            TV_DrawRun(hdc, x, y, 0, nullptr, pText + iSelHi, iChunkEnd - iSelHi, cxClient);
-        }
+            TV_PaintSynRuns(hdc, pText, x, y, iSelHi, iChunkEnd, clrText, cxClient, iLang);
     }
     else
     {
-        // 5.9.3: one-call plain row: background fill + text in the same ExtTextOutW. 5.9.4: the
-        // color is clrBg, the COLORREF twin chosen with hbrBg, so the filled rectangle is
-        // visually identical to a FillRect.
         RECT rcRow = { x < 0 ? 0 : x, y, cxClient, y + iHexLineH };
         SetBkColor(hdc, clrBg);
-        TV_DrawRun(hdc, x, y, ETO_OPAQUE, &rcRow, pText + iPos, iChunkEnd - iPos, cxClient);
+        if (iLang > SYN_LANG_NONE)
+        {
+            FillRect(hdc, &rcRow, hbrBg);
+            SetBkMode(hdc, TRANSPARENT);
+            TV_PaintSynRuns(hdc, pText, x, y, iPos, iChunkEnd, clrText, cxClient, iLang);
+        }
+        else
+        {
+            SetTextColor(hdc, clrText);
+            TV_DrawRun(hdc, x, y, ETO_OPAQUE, &rcRow, pText + iPos, iChunkEnd - iPos, cxClient);
+        }
     }
 }
 
@@ -11401,7 +12204,7 @@ static void TV_PaintMatchOverlay(HDC hdc, const TextViewState* pState, int xBase
     {
         return;
     }
-    const COLORREF clrHi = g_bDark ? RGB(0x6B, 0x54, 0x1A) : RGB(0xFF, 0xE2, 0x9E);
+    const COLORREF clrHi = g_bTurbo ? RGB(0, 0, 128) : (g_bDark ? RGB(0x6B, 0x54, 0x1A) : RGB(0xFF, 0xE2, 0x9E));
     HBRUSH hbr = ThBrush(clrHi);
     if (hbr == nullptr)
     {
@@ -12141,12 +12944,31 @@ static void TV_ShowContextMenu(HWND hWnd, int x, int y)
         HMENU hAs = CreatePopupMenu();
         if (hAs != nullptr)
         {
-            AppendMenuW(hAs, MF_STRING, ID_COPY_CARRAY, L"C &Array\tCtrl+Alt+C");
             AppendMenuW(hAs, MF_STRING, ID_COPY_ASMARRAY, L"A&SM Array");
-            AppendMenuW(hAs, MF_STRING, ID_COPY_PHPARRAY, L"&PHP Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_BASICARRAY, L"&Basic Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_CARRAY, L"C/C++ &Array\tCtrl+Alt+C");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_CSHARPARRAY, L"C# Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_GOARRAY, L"&Go Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_HTMLARRAY, L"HTM&L Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_JAVAARRAY, L"Ja&va Array");
             AppendMenuW(hAs, MF_STRING, ID_COPY_JSARRAY, L"&JS Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_JSONARRAY, L"JSO&N Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_KOTLINARRAY, L"&Kotlin Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_LOGARRAY, L"&Log Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_PASCALARRAY, L"Pa&scal Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_PHPARRAY, L"&PHP Array");
             AppendMenuW(hAs, MF_STRING, ID_COPY_PYARRAY, L"P&ython Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_RUBYARRAY, L"R&uby Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_RUSTARRAY, L"&Rust Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_SQLARRAY, L"S&QL Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_SWIFTARRAY, L"S&wift Array");
+            AppendMenuW(hAs, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hAs, MF_STRING, ID_COPY_BASE32, L"Base&32");
             AppendMenuW(hAs, MF_STRING, ID_COPY_B64, L"&Base64\tCtrl+Alt+B");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_B64MIME, L"Base64 &MIME");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_B64URL, L"Base64 &URL-safe");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_DATAURI, L"&Data URI");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_HEXSTR, L"He&x String");
             AppendMenuW(hMenu, MF_POPUP | (bSel ? 0 : MF_GRAYED), (UINT_PTR)hAs, L"C&opy as");     // the popup is destroyed with hMenu
         }
     }
@@ -12399,6 +13221,16 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             iLine0 += iSkip;
             y = iSkip * iHexLineH;
         }
+        // Syntax: resolve language once per paint; seed multi-line comment
+        // state only for the first visible line, then advance sequentially
+        // as each row is tokenized (avoids a 64 KB reverse scan per line).
+        const int iSynPaint = (iView != VIEW_HEX && g_iSyntaxLang > SYN_LANG_NONE &&
+            g_iSyntaxLang < SYN_LANG_COUNT) ? g_iSyntaxLang : SYN_LANG_NONE;
+        if (iSynPaint > SYN_LANG_NONE && iLine0 < pState->cLines && pState->pLineStarts != nullptr)
+            s_bSynInBlock = SynBlockStateAt(pState->pText, pState->pLineStarts[iLine0], iSynPaint);
+        else
+            s_bSynInBlock = false;
+
         for (int iLine = iLine0; iLine < pState->cLines && y < yBottom; iLine++)
         {
             int iLineStart = pState->pLineStarts[iLine];
@@ -12495,15 +13327,15 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
                     {
                         if (iFreezePx > 0 && iScrollX > 0)
                         {
-                            // 6.01: Freeze Columns. The row is painted twice under two clip rectangles:
-                            // the scrolling part (everything right of the frozen strip, shifted by the
-                            // scroll position) and the frozen strip itself (the first N columns, never
-                            // shifted). The old code only slowed the scroll down once it passed the strip.
+                            // 6.01: Freeze Columns — paint the row twice under two clips.
+                            // Save/restore syntax block state so the span is not tokenized twice.
+                            const bool bSynBlockSave = s_bSynInBlock;
                             int iSaved = SaveDC(hdcPaint);
                             IntersectClipRect(hdcPaint, iFreezePx, y, rc.right, y + iHexLineH);
                             TV_PaintChunk(hdcPaint, pState, -iScrollX, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, rc.right);
                             TV_PaintMatchOverlay(hdcPaint, pState, -iScrollX, y, iLineStart, iPos, iChunkEnd, rc.right, aHiLo, aHiHi, cHiSpans);
                             RestoreDC(hdcPaint, iSaved);
+                            s_bSynInBlock = bSynBlockSave;
                             iSaved = SaveDC(hdcPaint);
                             IntersectClipRect(hdcPaint, 0, y, iFreezePx, y + iHexLineH);
                             TV_PaintChunk(hdcPaint, pState, 0, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, rc.right);
@@ -12646,20 +13478,42 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             TV_MoveCaretLines(pState, ((wParam == VK_UP) ? -1 : 1) * kKeyLines[iStage], bShift);
             return 0;
         case VK_HOME:
-            if (bCtrl) { JumpFilePage(false); return 0; }   // 5.4: first page (lived in EditSubclassProc)
+            if (bCtrl)
+            {
+                // Ctrl+Home: first page of the file / start of the text.
+                // Shift+Ctrl+Home: extend selection to the start of the text
+                // (do not reload the page — that would drop the anchor).
+                if (!bShift && g_szCurrentFile[0] != L'\0')
+                    JumpFilePage(false);
+                pState->iSelEnd = 0;
+                if (!bShift) pState->iSelStart = pState->iSelEnd;
+                g_iCaretCol = -1;
+                TV_ScrollCaret();
+                return 0;
+            }
             {
                 int iHome = TV_LineIndex(TV_LineFromChar(pState->iSelEnd));
-                pState->iSelEnd = (iHome < 0) ? 0 : iHome;   // 5.9.14: an empty view answers -1: never a negative caret
+                pState->iSelEnd = (iHome < 0) ? 0 : iHome;   // 5.9.14: empty view -> never negative caret
             }
             if (!bShift) pState->iSelStart = pState->iSelEnd;
             g_iCaretCol = -1;
             TV_ScrollCaret();
             return 0;
         case VK_END:
-            if (bCtrl) { JumpFilePage(true); return 0; }   // 5.4: last page (lived in EditSubclassProc)
+            if (bCtrl)
             {
-                // 5.9.11: TV_DispEnd (was inline CR/LF strip — same arithmetic,
-                // one source of truth instead of a copy that could drift).
+                // Ctrl+End: last page of the file / end of the text.
+                // Shift+Ctrl+End: extend selection to the end of the text
+                // (do not reload the page — that would drop the anchor).
+                if (!bShift && g_szCurrentFile[0] != L'\0')
+                    JumpFilePage(true);
+                pState->iSelEnd = pState->cch;
+                if (!bShift) pState->iSelStart = pState->iSelEnd;
+                g_iCaretCol = -1;
+                TV_ScrollCaret();
+                return 0;
+            }
+            {
                 int iL = TV_LineFromChar(pState->iSelEnd);
                 int iLS = TV_LineIndex(iL);
                 int iLE = (iL + 1 < pState->cLines) ? TV_LineIndex(iL + 1) : pState->cch;
@@ -12673,33 +13527,31 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         case VK_PRIOR:
         case VK_NEXT:
         {
-            // 5.4: the page logic of the old EditSubclassProc, ported: Ctrl
-            // turns the page right away, and with a file loaded so does
-            // reaching an edge of the page (stdin has no pages to turn).
+            // Shift+PgUp/PgDn: always extend the selection by a screen page
+            // inside the current text (never turn a file page and drop the anchor).
             RECT rc;
             if (GetClientRect(hWnd, &rc) && iHexLineH > 0)
             {
                 int cVis = rc.bottom / iHexLineH;
                 if (cVis < 1) cVis = 1;
-                bool bPage = bCtrl;
-                if (!bPage && g_szCurrentFile[0] != L'\0')
+                if (!bShift)
                 {
-                    if (wParam == VK_NEXT && pState->iFirstVisible + cVis >= pState->cLines) bPage = true;
-                    if (wParam == VK_PRIOR && pState->iFirstVisible == 0) bPage = true;
+                    bool bPage = bCtrl;
+                    if (!bPage && g_szCurrentFile[0] != L'\0')
+                    {
+                        if (wParam == VK_NEXT && pState->iFirstVisible + cVis >= pState->cLines) bPage = true;
+                        if (wParam == VK_PRIOR && pState->iFirstVisible == 0) bPage = true;
+                    }
+                    if (bPage)
+                    {
+                        if (g_szCurrentFile[0] == L'\0') JumpFilePage(wParam == VK_NEXT);
+                        else ChangePage((wParam == VK_NEXT) ? 1 : -1);
+                        return 0;
+                    }
                 }
-                if (bPage)
-                {
-                    if (g_szCurrentFile[0] == L'\0') JumpFilePage(wParam == VK_NEXT);
-                    else ChangePage((wParam == VK_NEXT) ? 1 : -1);
-                    return 0;
-                }
-                const int cStep = cVis * kKeyPages[iStage];       // 6.13: pages per repeat grow with the hold time
+                const int cStep = cVis * kKeyPages[iStage];
                 const int iOldFirst = pState->iFirstVisible;
                 TV_ScrollRows(hWnd, pState, iOldFirst + ((wParam == VK_NEXT) ? cStep : -cStep));
-                // 6.12: the caret travels with the page (it used to stay behind, off screen, and the next
-                // arrow key scrolled the view all the way back to it). It moves by what the view moved,
-                // kept inside the rows now shown; when the view could not move (start / end of the text)
-                // it walks a page toward that edge.
                 const int iMoved = pState->iFirstVisible - iOldFirst;
                 const int iL = TV_LineFromChar(pState->iSelEnd);
                 if (iMoved != 0)
@@ -13105,6 +13957,9 @@ void UpdateViewMenu(void)
         // 6.22: the new toggles
         CheckMenuItem(hBar, ID_OPTIONS_FILTER, MF_BYCOMMAND | (g_bFilter ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hBar, ID_OPTIONS_HILITEALL, MF_BYCOMMAND | (g_bHiliteAll ? MF_CHECKED : MF_UNCHECKED));
+        for (int i = 0; i <= (ID_SYN_LAST - ID_SYN_FIRST); i++)
+            CheckMenuItem(hBar, ID_SYN_FIRST + i, MF_BYCOMMAND |
+                ((g_iSyntaxLang == i) ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hBar, ID_VIEW_WRAPWIDTH, MF_BYCOMMAND | (g_iWrapWidth > 0 ? MF_CHECKED : MF_UNCHECKED));      // 7.04
         CheckMenuItem(hBar, ID_VIEW_FREEZECOLS, MF_BYCOMMAND | (g_iFreezeCols > 0 ? MF_CHECKED : MF_UNCHECKED));
         // 7.04: Hex Layout, two radio groups (bytes per line / group by). The old per-item check marks were only
@@ -13114,7 +13969,7 @@ void UpdateViewMenu(void)
         HMENU hThemeMenu = FindSubMenuWithCommand(hWndMain, ID_THEME_AUTO);
         if (hThemeMenu != nullptr)
         {
-            CheckMenuRadioItem(hThemeMenu, ID_THEME_AUTO, ID_THEME_DARK, ID_THEME_AUTO + g_iTheme, MF_BYCOMMAND);
+            CheckMenuRadioItem(hThemeMenu, ID_THEME_AUTO, ID_THEME_TURBO, ID_THEME_AUTO + g_iTheme, MF_BYCOMMAND);
         }
     }
 }
@@ -13196,7 +14051,27 @@ void UpdateMenuEnable(void)
     MenuEnableCmd(hBar, ID_COPY_PHPARRAY, bSel && bHex);
     MenuEnableCmd(hBar, ID_COPY_JSARRAY, bSel && bHex);
     MenuEnableCmd(hBar, ID_COPY_PYARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_PASCALARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_JSONARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_JAVAARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_RUSTARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_GOARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_CSHARPARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_SWIFTARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_KOTLINARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_RUBYARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_BASICARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_SQLARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_HTMLARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_LOGARRAY, bSel && bHex);
     MenuEnableCmd(hBar, ID_COPY_B64, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_B64URL, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_B64MIME, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_DATAURI, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_BASE32, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_HEXSTR, bSel && bHex);
+    for (int i = 0; i <= (ID_SYN_LAST - ID_SYN_FIRST); i++)
+        MenuEnableCmd(hBar, ID_SYN_FIRST + i, bContent && !bHex);
     MenuEnablePopupHolding(hBar, ID_COPY_APPEND, bSel);
     MenuEnableCmd(hBar, ID_SELECTALL, bContent);
     MenuEnableCmd(hBar, ID_FIND, bContent);
@@ -17959,7 +18834,7 @@ void LoadSettings(void)
     if (g_iFreezeCols > 200) g_iFreezeCols = 200;
     g_bRememberPos = (ProfileLong(L"RememberPosition", 1) != 0);              // 6.17
     g_iTheme = (int)ProfileLong(L"Theme", 0);                                 // 6.18
-    if (g_iTheme < 0 || g_iTheme > 2) g_iTheme = 0;
+    if (g_iTheme < 0 || g_iTheme > 3) g_iTheme = 0;
     g_bShowWS = (ProfileLong(L"ShowWhitespace", 0) != 0);
     g_bPrefetch = (ProfileLong(L"Prefetch", 1) != 0);                        // 6.14
     g_iTabWidth = (int)ProfileLong(L"TabWidth", 8);
@@ -17972,6 +18847,8 @@ void LoadSettings(void)
     // 6.22: the new keys (defaults keep the shipped behavior: highlight on,
     // watcher on, no reopen, whole word off)
     g_bHiliteAll = (ProfileLong(L"HighlightAll", 1) != 0);
+    g_iSyntaxLang = (int)ProfileLong(L"SyntaxLang", 0);
+    if (g_iSyntaxLang < 0 || g_iSyntaxLang >= SYN_LANG_COUNT) g_iSyntaxLang = 0;
     g_bWatch = (ProfileLong(L"WatchChanges", 1) != 0);
     g_bReopenLast = (ProfileLong(L"ReopenLastFile", 0) != 0);
     if (ProfileLong(L"WholeWord", 0) != 0)
@@ -18064,6 +18941,7 @@ void SaveSettings(void)
     p += wsprintfW(p, L"RegexFind=%d", g_bRegexFind ? 1 : 0) + 1;
     // 6.22: the new toggles
     p += wsprintfW(p, L"HighlightAll=%d", g_bHiliteAll ? 1 : 0) + 1;
+    p += wsprintfW(p, L"SyntaxLang=%d", g_iSyntaxLang) + 1;
     p += wsprintfW(p, L"WatchChanges=%d", g_bWatch ? 1 : 0) + 1;
     p += wsprintfW(p, L"ReopenLastFile=%d", g_bReopenLast ? 1 : 0) + 1;
     p += wsprintfW(p, L"WholeWord=%d", (fr.Flags & FR_WHOLEWORD) ? 1 : 0) + 1;

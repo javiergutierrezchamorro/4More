@@ -1,8 +1,7 @@
-// 4More.rc — recursos del visor (Build 7.03)
+// 4More.rc — recursos del visor (Build 8.00)
 //
-// 7.03: sin cambios de recursos (solo el número de versión, que viaja en el
-// manifest y en APP_VERSION del .cpp). resource.h pierde ID_FILE_HASH, el
-// alias sin menú desde 7.00.
+// 8.00: Options > Theme > Turbo Vision (ID_THEME_TURBO). APP_VERSION 8.00.
+// Paleta DOS/Borland: fondo azul, texto blanco.
 //
 // 7.02: sin cambios de recursos (solo el número de versión).
 //
@@ -336,12 +335,31 @@ BEGIN
         BEGIN
             MENUITEM "Copy &Append\tCtrl+Shift+C",      ID_COPY_APPEND
             MENUITEM "Copy Colu&mn\tCtrl+Shift+M",      ID_COPY_COLUMN
-            MENUITEM "Copy as C &Array\tCtrl+Alt+C",    ID_COPY_CARRAY
             MENUITEM "Copy as A&SM Array",               ID_COPY_ASMARRAY
-            MENUITEM "Copy as &PHP Array",               ID_COPY_PHPARRAY
+            MENUITEM "Copy as &Basic Array",             ID_COPY_BASICARRAY
+            MENUITEM "Copy as C/C++ &Array\tCtrl+Alt+C", ID_COPY_CARRAY
+            MENUITEM "Copy as C# Array",                 ID_COPY_CSHARPARRAY
+            MENUITEM "Copy as &Go Array",                ID_COPY_GOARRAY
+            MENUITEM "Copy as HTM&L Array",              ID_COPY_HTMLARRAY
+            MENUITEM "Copy as Ja&va Array",              ID_COPY_JAVAARRAY
             MENUITEM "Copy as &JS Array",                ID_COPY_JSARRAY
+            MENUITEM "Copy as JSO&N Array",              ID_COPY_JSONARRAY
+            MENUITEM "Copy as &Kotlin Array",            ID_COPY_KOTLINARRAY
+            MENUITEM "Copy as &Log Array",               ID_COPY_LOGARRAY
+            MENUITEM "Copy as Pa&scal Array",            ID_COPY_PASCALARRAY
+            MENUITEM "Copy as &PHP Array",               ID_COPY_PHPARRAY
             MENUITEM "Copy as P&ython Array",            ID_COPY_PYARRAY
+            MENUITEM "Copy as R&uby Array",              ID_COPY_RUBYARRAY
+            MENUITEM "Copy as &Rust Array",              ID_COPY_RUSTARRAY
+            MENUITEM "Copy as S&QL Array",               ID_COPY_SQLARRAY
+            MENUITEM "Copy as S&wift Array",             ID_COPY_SWIFTARRAY
+            MENUITEM SEPARATOR
+            MENUITEM "Copy as Base&32",                  ID_COPY_BASE32
             MENUITEM "Copy as &Base64\tCtrl+Alt+B",     ID_COPY_B64
+            MENUITEM "Copy as Base64 &MIME",             ID_COPY_B64MIME
+            MENUITEM "Copy as Base64 &URL-safe",         ID_COPY_B64URL
+            MENUITEM "Copy as &Data URI",                ID_COPY_DATAURI
+            MENUITEM "Copy as He&x String",              ID_COPY_HEXSTR
         END
         MENUITEM "Select &All\tCtrl+A",                 ID_SELECTALL
         MENUITEM SEPARATOR
@@ -433,6 +451,30 @@ BEGIN
         END
         MENUITEM "S&plit View",                         ID_VIEW_SPLIT
         MENUITEM SEPARATOR
+        POPUP "S&yntax Highlight"
+        BEGIN
+            MENUITEM "&None (plain text)",              ID_SYN_NONE
+            MENUITEM SEPARATOR
+            MENUITEM "&ASM",                            ID_SYN_ASM
+            MENUITEM "&Basic / VB",                      ID_SYN_BASIC
+            MENUITEM "&C / C++",                        ID_SYN_CPP
+            MENUITEM "C#",                              ID_SYN_CSHARP
+            MENUITEM "&Go",                             ID_SYN_GO
+            MENUITEM "HTM&L / XML",                     ID_SYN_HTML
+            MENUITEM "&Java",                           ID_SYN_JAVA
+            MENUITEM "Java&Script",                     ID_SYN_JS
+            MENUITEM "JSO&N",                           ID_SYN_JSON
+            MENUITEM "&Kotlin",                         ID_SYN_KOTLIN
+            MENUITEM "&Log",                            ID_SYN_LOG
+            MENUITEM "&Pascal",                         ID_SYN_PASCAL
+            MENUITEM "P&HP",                            ID_SYN_PHP
+            MENUITEM "P&ython",                         ID_SYN_PYTHON
+            MENUITEM "Ru&by",                           ID_SYN_RUBY
+            MENUITEM "&Rust",                           ID_SYN_RUST
+            MENUITEM "S&QL",                            ID_SYN_SQL
+            MENUITEM "S&wift",                          ID_SYN_SWIFT
+        END
+        MENUITEM SEPARATOR
         MENUITEM "Font &+\tCtrl++",                     ID_VIEW_FONTPLUS
         MENUITEM "Font &-\tCtrl+-",                      ID_VIEW_FONTMINUS
     END
@@ -452,6 +494,7 @@ BEGIN
             MENUITEM "&Auto (follow Windows)",       ID_THEME_AUTO
             MENUITEM "&Light",                       ID_THEME_LIGHT
             MENUITEM "&Dark",                        ID_THEME_DARK
+            MENUITEM "&Turbo Vision",                ID_THEME_TURBO
         END
         MENUITEM "&Highlight Current Line",              ID_VIEW_HILITE
         MENUITEM "ESC to E&xit",                         ID_VIEW_ESCEXIT

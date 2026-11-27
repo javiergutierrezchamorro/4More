@@ -3,6 +3,14 @@
    Build 7.03
 
    Version 7.03 (review round):
+   - SPEED: FxIsWordChar / TvCharClass ASCII fast path (no IsCharAlphaNumericW
+     per character on Latin text); FindPatternFrom caches pattern length;
+     theme colour helpers and TV getters are static inline; pure utilities
+     (BuildHexText, Detect*, U64ToWide, FreeViewText, TV_*) are static.
+   - FIX: ChangeWindowMessageFilterEx / MSGFLT_ALLOW are Win7+; with
+     _WIN32_WINNT=0x0600 the SDK leaves them undeclared and the build fails.
+     Resolved at run time from user32 (AllowDropFromUnelevated), same pattern
+     as PrefetchVirtualMemory / TaskDialogIndirect. Vista skips the call.
    - FIX: Up / Down / PgUp / PgDn on an EMPTY view (no file yet, a failed open, or an index that
      ran out of memory) crashed the program: TV_MoveCaretLines walked into TV_DispEnd with a null
      text pointer and a negative line index and read through it (nothing caught the fault in the
@@ -638,7 +646,7 @@ static PFN_TaskDialogIndirect AppGetTaskDialogIndirect(void)
 }
 
 // Drop-in for MessageBoxW: maps the usual MB_* flags to TaskDialogIndirect.
-int AppMsgBox(HWND hWnd, LPCWSTR pszText, LPCWSTR pszTitle, UINT uType)
+static int AppMsgBox(HWND hWnd, LPCWSTR pszText, LPCWSTR pszTitle, UINT uType)
 {
     if (pszText == nullptr)
     {
@@ -756,6 +764,33 @@ int AppMsgBox(HWND hWnd, LPCWSTR pszText, LPCWSTR pszTitle, UINT uType)
 #ifndef WM_COPYGLOBALDATA
 #define WM_COPYGLOBALDATA 0x0049
 #endif
+// ChangeWindowMessageFilterEx / MSGFLT_ALLOW are Win7+ (0x0601). The build
+// targets Vista (0x0600), so the symbols are not declared by the SDK headers
+// and the function must be resolved at run time (same pattern as
+// PrefetchVirtualMemory / TaskDialogIndirect / DwmSetWindowAttribute).
+#ifndef MSGFLT_ALLOW
+#define MSGFLT_ALLOW 1
+#endif
+typedef BOOL (WINAPI *PFN_ChangeWindowMessageFilterEx)(HWND, UINT, DWORD, void*);
+static void AllowDropFromUnelevated(HWND hWnd)
+{
+    static PFN_ChangeWindowMessageFilterEx s_pfn = nullptr;
+    static int s_once = 0;
+    if (!s_once)
+    {
+        s_once = 1;
+        HMODULE hUser = GetModuleHandleW(L"user32.dll");
+        if (hUser != nullptr)
+        {
+            s_pfn = (PFN_ChangeWindowMessageFilterEx)GetProcAddress(hUser, "ChangeWindowMessageFilterEx");
+        }
+    }
+    if (s_pfn != nullptr)
+    {
+        s_pfn(hWnd, WM_DROPFILES, MSGFLT_ALLOW, nullptr);
+        s_pfn(hWnd, WM_COPYGLOBALDATA, MSGFLT_ALLOW, nullptr);
+    }
+}
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
 #define APP_VERSION L"7.03"
@@ -1043,7 +1078,7 @@ volatile ULONGLONG g_qwSearchResult = (ULONGLONG)-1;   // found offset, -1 = not
 // command ID of each view.
 enum { VIEW_ANSI = 0, VIEW_UTF8 = 1, VIEW_UTF16 = 2, VIEW_UTF16BE = 4, VIEW_EBCDIC = 5, VIEW_HEX = 3, VIEW_UTF32 = 6, VIEW_UTF32BE = 7 };   // 6.18: the UTF-32 views have their own menu IDs (ID_VIEW_ANSI + iView only spans 0..5)
 int g_iLastTextView = VIEW_ANSI;                // 6.16: the TEXT encoding of the file (detected / last chosen): hex -> text and CSV return to it
-void TV_SyncState(void);
+static void TV_SyncState(void);
 
 // ============================================================================================
 // 6.18: THEME. Dark theme for the view, the offset / line-number column and the ruler. Auto (default) follows the
@@ -1069,7 +1104,7 @@ static const CpEntry kCodePages[] =                      // the order of the Opt
 #define CP_TABLE_COUNT ((int)(sizeof(kCodePages) / sizeof(kCodePages[0])))
 static_assert(ID_ENC_CP20 - ID_ENC_CP00 + 1 == CP_TABLE_COUNT, "resource.h code-page-ID block must match kCodePages");
 
-static const WCHAR* AnsiLabel(void)
+static inline const WCHAR* AnsiLabel(void)
 {
     if (g_uAnsiCP != CP_ACP)
     {
@@ -1108,18 +1143,18 @@ static HBRUSH ThBrush(COLORREF c)
     return h;
 }
 
-static COLORREF ThWindow(void)    { return g_bDark ? RGB(30, 30, 30)    : GetSysColor(COLOR_WINDOW); }
-static COLORREF ThText(void)      { return g_bDark ? RGB(224, 224, 224) : GetSysColor(COLOR_WINDOWTEXT); }
-static COLORREF ThSelBg(void)     { return g_bDark ? RGB(38, 79, 120)   : GetSysColor(COLOR_HIGHLIGHT); }
-static COLORREF ThSelTx(void)     { return g_bDark ? RGB(255, 255, 255) : GetSysColor(COLOR_HIGHLIGHTTEXT); }
-static COLORREF ThGreenbar(void)  { return g_bDark ? RGB(38, 46, 38)    : RGB(0xE8, 0xF0, 0xE8); }
-static COLORREF ThHilite(void)    { return g_bDark ? RGB(60, 60, 30)    : RGB(0xFF, 0xF0, 0xB0); }
-static COLORREF ThBookmark(void)  { return g_bDark ? RGB(31, 58, 92)    : RGB(0xB8, 0xD4, 0xF0); }
-static COLORREF ThWhitespace(void){ return g_bDark ? RGB(100, 100, 100) : RGB(170, 170, 170); }
-static HBRUSH ThBrushWindow(void) { return g_bDark ? ThBrush(RGB(30, 30, 30))    : GetSysColorBrush(COLOR_WINDOW); }
-static HBRUSH ThBrushFace(void)   { return g_bDark ? ThBrush(RGB(45, 45, 48))    : GetSysColorBrush(COLOR_3DFACE); }
-static HBRUSH ThBrushShadow(void) { return g_bDark ? ThBrush(RGB(90, 90, 90))    : GetSysColorBrush(COLOR_3DSHADOW); }
-static HBRUSH ThBrushLight(void)  { return g_bDark ? ThBrush(RGB(62, 62, 62))    : GetSysColorBrush(COLOR_3DLIGHT); }
+static inline COLORREF ThWindow(void)    { return g_bDark ? RGB(30, 30, 30)    : GetSysColor(COLOR_WINDOW); }
+static inline COLORREF ThText(void)      { return g_bDark ? RGB(224, 224, 224) : GetSysColor(COLOR_WINDOWTEXT); }
+static inline COLORREF ThSelBg(void)     { return g_bDark ? RGB(38, 79, 120)   : GetSysColor(COLOR_HIGHLIGHT); }
+static inline COLORREF ThSelTx(void)     { return g_bDark ? RGB(255, 255, 255) : GetSysColor(COLOR_HIGHLIGHTTEXT); }
+static inline COLORREF ThGreenbar(void)  { return g_bDark ? RGB(38, 46, 38)    : RGB(0xE8, 0xF0, 0xE8); }
+static inline COLORREF ThHilite(void)    { return g_bDark ? RGB(60, 60, 30)    : RGB(0xFF, 0xF0, 0xB0); }
+static inline COLORREF ThBookmark(void)  { return g_bDark ? RGB(31, 58, 92)    : RGB(0xB8, 0xD4, 0xF0); }
+static inline COLORREF ThWhitespace(void){ return g_bDark ? RGB(100, 100, 100) : RGB(170, 170, 170); }
+static inline HBRUSH ThBrushWindow(void) { return g_bDark ? ThBrush(RGB(30, 30, 30))    : GetSysColorBrush(COLOR_WINDOW); }
+static inline HBRUSH ThBrushFace(void)   { return g_bDark ? ThBrush(RGB(45, 45, 48))    : GetSysColorBrush(COLOR_3DFACE); }
+static inline HBRUSH ThBrushShadow(void) { return g_bDark ? ThBrush(RGB(90, 90, 90))    : GetSysColorBrush(COLOR_3DSHADOW); }
+static inline HBRUSH ThBrushLight(void)  { return g_bDark ? ThBrush(RGB(62, 62, 62))    : GetSysColorBrush(COLOR_3DLIGHT); }
 
 static bool SystemWantsDark(void)
 {
@@ -1226,7 +1261,7 @@ static const COLORREF s_clrGutter = RGB(0x8A, 0x92, 0x9E);
 // (2.98 fix: a forward declaration here is what lets the destructor release
 // the worker's text with the right allocator — GlobalFree, not delete[].)
 WCHAR* AllocViewText(DWORD cch);
-void FreeViewText(WCHAR* psz);
+static void FreeViewText(WCHAR* psz);
 
 // 6.21: TVMappedView moved above LoadJob: the job now carries the mapped view
 // the read is copying from (mvPending), so an EXCEPTION_IN_PAGE_ERROR during a
@@ -1370,30 +1405,30 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom);
 WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown = -1);   // 3.00: answers the length; nullptr = OOM. 3.04: cExpandKnown >= 0 skips the count pass
 HMENU FindSubMenuWithCommand(HWND hWnd, UINT uCommand);   // the bar popup owning a command (3.04: one walker for View and File)
 void UpdateViewMenu(void);
-void UpdateMenuEnable(void);                    // 7.04: grays what does not apply to the content / view on screen
+void UpdateMenuEnable(void);                    // 7.03: grays what does not apply to the content / view on screen
 void SetView(int iNewView);
 void ApplyView(void);
-bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, bool* pbNormalized = nullptr);   // 3.02: pdwSrcOff/pdwSrcLen responden la ventana de BYTES que se decodificó (7.01: pProgJob eliminado, no hacía nada)
-int DetectDefaultView(const BYTE* pBytes, DWORD cb);
+static bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, bool* pbNormalized = nullptr);   // 3.02: pdwSrcOff/pdwSrcLen responden la ventana de BYTES que se decodificó (7.01: pProgJob eliminado, no hacía nada)
+static int DetectDefaultView(const BYTE* pBytes, DWORD cb);
 void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // deliver + own/free the buffer
 BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // DeliverTextToEdit wrapped in SEH
-WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch);
-bool IsBinaryData(const BYTE* pBytes, DWORD cb);
-bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb);
-int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure = nullptr);   // 6.16: the text encoding, without the binary test
-bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb);   // 2.99: UTF-8 sin BOM
-WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull);  // 64-bit decimal, no CRT/wsprintf dependency
-void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull); // decimal + regional grouping
+static WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch);
+static bool IsBinaryData(const BYTE* pBytes, DWORD cb);
+static bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb);
+static int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure = nullptr);   // 6.16: the text encoding, without the binary test
+static bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb);   // 2.99: UTF-8 sin BOM
+static WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull);  // 64-bit decimal, no CRT/wsprintf dependency
+static void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull); // decimal + regional grouping
 LONG WINAPI UnexpectedFilter(EXCEPTION_POINTERS* pPointers);
-void AsciiToWide(WCHAR* pwDst, const char* pszSrc);
-void CompilerInfo(WCHAR* pszDst);
+static void AsciiToWide(WCHAR* pwDst, const char* pszSrc);
+static void CompilerInfo(WCHAR* pszDst);
 void LaunchLoadJob(LoadJob* pJob);              // g_pJob + worker thread, shared by file loads and pages
 void OpenFileDlg(void);                         // File > Open... (common dialog)
 bool LoadPage(ULONGLONG qwBase, bool bTailJump); // 3.02: read [qwBase, +cap); FALSE = rejected (busy or searching)
 void ChangePage(int iDir);                      // PgDn / PgUp (plain or with Ctrl): next / previous page
 void RefreshPage(bool bTailJump);              // F5: reload the page on screen
 void ToggleTail(void);
-bool TV_SelectionOrWordToFind(bool bWordFallback);   // 6.17: szFind <- selection / word under the caret
+static bool TV_SelectionOrWordToFind(bool bWordFallback);   // 6.17: szFind <- selection / word under the caret
 void SearchPrev(bool bShowError);                    // 6.17: Shift+F3
 static bool PosLookup(const WCHAR* pszPath, PosEntry* pE);   // 6.17/6.22: where and HOW this file was left
 static void SaveFilePosition(void);                  // 6.17: remember it
@@ -2404,30 +2439,30 @@ void ReleaseViewContent(void);                  // 5.2: TV_ClearText + free g_pV
 // V5: custom text view control
 ATOM RegisterTextViewClass(HINSTANCE hInstance);
 LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
-void TV_SetText(WCHAR* pText, int cch, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // adopt text + line index (optionally prebuilt on the worker)
-static bool TV_BuildLineIndex(WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine); // 5.6: two wmemchr passes (worker or UI)
+static void TV_SetText(WCHAR* pText, int cch, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // adopt text + line index (optionally prebuilt on the worker)
+static bool TV_BuildLineIndex(const WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine); // 5.6: two wmemchr passes (worker or UI)
 static void TV_UpdateScrollRanges(void);        // 5.7: the SB_VERT/SB_HORZ ranges of the control (one place)
 static int  TV_HitTest(TextViewState* pState, int x, int y);   // 5.7: char under a point (wrap-aware)
-void TV_ClearText(void);                        // free line index
-void TV_SyncState(void);                        // copy g_bWrap/g_bGreenbar etc into g_tv
-int  TV_LineCount(void);                        // number of logical lines
-int  TV_FirstVisibleLine(void);                 // scroll position
-int  TV_LineFromChar(int iChar);                // line index for a char offset
-int  TV_LineIndex(int iLine);                   // char offset for a line start
-void TV_SetSel(int iStart, int iEnd);           // set selection
-void TV_GetSel(int& riStart, int& riEnd);       // get selection
-void TV_ScrollCaret(void);                      // ensure caret visible
-int  TV_GetTextLength(void);                    // total text length
-void TV_Copy(void);                             // copy selection to clipboard
-void TV_CopyAppend(void);                       // 6.00: append selection to existing clipboard text
-void TV_CopyColumn(void);                       // 6.00: copy the caret column across selected lines
+static void TV_ClearText(void);                 // free line index
+static void TV_SyncState(void);                 // copy g_bWrap/g_bGreenbar etc into g_tv
+static int  TV_LineCount(void);                 // number of logical lines
+static int  TV_FirstVisibleLine(void);          // scroll position
+static int  TV_LineFromChar(int iChar);         // line index for a char offset
+static int  TV_LineIndex(int iLine);            // char offset for a line start
+static void TV_SetSel(int iStart, int iEnd);    // set selection
+static void TV_GetSel(int& riStart, int& riEnd); // get selection
+static void TV_ScrollCaret(void);               // ensure caret visible
+static int  TV_GetTextLength(void);             // total text length
+static void TV_Copy(void);                      // copy selection to clipboard
+static void TV_CopyAppend(void);                // 6.00: append selection to existing clipboard text
+static void TV_CopyColumn(void);                // 6.00: copy the caret column across selected lines
 void FindAllMatches(void);                      // 6.00: list / jump matches (plain or regex)
 void PrintCurrentView(void);                    // 6.00: print the page on screen
 void ApplyCsvMode(bool bOn);                    // 6.00: toggle CSV/TSV table formatting
 INT_PTR CALLBACK FreezeColsProc(HWND, UINT, WPARAM, LPARAM);
 void OpenFreezeColsDialog(HWND hWnd);
 static bool ClipboardSetText(HWND hOwner, const WCHAR* psz, int cch, bool bAppend);
-static COLORREF ColorOrDefault(COLORREF clr, COLORREF def)
+static inline COLORREF ColorOrDefault(COLORREF clr, COLORREF def)
 {
     return (clr == 0xFFFFFFFF) ? def : clr;
 }
@@ -2471,7 +2506,7 @@ void BuildIniPath(void);                         // 4More.ini beside the executa
 void LoadSettings(void);                        // INI first: the command line overrides it
 void SaveSettings(void);                         // on exit
 WCHAR* AllocViewText(DWORD cch);                // 5.4: GMEM_FIXED block for the view text
-void FreeViewText(WCHAR* psz);                  // its pair: GlobalFree (the pointer is the handle)
+static void FreeViewText(WCHAR* psz);                  // its pair: GlobalFree (the pointer is the handle)
 
 // Every text view is built from at most CB_TEXT_MAX source bytes and the
 // loader stops reading there too: the bytes shown are a PAGE (window) of the
@@ -3226,8 +3261,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         DragAcceptFiles(hWnd, TRUE);
         // Allow drag & drop from non-elevated processes (Explorer) when running elevated.
         // Without this, UIPI blocks WM_DROPFILES and the global memory handle it carries.
-        ChangeWindowMessageFilterEx(hWnd, WM_DROPFILES, MSGFLT_ALLOW, nullptr);
-        ChangeWindowMessageFilterEx(hWnd, WM_COPYGLOBALDATA, MSGFLT_ALLOW, nullptr);
+        // Win7+: resolved at run time so the Vista-targeted headers stay happy.
+        AllowDropFromUnelevated(hWnd);
         // The View menu items get the radio (dot) mark for the active one,
         // like the encoding menus of professional editors.
         // NOTE: the mark is set ONLY via CheckMenuRadioItem (in
@@ -3890,7 +3925,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 /* -------------------------------------------------------------------------------------------- */
 // AsciiToWide / CompilerInfo: fill the About dialog lines that depend on how
 // and with what the executable was built.
-void AsciiToWide(WCHAR* pwDst, const char* pszSrc)
+static void AsciiToWide(WCHAR* pwDst, const char* pszSrc)
 {
     while (*pszSrc != '\0')
     {
@@ -3902,7 +3937,7 @@ void AsciiToWide(WCHAR* pwDst, const char* pszSrc)
 // Names the compiler that produced this binary. _MSC_VER is the documented
 // version macro: 1900 = VS2015, 1910-1919 = VS2017, 1920-1929 = VS2019,
 // 1930-1949 = VS2022; anything newer is reported factually by its number.
-void CompilerInfo(WCHAR* pszDst)
+static void CompilerInfo(WCHAR* pszDst)
 {
 #if defined(_MSC_VER)
     LPCWSTR pszProduct;
@@ -4123,7 +4158,7 @@ static const EbcdicTable g_EbcdicTable;
 // Forward declarations of file-scope statics defined LATER in this file (used here).
 static void PostSearchDone(UINT uCode);
 static const std::wregex* GetCachedRegex(void);
-static bool TV_BuildLineIndex(WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine);
+static bool TV_BuildLineIndex(const WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine);
 static bool ClipboardSetText(HWND hOwner, const WCHAR* psz, int cch, bool bAppend);
 static int TV_DispEnd(const WCHAR* pText, int iLS, int iLE);          // 5.9.10
 static int HexByteOfCol(int col);                                     // 6.17's byte-of-column helper (defined near FindPlainBefore)
@@ -4132,9 +4167,18 @@ static void U64ToHex(WCHAR* d, ULONGLONG v);                          // hex dig
 
 // The Find word-boundary rule: the same classes the double-click word logic uses
 // (spaces are breaks; letters/digits/_ are word; everything else is punctuation).
-static bool FxIsWordChar(WCHAR c)
+// Hot path (Find whole-word, double-click). ASCII is the common case: skip the
+// locale-aware IsCharAlphaNumericW call for the BMP Latin range.
+static inline bool FxIsWordChar(WCHAR c)
 {
-    return (c == L'_' || IsCharAlphaNumericW(c));
+    if (c < 128)
+    {
+        return (c == L'_') ||
+               (c >= L'0' && c <= L'9') ||
+               (c >= L'A' && c <= L'Z') ||
+               (c >= L'a' && c <= L'z');
+    }
+    return IsCharAlphaNumericW(c) != FALSE;
 }
 
 // --------------------------------------------------------------------------------------------
@@ -7643,7 +7687,7 @@ static void UnmapFileRange(TVMappedView* pV)
 // The real on-disk size travels in the job (status bar and notices show it);
 // the loaded bytes stay bounded. Results (and errors) are recorded in the
 // job; no UI calls from here. Cancel stays responsive (checked per chunk).
-// 6.14: READ-AHEAD. PrefetchVirtualMemory (Windows 8+, looked up at run time: the build targets Windows 7)
+// 6.14: READ-AHEAD. PrefetchVirtualMemory (Windows 8+, looked up at run time: the build targets Vista)
 // asks the memory manager to fault a mapped range in with large sequential reads, instead of one page fault
 // at a time while the copy walks it. A hint: ignored when unavailable or when the range is small.
 struct TVMemRange
@@ -8491,7 +8535,7 @@ void LoadStdin(void)
 // first hit instead of testing every byte. The control share keeps its own
 // walk, now without the NUL branch (memchr already answered it).
 // Tab, line breaks, form feed and escape are accepted as text.
-bool IsBinaryData(const BYTE* pBytes, DWORD cb)
+static bool IsBinaryData(const BYTE* pBytes, DWORD cb)
 {
     // 3.05: no cb>0 guards — memchr with a zero count answers nullptr and
     // zero control bytes can never beat the 10% rule below.
@@ -8535,7 +8579,7 @@ bool IsBinaryData(const BYTE* pBytes, DWORD cb)
 // no portable 64-bit specifier across toolchains and the Linux audit shim, so
 // the (at most 20) digits are written by hand. Returns the new end of the
 // string (caller appends there or measures with lstrlenW).
-WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull)
+static WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull)
 {
     WCHAR szTmp[24];
     int c = 0;
@@ -8613,7 +8657,7 @@ static LocaleInfo BuildLocaleInfo(void)
     return(li);
 }
 
-void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull)
+static void FormatU64Locale(WCHAR* pszDst, int cchDst, ULONGLONG ull)
 {
     WCHAR szRaw[24];
     U64ToWide(szRaw, ull);
@@ -8681,7 +8725,7 @@ static bool LooksLikeUTF32Text(const BYTE* p, DWORD cb, bool* pbBE)
 // NOTE: the old IsTextUnicode (Advapi32) is gone. It was happy to call an
 // executable header "Unicode" (MZ/PE headers are full of 00 00 words) and
 // its statistical results vary between Windows versions.
-bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
+static bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
 {
     if (cb < 2)
     {
@@ -8739,7 +8783,7 @@ bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
 // evidence against UTF-8.
 // Same bounds as the other heuristics: it only ever sees the first
 // DETECT_WINDOW_BYTES, and the walk is linear with no lookahead tables.
-bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb)
+static bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb)
 {
     DWORD cMB = 0;                              // multi-byte sequences seen
     DWORD i = 0;
@@ -8817,7 +8861,7 @@ bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb)
 // run the binary test, so a file that opened as hex can still answer "which text encoding is this?":
 // hex -> text used to reset to ANSI. *pbSure = decided by a BOM or the UTF-16 look (text, whatever the
 // other bytes say: the binary test must not overrule it).
-int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure)
+static int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure)
 {
     if (pbSure != nullptr) *pbSure = true;
     if (cb >= 3 && pBytes[0] == 0xEF && pBytes[1] == 0xBB && pBytes[2] == 0xBF)
@@ -8854,7 +8898,7 @@ int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure)
     return(LooksLikeUTF8Text(pBytes, cbWin) ? VIEW_UTF8 : VIEW_ANSI);     // UTF-8 sin BOM (2.99) / ANSI (active code page)
 }
 
-int DetectDefaultView(const BYTE* pBytes, DWORD cb)
+static int DetectDefaultView(const BYTE* pBytes, DWORD cb)
 {
     bool bSure = false;
     const int iText = DetectTextView(pBytes, cb, &bSure);
@@ -8882,7 +8926,7 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
 // LAST row carries no line break (an empty extra line made End / Ctrl+End
 // park the caret on a blank row with its own gutter label), and the notice
 // — when present — still follows a CRLF.
-WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch)
+static WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch)
 {
     if (cbAll < qwBase + (ULONGLONG)cb)
     {
@@ -9301,7 +9345,7 @@ static bool ParallelDecodeText(UINT cp, const BYTE* pSrc, DWORD cbSrc, DWORD cEx
 }
 
 
-bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen, bool* pbNormalized)
+static bool BuildViewText(int iViewBuild, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff, DWORD* pdwSrcLen, bool* pbNormalized)
 {
     *ppText = nullptr;
     *pcch = 0;
@@ -9691,7 +9735,7 @@ HWND CreateTextView(HWND hWndParent)
     return hWnd;
 }
 
-void TV_ClearText(void)
+static void TV_ClearText(void)
 {
     if (g_tv.pLineStarts != nullptr) { delete[] g_tv.pLineStarts; g_tv.pLineStarts = nullptr; }
     g_tv.pText = nullptr;   // V5: null to avoid dangling pointer (buffer owned by g_pViewText)
@@ -9897,7 +9941,7 @@ static void TVIndexRunRounds(TVIndexChunk* aC, int nChunks, unsigned (__stdcall*
     }
 }
 
-static bool TV_BuildLineIndexParallel(WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine, int nChunks)
+static bool TV_BuildLineIndexParallel(const WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine, int nChunks)
 {
     TVIndexChunk* aC = new (std::nothrow) TVIndexChunk[nChunks];
     if (aC == nullptr)
@@ -9980,7 +10024,7 @@ static bool TV_BuildLineIndexParallel(WCHAR* pText, int cch, int** ppStarts, int
 }
 
 /* -------------------------------------------------------------------------------------------- */
-static bool TV_BuildLineIndex(WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine)
+static bool TV_BuildLineIndex(const WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine)
 {
     *ppStarts = nullptr; *pcLines = 0; *piMaxLine = 0;
     if (pText == nullptr || cch <= 0) return true;
@@ -10211,7 +10255,7 @@ static void TV_UpdateScrollRanges(void)
 // the load worker (LoadJob::pLineStarts): TV_SetText adopts it and the UI
 // thread does NO scan at delivery time. Without it (ApplyView, preview, all
 // non-load paths) it builds the index inline as before.
-void TV_SetText(WCHAR* pText, int cch, int* pLineStarts, int cLines, int iMaxLineChars)
+static void TV_SetText(WCHAR* pText, int cch, int* pLineStarts, int cLines, int iMaxLineChars)
 {
     TV_ClearText();
     g_tv.pText = pText;
@@ -10260,7 +10304,7 @@ static void TV_SyncBrush(bool bOn, HBRUSH& rhbr, COLORREF clr)
     }
 }
 
-void TV_SyncState(void)
+static void TV_SyncState(void)
 {
     // 5.4: the hex dump has fixed lines — wrap never applies to it.
     g_tv.bWrap = (iView != VIEW_HEX) && (g_bWrap || (g_iWrapWidth > 0));
@@ -10311,10 +10355,10 @@ void TV_SyncState(void)
     g_tv.iPaintedCurLine = -1;   // 5.8: no band on screen yet after any state sync
 }
 
-int TV_LineCount(void) { return g_tv.cLines; }
-int TV_FirstVisibleLine(void) { return g_tv.iFirstVisible; }
-int TV_GetTextLength(void) { return g_tv.cch; }
-void TV_GetSel(int& riStart, int& riEnd) { riStart = g_tv.iSelStart; riEnd = g_tv.iSelEnd; }
+static inline int TV_LineCount(void) { return g_tv.cLines; }
+static inline int TV_FirstVisibleLine(void) { return g_tv.iFirstVisible; }
+static inline int TV_GetTextLength(void) { return g_tv.cch; }
+static inline void TV_GetSel(int& riStart, int& riEnd) { riStart = g_tv.iSelStart; riEnd = g_tv.iSelEnd; }
 
 // 5.5: forward declaration (defined after TV_Copy, next to the scroll
 // helpers it shares the invalidation logic with).
@@ -10323,10 +10367,10 @@ static void TV_InvalidateSelPainted(HWND hWnd, TextViewState* pState);
 // 5.9.8: the low/high end of a char range, spelled once. The same two
 // ternaries lived copied in four places (WM_PAINT twice, TV_Copy and
 // TV_InvalidateSelPainted): eight lines that could only drift apart.
-static int TV_LoI(int a, int b) { return (a < b) ? a : b; }
-static int TV_HiI(int a, int b) { return (a > b) ? a : b; }
+static inline int TV_LoI(int a, int b) { return (a < b) ? a : b; }
+static inline int TV_HiI(int a, int b) { return (a > b) ? a : b; }
 
-void TV_SetSel(int iStart, int iEnd)
+static void TV_SetSel(int iStart, int iEnd)
 {
     if (iStart < 0) iStart = 0;
     if (iEnd < 0) iEnd = 0;
@@ -10337,7 +10381,7 @@ void TV_SetSel(int iStart, int iEnd)
     if (g_tv.hWnd != nullptr) TV_InvalidateSelPainted(g_tv.hWnd, &g_tv);   // 5.5: only what changed
 }
 
-int TV_LineFromChar(int iChar)
+static int TV_LineFromChar(int iChar)
 {
     if (g_tv.cLines <= 0 || g_tv.pLineStarts == nullptr) return 0;
     if (iChar == g_iLineMemo0Char) return g_iLineMemo0Line;   // 5.7: memo hit (slot 0)
@@ -10355,7 +10399,7 @@ int TV_LineFromChar(int iChar)
     return lo;
 }
 
-int TV_LineIndex(int iLine)
+static int TV_LineIndex(int iLine)
 {
     if (iLine < 0 || iLine >= g_tv.cLines || g_tv.pLineStarts == nullptr) return -1;
     return g_tv.pLineStarts[iLine];
@@ -10646,7 +10690,7 @@ static int TV_WrapFirstForCaret(int iCaretLine, int iClientW, int cVis, int cFul
 }
 
 
-void TV_ScrollCaret(void)
+static void TV_ScrollCaret(void)
 {
     if (g_tv.cLines <= 0 || g_tv.hWnd == nullptr || iHexLineH <= 0) return;
     int iCaretLine = TV_LineFromChar(g_tv.iSelEnd);
@@ -10758,7 +10802,7 @@ static bool ClipboardSetText(HWND hOwner, const WCHAR* psz, int cch, bool bAppen
 }
 
 
-void TV_Copy(void)
+static void TV_Copy(void)
 {
     if (g_tv.iSelStart == g_tv.iSelEnd || g_tv.pText == nullptr) return;
     int iStart = TV_LoI(g_tv.iSelStart, g_tv.iSelEnd);
@@ -10768,7 +10812,7 @@ void TV_Copy(void)
     ClipboardSetText(g_tv.hWnd, g_tv.pText + iStart, cch, false);
 }
 
-void TV_CopyAppend(void)
+static void TV_CopyAppend(void)
 {
     if (g_tv.iSelStart == g_tv.iSelEnd || g_tv.pText == nullptr)
     {
@@ -10784,7 +10828,7 @@ void TV_CopyAppend(void)
 }
 
 // Copy the caret column across the selected lines (or the current line).
-void TV_CopyColumn(void)
+static void TV_CopyColumn(void)
 {
     if (g_tv.pText == nullptr || g_tv.cLines <= 0) return;
     int iA = TV_LoI(g_tv.iSelStart, g_tv.iSelEnd);
@@ -11498,14 +11542,23 @@ static bool TV_MoveCaretLines(TextViewState* pState, int iDelta, bool bShift)
 // 6.17: SMALL HELPERS for the usability round (pure: no window state, each one fuzzed against a brute-force model)
 // ============================================================================================
 
-// 0 = space / line break, 1 = word character (letter, digit, '_'), 2 = anything else
-static int TvCharClass(WCHAR c)
+// 0 = space / line break, 1 = word character (letter, digit, '_'), 2 = anything else.
+// ASCII fast path: Ctrl+Left/Right and double-click walk every character of the
+// selection; IsCharAlphaNumericW is locale-aware and far costlier than a range test.
+static inline int TvCharClass(WCHAR c)
 {
     if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == 0x00A0)
     {
         return 0;
     }
-    return (c == L'_' || IsCharAlphaNumericW(c)) ? 1 : 2;
+    if (c < 128)
+    {
+        return ((c >= L'0' && c <= L'9') ||
+                (c >= L'A' && c <= L'Z') ||
+                (c >= L'a' && c <= L'z') ||
+                c == L'_') ? 1 : 2;
+    }
+    return IsCharAlphaNumericW(c) ? 1 : 2;
 }
 
 // Ctrl+Left / Ctrl+Right: where the caret lands. Right: finish the current run, then skip the spaces (it stops
@@ -11676,7 +11729,7 @@ static void U64ToHex(WCHAR* d, ULONGLONG v)          // at least 8 digits
     int n = 0;
     do
     {
-        t[n++] = L"0123456789ABCDEF"[v & 15];
+        t[n++] = s_szHexDigits[v & 15];
         v >>= 4;
     } while (v != 0);
     while (n < 8) t[n++] = L'0';
@@ -11755,7 +11808,7 @@ static void PosMruMerge(std::vector<std::wstring>& v, const std::wstring& entry,
 
 // 6.17: Ctrl+F3 and the Find box: the text to search for = the selection (one line, up to 127 characters) or, when
 // asked (bWordFallback), the word under the caret. Fills szFind; false = nothing to search for.
-bool TV_SelectionOrWordToFind(bool bWordFallback)
+static bool TV_SelectionOrWordToFind(bool bWordFallback)
 {
     if (g_tv.pText == nullptr || g_tv.cch <= 0)
     {
@@ -13101,7 +13154,7 @@ static inline void MenuEnableCmd(HMENU hBar, UINT uCmd, bool bOn)
     EnableMenuItem(hBar, uCmd, MF_BYCOMMAND | (bOn ? MF_ENABLED : MF_GRAYED));
 }
 
-// 7.04: enables / grays every command by what is on screen: no content = nothing to find, copy, export,
+// 7.03: enables / grays every command by what is on screen: no content = nothing to find, copy, export,
 // compare...; no selection = no copy; hex = no encoding, wrap, filter, whitespace; text / CSV = no hex layout
 // and no hex "copy as". (The accelerators still reach the handlers, which already refuse politely.)
 void UpdateMenuEnable(void)
@@ -13960,9 +14013,14 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
     // tens of MB/s). With an ASCII first character the scan looks for it in
     // its two forms and only confirms the candidates; ChrCmpIW answers only
     // where two characters differ. A non-ASCII start keeps StrStrIW.
-    WCHAR wcFirst = szFind[0];
-    WCHAR wcLo = (wcFirst >= L'A' && wcFirst <= L'Z') ? (WCHAR)(wcFirst + 32) : wcFirst;
-    WCHAR wcUp = (wcLo >= L'a' && wcLo <= L'z') ? (WCHAR)(wcLo - 32) : wcLo;
+    const WCHAR wcFirst = szFind[0];
+    if (wcFirst == L'\0')
+    {
+        return nullptr;                     // empty pattern: nothing to find
+    }
+    const int cchPat = lstrlenW(szFind);    // once: whole-word checks reuse it
+    const WCHAR wcLo = (wcFirst >= L'A' && wcFirst <= L'Z') ? (WCHAR)(wcFirst + 32) : wcFirst;
+    const WCHAR wcUp = (wcLo >= L'a' && wcLo <= L'z') ? (WCHAR)(wcLo - 32) : wcLo;
     for (;;)
     {
         const WCHAR* pHit = nullptr;                // a match inside the segment that starts at p
@@ -14007,7 +14065,6 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
             // (text start, embedded NUL, or the text end) is a break.
             if (fr.Flags & FR_WHOLEWORD)
             {
-                const int cchPat = lstrlenW(szFind);
                 const bool bLeftOk = (pHit <= pszText) || (pHit[-1] == L'\0') || !FxIsWordChar(pHit[-1]);
                 const bool bRightOk = (pHit + cchPat >= pEnd) || (pHit[cchPat] == L'\0') || !FxIsWordChar(pHit[cchPat]);
                 if (!bLeftOk || !bRightOk)
@@ -17746,7 +17803,7 @@ WCHAR* AllocViewText(DWORD cch)
 // Frees what AllocViewText handed out (nullptr-safe). Every block this
 // program frees by hand goes through here. GMEM_FIXED: the pointer IS the
 // handle, so GlobalFree takes it directly.
-void FreeViewText(WCHAR* psz)
+static void FreeViewText(WCHAR* psz)
 {
     if (psz == nullptr)
     {

@@ -56,15 +56,16 @@ Memory usage is essentially the size of the current page (plus a modest line-ind
 ## System Requirements
 
 ### Software
-- **Windows 7** or later (Windows 8 / 8.1 / 10 / 11 fully supported)
+- **Windows Vista** or later (Windows 7 / 8 / 8.1 / 10 / 11 fully supported)
 - 32-bit (x86) or 64-bit (x64) edition
 - No additional runtimes, Visual C++ redistributables or .NET required
 - Common Controls 6.0 (provided by the embedded manifest)
-- Alternate Data Streams listing requires Windows Vista or later (gracefully disabled on older systems)
+- Alternate Data Streams listing requires Windows Vista or later
 - Prefetch hints use `PrefetchVirtualMemory` when available (Windows 8+); older systems simply skip the optimisation
+- System dark-mode detection requires Windows 10+; on Vista / 7 / 8 the viewer falls back to the light theme (or the forced Light/Dark choice)
 
 ### Hardware
-- Any CPU that can run Windows 7
+- Any CPU that can run Windows Vista
 - A few tens of megabytes of free RAM for normal use; several hundred megabytes recommended when working with the largest x64 text pages
 - Disk space only for the executable itself (~1–2 MB)
 
@@ -172,13 +173,14 @@ Switches also accept a leading `-`.
 Sources: `4More.cpp`, `4More.h`, `resource.h`, `4More.rc`, `4More.manifest` (+ optional icons).
 
 **Visual Studio (MSVC, C++20)**  
-Plain Win32 project. Set *Generate Manifest = No* (`/MANIFEST:NO`) so the embedded manifest from the `.rc` is used. Toolset v143/v145, static CRT, `/utf-8`.
+Plain Win32 project. Set *Generate Manifest = No* (`/MANIFEST:NO`) so the embedded manifest from the `.rc` is used. Toolset v143/v145, static CRT, `/utf-8`.  
+Target: `_WIN32_WINNT=0x0600` (Windows Vista).
 
 **MinGW-w64**
 
 ```bash
 windres 4More.rc rsrc.o
-g++ -O2 -std=c++20 -municode -mwindows 4More.cpp rsrc.o -o 4More.exe
+g++ -O2 -std=c++20 -municode -mwindows -D_WIN32_WINNT=0x0600 4More.cpp rsrc.o -o 4More.exe
 ```
 
 Both 32-bit and 64-bit builds are fully supported.

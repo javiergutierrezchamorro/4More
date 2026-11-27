@@ -9,11 +9,15 @@
   </dependency>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
-      <!-- 3.08: GUIDs de Windows 7 y 8 sumados (el suelo del programa es
-           7 desde 2.98): sin ellos un Windows 7/8 trataba el ejecutable
-           como legado. 10 y 11 comparten el ultimo GUID.
-           6.01: el GUID de Windows 7 estaba mal escrito (no era el de
-           Windows 7): corregido a {35138b9a-5d96-4fbd-8e2d-a2440225f93a}. -->
+      <!-- Supported OS list. Floor is Windows Vista (0x0600) since the
+           Vista support pass. Without these GUIDs an older OS treated the
+           executable as legacy.
+           Vista:  {e2011457-1546-43c5-a5fe-008deee3d3f0}
+           Win7:   {35138b9a-5d96-4fbd-8e2d-a2440225f93a}
+           Win8:   {4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}
+           Win8.1: {1f676c76-80e1-4239-95bb-83d0f6cd0f78}
+           Win10/11 share the last GUID. -->
+      <supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}"/>
       <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"/>
       <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
       <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6cd0f78}"/>
@@ -26,4 +30,3 @@
     </asmv3:windowsSettings>
   </asmv3:application>
 </assembly>
-

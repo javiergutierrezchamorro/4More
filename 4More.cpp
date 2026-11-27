@@ -1,6 +1,41 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 7.02
+   Build 7.03
+
+   Version 7.03 (review round):
+   - FIX: Up / Down / PgUp / PgDn on an EMPTY view (no file yet, a failed open, or an index that
+     ran out of memory) crashed the program: TV_MoveCaretLines walked into TV_DispEnd with a null
+     text pointer and a negative line index and read through it (nothing caught the fault in the
+     view's window procedure). One guard: the caret walk refuses to run without text.
+   - FIX: BuildHexText had lost two of its 6.11 contracts in the 6.24 layout rewrite: the dump's
+     last row ended with CRLF again, so the line index counted an EMPTY extra line and End /
+     Ctrl+End parked the caret on a blank row with its own gutter label; and the truncation
+     notice for a page cut by CB_HEX_MAX was gone (a capped binary dump no longer said it was
+     capped). The last row closes without a line break again and the notice is back when the
+     file holds more bytes than the dump shows.
+   - FIX: WfChunkEnd dereferenced its mapped probe in the UTF-8 / ANSI back-align even when there
+     was none: the whole-file find over the ReadFile fallback (a >2 GB file on Win32, or any
+     refused mapping) hit a null pointer in the worker's SEH jacket and every chunk errored out,
+     so the search always answered "could not be scanned". The back-align now needs the mapped
+     bytes and is skipped without them.
+   - FIX: the four INI colour keys were written as SIGNED decimal: a colour of 0x80000000 or
+     more (near-white / pale themes) came back as "default" on every start. They round-trip
+     unsigned now (ProfileColor).
+   - FIX: File > Export > Selection... opened the export dialog with "Current page only"
+     preselected although the menu asked for the selection; the Selection radio is preselected
+     when the command comes from that item (ExportDlgProc takes it through DialogBoxParam).
+   - FIX: WM_DESTROY left the Find in Files and Compare workers running to the end after the
+     window was gone: WfWorkerCancelAll signals every worker now (the scans stop at the next
+     chunk instead of finishing behind a dead window's back).
+   - DEAD CODE: g_bWatchDirty (write-only since 6.22: WatchTick re-flashes on its own every 2 s
+     until the reload re-bases the watcher), ID_FILE_HASH (no menu item since 7.00; the
+     Properties alias case in WM_COMMAND goes with it), TD_SHIELD_ICON, RecreateEditControl
+     (its only reachable form since 5.4 was the create-only bootstrap of EnsureEditControlType,
+     which now does the work itself), the stale 3.16 threshold comment.
+   - SPEED: Copy as C Array / ASM / PHP / JS / Python writes its hex digits from the shared
+     table instead of one wsprintfW per byte (up to 1M format calls for a 1 MB selection).
+   - SIMPLIFY: WfScanChunkText's plain path kept a loop whose counter never advanced past the
+     first iteration (iScan was always 0): one call now.
 
    Version 7.02 (review of the rest of the code):
    - FIX: "Remember position" restored NOTHING from entries written by 6.22 and later: PosLookup handed
@@ -526,7 +561,6 @@
 #define TD_WARNING_ICON      ((PCWSTR)-1)
 #define TD_ERROR_ICON        ((PCWSTR)-2)
 #define TD_INFORMATION_ICON  ((PCWSTR)-3)
-#define TD_SHIELD_ICON       ((PCWSTR)-4)
 #endif
 #ifndef TDCBF_OK_BUTTON
 #define TDCBF_OK_BUTTON      0x0001
@@ -724,7 +758,7 @@ int AppMsgBox(HWND hWnd, LPCWSTR pszText, LPCWSTR pszTitle, UINT uType)
 #endif
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"7.02"
+#define APP_VERSION L"7.03"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -764,15 +798,6 @@ int AppMsgBox(HWND hWnd, LPCWSTR pszText, LPCWSTR pszTitle, UINT uType)
 // 3.13: 16 ms (~60 samples/s) — the worker now publishes EVERY chunk tick
 // (the 62 ms throttle is gone), and this period is what paces the pixels.
 #define IDT_LOADPROG 2
-
-// 3.16: umbral que decide cuándo la página es lo bastante grande para
-// que ApplyLoadResult pinte la barra a 100% ANTES de la entrega
-// (la entrega es monolítica: el troceo con EM_REPLACESEL de
-// 3.14-3.15 era cuadrático en el buffer acumulado del control y hacía
-// que un TXT de 30 MB tardara ~8 segundos sólo en la entrega). Por
-// debajo de este tamaño la entrega es instantánea y la barra no llega a
-// verse: no hay nada que pre-pintar.
-
 
 /* -------------------------------------------------------------------------------------------- */
 HINSTANCE hInst;                                // current instance
@@ -841,7 +866,6 @@ WCHAR g_szWFFile[MAX_PATH] = {};               // 6.22: the whole-file find work
 bool g_bWatch = true;                          // INI WatchChanges=0: no "file changed" notice outside tail
 FILETIME g_ftWatch = {};                       // last write time the screen was built from (watcher baseline)
 ULONGLONG g_cbWatchSize = 0;                   // size the screen was built from
-bool g_bWatchDirty = false;                    // a change was noticed: re-flash until F5 / reload
 bool g_bReopenLast = false;                    // INI ReopenLastFile=1: start on the last file when no argument
 WCHAR g_szLastSession[MAX_PATH] = {};          // INI [Session] LastFile: the file of the previous run
 
@@ -1346,6 +1370,7 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom);
 WCHAR* NormalizeNewlines(WCHAR* pacText, int cch, int* pcchOut, int cExpandKnown = -1);   // 3.00: answers the length; nullptr = OOM. 3.04: cExpandKnown >= 0 skips the count pass
 HMENU FindSubMenuWithCommand(HWND hWnd, UINT uCommand);   // the bar popup owning a command (3.04: one walker for View and File)
 void UpdateViewMenu(void);
+void UpdateMenuEnable(void);                    // 7.04: grays what does not apply to the content / view on screen
 void SetView(int iNewView);
 void ApplyView(void);
 bool BuildViewText(int iView, const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, WCHAR** ppText, DWORD* pcch, DWORD* pdwSrcOff = nullptr, DWORD* pdwSrcLen = nullptr, bool* pbNormalized = nullptr);   // 3.02: pdwSrcOff/pdwSrcLen responden la ventana de BYTES que se decodificó (7.01: pProgJob eliminado, no hacía nada)
@@ -1373,7 +1398,7 @@ void SearchPrev(bool bShowError);                    // 6.17: Shift+F3
 static bool PosLookup(const WCHAR* pszPath, PosEntry* pE);   // 6.17/6.22: where and HOW this file was left
 static void SaveFilePosition(void);                  // 6.17: remember it
 // 6.22: new commands and helpers (definitions live in the 6.22 block, below About)
-void ExportViewDialog(HWND hWnd);
+void ExportViewDialog(HWND hWnd, bool bPreferSel = false);   // bPreferSel: the export dialog opens on Selection
 void ShowFileProperties(void);
 void ShowStatistics(void);
 void StatusFlash(LPCWSTR pszText);              // 6.24: must be visible to FindInFiles / Split / Compare (def later)
@@ -2372,8 +2397,7 @@ void WrapWidthDialog(HWND hWnd);                // V4: View > Wrap to Fixed Widt
 INT_PTR CALLBACK WrapWidthProc(HWND, UINT, WPARAM, LPARAM);
 void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin);   // V4: column ruler (xOrigin = gutter offset)
 void PaintHexRuler(HDC hdc, RECT rcRuler, int xOrigin);   // 5.9.6: byte-position header over the hex dump
-void RecreateEditControl(bool bApplyContent = true);   // 5.2: bApplyContent=false leaves the content to the caller
-void EnsureEditControlType(void);               // 5.2: the control type (custom/EDIT) always matches iView
+void EnsureEditControlType(void);               // 5.2: creates the view control when it does not exist yet (7.03: absorbs RecreateEditControl)
 void ReapSearchThread(void);                    // 5.2: close a finished Find Bytes worker and re-open the gate
 void ReleaseViewContent(void);                  // 5.2: TV_ClearText + free g_pViewText (one helper, four call sites)
 
@@ -2710,15 +2734,28 @@ void ReapSearchThread(void)
 
 
 /* -------------------------------------------------------------------------------------------- */
-// 5.4: with the custom control serving every view there is no type left to
-// sync — only the "no control yet" case remains (loads still call this
-// before every delivery, same as before).
+// 5.2/7.03: creates the custom view when it does not exist yet (the bootstrap
+// of the first load / first preview). This was RecreateEditControl's only
+// reachable form since 5.4 — a view switch never recreates the control, and
+// the hEdit != nullptr branch of the old wrapper was dead — so the recreate
+// shell is gone and the create-only body lives here.
 void EnsureEditControlType(void)
 {
+    if (hEdit != nullptr || hWndMain == nullptr)
+    {
+        return;
+    }
+    hEdit = CreateTextView(hWndMain);
     if (hEdit == nullptr)
     {
-        RecreateEditControl(false);
+        return;
     }
+    if (hFont != nullptr)
+    {
+        SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, MAKELPARAM(TRUE, 0));
+    }
+    UpdateHexMetrics();
+    SetFocus(hEdit);
 }
 
 
@@ -2809,6 +2846,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case ID_FINDNEXT:
             SearchNext(hWnd, true);
             break;
+        case ID_FIND_PREV:                    // 7.04
+            SearchPrev(true);
+            break;
         case ID_FIND_REGEX:
             g_bRegexFind = !g_bRegexFind;
             g_bRxCachedValid = false;
@@ -2830,8 +2870,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case ID_FILE_EXPORT:                  // 6.22
             ExportViewDialog(hWnd);
             break;
-        case ID_FILE_EXPORTSEL:               // 6.24
-            ExportViewDialog(hWnd);
+        case ID_FILE_EXPORTSEL:               // 6.24 (7.03: the dialog opens on Selection)
+            ExportViewDialog(hWnd, true);
             break;
         case ID_SEARCH_FINDINFILES:           // 6.24
             FindInFilesDialog(hWnd);
@@ -2859,7 +2899,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case ID_VIEW_SPLIT:                   // 6.24
             ToggleSplitView();
             break;
-        case ID_FILE_HASH:                    // 7.00: alias of Properties (legacy)
         case ID_FILE_PROPERTIES:              // 7.00: Properties... (metadata + hashes)
             ShowFileProperties();
             break;
@@ -3035,6 +3074,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         break;
     }
+    case WM_INITMENUPOPUP:
+        // 7.04: every popup that opens is brought up to date (marks AND enabled state), so a menu never
+        // shows a stale mark (Hex Group by always on "8") or offers a command that cannot apply now.
+        if (HIWORD(lParam) == 0)                // not the window (system) menu
+        {
+            UpdateViewMenu();
+            UpdateMenuEnable();
+        }
+        return(0);
     case WM_CREATE:
     {
         hWndMain = hWnd;    // needed by ESC handling and View menu updates
@@ -4717,14 +4765,14 @@ void WatchTick(void)
         fad.ftLastWriteTime.dwHighDateTime != g_ftWatch.dwHighDateTime);
     if (bChanged)
     {
+        // The baseline does not move until a reload re-bases it: this note re-flashes on
+        // every 2 s tick until F5 (or any reload) shows the new content.
         StatusFlash(L"File changed on disk \x2014 F5 reloads it.");
-        g_bWatchDirty = true;
     }
 }
 
 static void WatchResetBaseline(void)
 {
-    g_bWatchDirty = false;
     if (g_szCurrentFile[0] == L'\0')
     {
         g_cbWatchSize = 0;
@@ -5105,16 +5153,12 @@ static bool WfScanChunkText(const WfChunk* pChunk, int iView, UINT uCP, const st
     {
         // FxPlainScan applies Match case / Whole word itself (the flags of the
         // Find dialog); the chunk starts on a line boundary, so a candidate at
-        // its edge sees a correct word break on the left.
-        int iScan = 0;
-        while (iScan <= cchT && iHit < 0)
+        // its edge sees a correct word break on the left. (7.03: the old loop
+        // never advanced past its first iteration — iScan stayed 0.)
+        int lo = -1, hi = -1;
+        if (FxPlainScan(pT, cchT, &lo, &hi))
         {
-            int lo = -1, hi = -1;
-            if (!FxPlainScan(pT + iScan, cchT - iScan, &lo, &hi))
-            {
-                break;
-            }
-            iHit = iScan + lo;
+            iHit = lo;
             cchHit = hi - lo;
         }
     }
@@ -5129,8 +5173,10 @@ static bool WfScanChunkText(const WfChunk* pChunk, int iView, UINT uCP, const st
 }
 
 // where a chunk may END without cutting a multi-byte sequence (see the block
-// comment). pProbe is the mapped file (LF-preferred boundaries) or nullptr — the
-// ReadFile fallback back-aligns only (no bytes to peek at).
+// comment). pProbe is the mapped file (LF-preferred boundaries) or nullptr —
+// the ReadFile fallback cannot peek (7.03: its chunk ends at the raw target;
+// the old back-align dereferenced the null probe and every chunk of a UTF-8
+// or DBCS search over the fallback errored out through the SEH jacket).
 static ULONGLONG WfChunkEnd(int iView, const BYTE* pProbe, ULONGLONG cbFile, ULONGLONG qwTarget)
 {
     if (qwTarget >= cbFile)
@@ -5163,23 +5209,25 @@ static ULONGLONG WfChunkEnd(int iView, const BYTE* pProbe, ULONGLONG cbFile, ULO
         {
             return (ULONGLONG)(pNl - pProbe) + 1;
         }
-    }
-    ULONGLONG q = qwTarget;                     // fallback: back up onto a boundary
-    if (iView == VIEW_UTF8)
-    {
-        while (q > 0 && (pProbe[q] & 0xC0) == 0x80)
+        // No line break nearby: back up onto a character boundary.
+        ULONGLONG q = qwTarget;
+        if (iView == VIEW_UTF8)
         {
-            q--;
+            while (q > 0 && (pProbe[q] & 0xC0) == 0x80)
+            {
+                q--;
+            }
         }
-    }
-    else
-    {
-        if (q > 0 && IsDBCSLeadByteEx(g_uAnsiCP, pProbe[q - 1]))
+        else
         {
-            q--;
+            if (q > 0 && IsDBCSLeadByteEx(g_uAnsiCP, pProbe[q - 1]))
+            {
+                q--;
+            }
         }
+        return q;
     }
-    return q;
+    return qwTarget;                            // ReadFile fallback: no bytes to peek at
 }
 
 // 6.23: SEH body isolated from std::wregex (MSVC forbids __try in a function that
@@ -6122,17 +6170,34 @@ static int FxBase64Encode(const BYTE* p, DWORD cb, WCHAR* pszOut, int cchOut)
     return w;
 }
 
+// 7.03: the two hex digits come from the shared table. One wsprintfW per byte
+// cost up to 1M format calls for a 1 MB selection (the bulk of the copy time).
+// Same output: "0xC8" (C/PHP/JS/Python) and "0C8h" (ASM).
 static int CopyFmtAppendByte(WCHAR* psz, int w, int cchCap, int iFmt, BYTE b, bool bSep)
 {
     if (w + 12 >= cchCap)
     {
         return w;
     }
+    if (bSep)
+    {
+        psz[w++] = L',';
+        psz[w++] = L' ';
+    }
+    psz[w++] = L'0';
     if (iFmt == COPYFMT_ASM)
     {
-        return w + wsprintfW(psz + w, L"%s0%02Xh", bSep ? L", " : L"", b);
+        psz[w++] = s_szHexDigits[(b >> 4) & 15];
+        psz[w++] = s_szHexDigits[b & 15];
+        psz[w++] = L'h';
     }
-    return w + wsprintfW(psz + w, L"%s0x%02X", bSep ? L", " : L"", b);
+    else
+    {
+        psz[w++] = L'x';
+        psz[w++] = s_szHexDigits[(b >> 4) & 15];
+        psz[w++] = s_szHexDigits[b & 15];
+    }
+    return w;
 }
 
 void CopyHexAs(int iFmt)
@@ -6276,11 +6341,12 @@ void CopyHexAs(int iFmt)
 // --------------------------------------------------------------------------------------------
 INT_PTR CALLBACK ExportDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
-    UNREFERENCED_PARAMETER(lParam);
     switch (message)
     {
     case WM_INITDIALOG:
-        CheckRadioButton(hDlg, IDC_EXPORT_PAGE, IDC_EXPORT_ALL, IDC_EXPORT_PAGE);
+        // 7.03: lParam = 1 opens on Selection (File > Export > Selection...).
+        CheckRadioButton(hDlg, IDC_EXPORT_PAGE, IDC_EXPORT_ALL,
+            (lParam != 0) ? IDC_EXPORT_SEL : IDC_EXPORT_PAGE);
         return (INT_PTR)TRUE;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK)
@@ -6544,16 +6610,20 @@ static void ApplyPendingBookmarks(void)
 }
 
 // --------------------------------------------------------------------------------------------
-// 6.22: stop every 6.22 worker (the window is dying)
+// 6.22: stop every worker (the window is dying). 7.03: the Find in Files and
+// Compare workers belong here too — WM_DESTROY used to leave them scanning
+// to the end of their (already meaningless) run.
 // --------------------------------------------------------------------------------------------
 static void WfWorkerCancelAll(void)
 {
     InterlockedExchange(&g_bSearchCancel, 1);   // Find Bytes / whole-file find share it
     InterlockedExchange(&g_bHashCancel, 1);
     InterlockedExchange(&g_bExportCancel, 1);
+    InterlockedExchange(&g_bFifCancel, 1);      // 7.03: Find in Files
+    InterlockedExchange(&g_bCmpCancel, 1);      // 7.03: Compare
 }
 
-void ExportViewDialog(HWND hWnd)
+void ExportViewDialog(HWND hWnd, bool bPreferSel)
 {
     if (g_tv.pText == nullptr || g_tv.cch <= 0)
     {
@@ -6565,7 +6635,9 @@ void ExportViewDialog(HWND hWnd)
         StatusFlash(L"Still busy; try again in a moment.");
         return;
     }
-    const int iChoice = (int)DialogBox(hInst, MAKEINTRESOURCE(IDD_EXPORT), hWnd, ExportDlgProc);
+    // 7.03: the Selection radio is preselected when the command came from
+    // File > Export > Selection... (DialogBoxParam carries it in lParam).
+    const int iChoice = (int)DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_EXPORT), hWnd, ExportDlgProc, (LPARAM)(bPreferSel ? 1 : 0));
     if (iChoice == 0)
     {
         return;
@@ -8800,14 +8872,16 @@ int DetectDefaultView(const BYTE* pBytes, DWORD cb)
 //     4D 5A 90 00 03 00 00 00  04 00 00 00 FF FF 00 00  MZ..............
 // The leading offset of each line is NOT part of this text: it is painted
 // separately, in bold, by the offset column (PaintGutter). That keeps this
-// buffer at 68 instead of 78 characters per line (WM_SETTEXT copies it and
-// Find walks it), and leaves the offsets out of Copy and Find.
+// buffer smaller and leaves the offsets out of Copy and Find.
 // The caller must free the returned buffer with FreeViewText (5.4: it is
 // a fixed global block, handed to the custom control as a pointer). The dump
-// shows the bytes of
-// the current page (qwBase..qwBase+CB_HEX_MAX at most); when the file holds
-// more bytes past that window, a notice replaces the final CRLF of the last
-// line. cbAll is the REAL total on disk, the notice cites the page range.
+// shows the bytes of the current page (qwBase..qwBase+CB_HEX_MAX at most);
+// when the file holds more bytes past that window, a notice follows the last
+// row. cbAll is the REAL total on disk, the notice cites the page range.
+// 7.03: the 6.11 rules are back (the 6.24 layout rewrite had lost both): the
+// LAST row carries no line break (an empty extra line made End / Ctrl+End
+// park the caret on a blank row with its own gutter label), and the notice
+// — when present — still follows a CRLF.
 WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch)
 {
     if (cbAll < qwBase + (ULONGLONG)cb)
@@ -8816,6 +8890,7 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
     }
     const DWORD cbHexMax = CB_HEX_MAX;
     const DWORD cbUse = ((ULONGLONG)cb > (ULONGLONG)cbHexMax) ? cbHexMax : cb;
+    const bool bTruncated = (qwBase + (ULONGLONG)cbUse < cbAll);
     const int bpl = HexBpl();
     const int grp = HexGrp();
     DWORD cLines = (cbUse + (DWORD)bpl - 1) / (DWORD)bpl;
@@ -8871,6 +8946,9 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
         // 6.24: BPL (8/16/32) and group spacing drive the layout.
         DWORD off = iLine * (DWORD)bpl;
         const DWORD n = (off + (DWORD)bpl <= cbUse) ? (DWORD)bpl : (cbUse - off);
+        // 6.11: the last row carries NO line break; the truncation notice,
+        // when present, still follows a CRLF (bNoEol stays false then).
+        const bool bNoEol = ((int)iLine == (int)cLines - 1) && !bTruncated;
         if (n == (DWORD)bpl)
         {
             // 7.01: a FULL row (every row but the last) without the per-byte "is there a byte?" and "is this a
@@ -8897,8 +8975,11 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
             {
                 *p++ = am.w[pb[i]];
             }
-            *p++ = L'\r';
-            *p++ = L'\n';
+            if (!bNoEol)
+            {
+                *p++ = L'\r';
+                *p++ = L'\n';
+            }
             continue;
         }
         for (DWORD i = 0; i < (DWORD)bpl; i++)
@@ -8933,8 +9014,25 @@ WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwB
                 *p++ = L' ';
             }
         }
-        *p++ = L'\r';
-        *p++ = L'\n';
+        if (!bNoEol)
+        {
+            *p++ = L'\r';
+            *p++ = L'\n';
+        }
+    }
+    if (bTruncated)
+    {
+        // The notice paragraph. With bTruncated every row kept its CRLF (see
+        // bNoEol), so the notice follows the last row's line break directly —
+        // no empty line in between. The +160 slack of the allocation holds it
+        // comfortably (wsprintfW is also capped at 1024 chars); the range is
+        // absolute and names the page on screen. (7.03: the notice was lost
+        // in the 6.24 rewrite — a capped dump no longer said it was capped.)
+        WCHAR szFirst[32], szLast[32], szTotal[32];
+        FormatU64Locale(szFirst, _countof(szFirst), qwBase);
+        FormatU64Locale(szLast, _countof(szLast), qwBase + (ULONGLONG)cbUse);
+        FormatU64Locale(szTotal, _countof(szTotal), cbAll);
+        p += wsprintfW(p, L"[Showing bytes %s-%s of %s]", szFirst, szLast, szTotal);
     }
     *p = L'\0';
     if (pcch != nullptr)
@@ -11352,6 +11450,14 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
 // travels with the page. Returns false when the caret is already on the first / last line.
 static bool TV_MoveCaretLines(TextViewState* pState, int iDelta, bool bShift)
 {
+    // 7.03: an EMPTY view (no file yet, a failed open, an OOM index) must not
+    // reach the walk: TV_LineFromChar answers 0 and the clamp below produced a
+    // negative line, and TV_DispEnd then read pText[-1] through a null pointer.
+    // Every key that moves the caret by lines lands here.
+    if (pState->pText == nullptr || pState->cLines <= 0 || pState->pLineStarts == nullptr)
+    {
+        return false;
+    }
     const int iL = TV_LineFromChar(pState->iSelEnd);
     int iT = iL + iDelta;
     if (iT < 0) iT = 0;
@@ -11960,10 +12066,11 @@ static void SaveFilePosition(void)
 }
 
 // ---- right-click menu of the view -----------------------------------------------------------------------------
-#define CTX_FINDPREV   50003
 #define CTX_COPYPATH   50004
 #define CTX_EXPLORER   50005
 
+// 7.04: the commands that do not apply right now are grayed, like in the menu bar (no content: nothing to find or
+// select; no selection: no copy; hex: no word wrap / whitespace and the "Copy as" formats appear instead).
 static void TV_ShowContextMenu(HWND hWnd, int x, int y)
 {
     HMENU hMenu = CreatePopupMenu();
@@ -11971,30 +12078,46 @@ static void TV_ShowContextMenu(HWND hWnd, int x, int y)
     {
         return;
     }
-    const bool bSel = (g_tv.iSelStart != g_tv.iSelEnd);
+    const bool bContent = (g_tv.pText != nullptr && g_tv.cch > 0);
+    const bool bSel = (bContent && g_tv.iSelStart != g_tv.iSelEnd);
+    const bool bHex = (iView == VIEW_HEX);
     const bool bFile = (g_szCurrentFile[0] != L'\0' && GetFileAttributesW(g_szCurrentFile) != INVALID_FILE_ATTRIBUTES);
     AppendMenuW(hMenu, MF_STRING | (bSel ? 0 : MF_GRAYED), ID_COPY, L"&Copy\tCtrl+C");
-    AppendMenuW(hMenu, MF_STRING, ID_SELECTALL, L"Select &All\tCtrl+A");
+    if (bHex)
+    {
+        HMENU hAs = CreatePopupMenu();
+        if (hAs != nullptr)
+        {
+            AppendMenuW(hAs, MF_STRING, ID_COPY_CARRAY, L"C &Array\tCtrl+Alt+C");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_ASMARRAY, L"A&SM Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_PHPARRAY, L"&PHP Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_JSARRAY, L"&JS Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_PYARRAY, L"P&ython Array");
+            AppendMenuW(hAs, MF_STRING, ID_COPY_B64, L"&Base64\tCtrl+Alt+B");
+            AppendMenuW(hMenu, MF_POPUP | (bSel ? 0 : MF_GRAYED), (UINT_PTR)hAs, L"C&opy as");     // the popup is destroyed with hMenu
+        }
+    }
+    else
+    {
+        AppendMenuW(hMenu, MF_STRING | (bSel ? 0 : MF_GRAYED), ID_COPY_APPEND, L"Copy Appen&d\tCtrl+Shift+C");
+    }
+    AppendMenuW(hMenu, MF_STRING | (bContent ? 0 : MF_GRAYED), ID_SELECTALL, L"Select &All\tCtrl+A");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(hMenu, MF_STRING, ID_FIND, L"&Find...\tCtrl+F");
-    AppendMenuW(hMenu, MF_STRING, ID_FINDNEXT, L"Find &Next\tF3");
-    AppendMenuW(hMenu, MF_STRING, CTX_FINDPREV, L"Find &Previous\tShift+F3");
-    AppendMenuW(hMenu, MF_STRING, ID_SEARCH_GOTO, L"&Go To...\tCtrl+G");
-    AppendMenuW(hMenu, MF_STRING, ID_EDIT_BOOKMARK, L"Toggle &Bookmark\tF2");
+    AppendMenuW(hMenu, MF_STRING | (bContent ? 0 : MF_GRAYED), ID_FIND, L"&Find...\tCtrl+F");
+    AppendMenuW(hMenu, MF_STRING | (bContent ? 0 : MF_GRAYED), ID_FINDNEXT, L"Find &Next\tF3");
+    AppendMenuW(hMenu, MF_STRING | (bContent ? 0 : MF_GRAYED), ID_FIND_PREV, L"Find &Previous\tShift+F3");
+    AppendMenuW(hMenu, MF_STRING | (bContent ? 0 : MF_GRAYED), ID_SEARCH_GOTO, L"&Go To...\tCtrl+G");
+    AppendMenuW(hMenu, MF_STRING | (bContent ? 0 : MF_GRAYED), ID_EDIT_BOOKMARK, L"Toggle &Bookmark\tF2");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(hMenu, MF_STRING | (g_tv.bWrap ? MF_CHECKED : 0), ID_VIEW_WRAP, L"&Word Wrap");
+    AppendMenuW(hMenu, MF_STRING | (bHex ? MF_GRAYED : 0) | (g_tv.bWrap ? MF_CHECKED : 0), ID_VIEW_WRAP, L"&Word Wrap");
     AppendMenuW(hMenu, MF_STRING | (g_bLineNums ? MF_CHECKED : 0), ID_VIEW_LINENUMS, L"&Line Numbers");
-    AppendMenuW(hMenu, MF_STRING | (g_bShowWS ? MF_CHECKED : 0), ID_VIEW_WHITESPACE, L"Show White&space");      // 6.18
+    AppendMenuW(hMenu, MF_STRING | (bHex ? MF_GRAYED : 0) | (g_bShowWS ? MF_CHECKED : 0), ID_VIEW_WHITESPACE, L"Show White&space");      // 6.18
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING | (bFile ? 0 : MF_GRAYED), CTX_COPYPATH, L"Copy file pat&h");
     AppendMenuW(hMenu, MF_STRING | (bFile ? 0 : MF_GRAYED), CTX_EXPLORER, L"Show in &Explorer");
     const int iCmd = (int)TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hWnd, nullptr);
     DestroyMenu(hMenu);
-    if (iCmd == CTX_FINDPREV)
-    {
-        SearchPrev(true);
-    }
-    else if (iCmd == CTX_COPYPATH)
+    if (iCmd == CTX_COPYPATH)
     {
         ClipboardSetText(hWndMain, g_szCurrentFile, lstrlenW(g_szCurrentFile), false);
     }
@@ -12926,31 +13049,139 @@ void UpdateViewMenu(void)
         CheckMenuItem(hBar, ID_VIEW_ESCEXIT, MF_BYCOMMAND | (g_bEscExit ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hBar, ID_FIND_REGEX, MF_BYCOMMAND | (g_bRegexFind ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hBar, ID_VIEW_WHITESPACE, MF_BYCOMMAND | (g_bShowWS ? MF_CHECKED : MF_UNCHECKED));                 // 6.18
-        // 6.22: the new toggles and the hex-only copy commands
+        // 6.22: the new toggles
         CheckMenuItem(hBar, ID_OPTIONS_FILTER, MF_BYCOMMAND | (g_bFilter ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(hBar, ID_OPTIONS_HILITEALL, MF_BYCOMMAND | (g_bHiliteAll ? MF_CHECKED : MF_UNCHECKED));
-        {
-            const UINT uHex = MF_BYCOMMAND | ((iView == VIEW_HEX) ? MF_ENABLED : MF_GRAYED);
-            EnableMenuItem(hBar, ID_COPY_CARRAY, uHex);
-            EnableMenuItem(hBar, ID_COPY_ASMARRAY, uHex);
-            EnableMenuItem(hBar, ID_COPY_PHPARRAY, uHex);
-            EnableMenuItem(hBar, ID_COPY_JSARRAY, uHex);
-            EnableMenuItem(hBar, ID_COPY_PYARRAY, uHex);
-            EnableMenuItem(hBar, ID_COPY_B64, uHex);
-            CheckMenuItem(hBar, ID_HEX_BPL8, MF_BYCOMMAND | (g_iHexBpl == 8 ? MF_CHECKED : MF_UNCHECKED));
-            CheckMenuItem(hBar, ID_HEX_BPL16, MF_BYCOMMAND | (g_iHexBpl == 16 ? MF_CHECKED : MF_UNCHECKED));
-            CheckMenuItem(hBar, ID_HEX_BPL32, MF_BYCOMMAND | (g_iHexBpl == 32 ? MF_CHECKED : MF_UNCHECKED));
-            CheckMenuItem(hBar, ID_HEX_GRP1, MF_BYCOMMAND | (g_iHexGroup == 1 ? MF_CHECKED : MF_UNCHECKED));
-            CheckMenuItem(hBar, ID_HEX_GRP2, MF_BYCOMMAND | (g_iHexGroup == 2 ? MF_CHECKED : MF_UNCHECKED));
-            CheckMenuItem(hBar, ID_HEX_GRP4, MF_BYCOMMAND | (g_iHexGroup == 4 ? MF_CHECKED : MF_UNCHECKED));
-            CheckMenuItem(hBar, ID_HEX_GRP8, MF_BYCOMMAND | (g_iHexGroup == 8 ? MF_CHECKED : MF_UNCHECKED));
-        }
+        CheckMenuItem(hBar, ID_VIEW_WRAPWIDTH, MF_BYCOMMAND | (g_iWrapWidth > 0 ? MF_CHECKED : MF_UNCHECKED));      // 7.04
+        CheckMenuItem(hBar, ID_VIEW_FREEZECOLS, MF_BYCOMMAND | (g_iFreezeCols > 0 ? MF_CHECKED : MF_UNCHECKED));
+        // 7.04: Hex Layout, two radio groups (bytes per line / group by). The old per-item check marks were only
+        // painted here and nothing repainted them after a click, so "Group by 8" stayed marked whatever was chosen.
+        CheckMenuRadioItem(hBar, ID_HEX_BPL8, ID_HEX_BPL32, ID_HEX_BPL8 + ((g_iHexBpl == 8) ? 0 : (g_iHexBpl == 32) ? 2 : 1), MF_BYCOMMAND);
+        CheckMenuRadioItem(hBar, ID_HEX_GRP1, ID_HEX_GRP8, ID_HEX_GRP1 + ((g_iHexGroup == 1) ? 0 : (g_iHexGroup == 2) ? 1 : (g_iHexGroup == 4) ? 2 : 3), MF_BYCOMMAND);
         HMENU hThemeMenu = FindSubMenuWithCommand(hWndMain, ID_THEME_AUTO);
         if (hThemeMenu != nullptr)
         {
             CheckMenuRadioItem(hThemeMenu, ID_THEME_AUTO, ID_THEME_DARK, ID_THEME_AUTO + g_iTheme, MF_BYCOMMAND);
         }
     }
+}
+
+
+/* -------------------------------------------------------------------------------------------- */
+// 7.04: grays the popup (the submenu item) that directly holds uCmd, wherever it hangs in the bar.
+static bool MenuEnablePopupHolding(HMENU hMenu, UINT uCmd, bool bOn)
+{
+    const int c = GetMenuItemCount(hMenu);
+    for (int i = 0; i < c; i++)
+    {
+        HMENU hSub = GetSubMenu(hMenu, i);
+        if (hSub == nullptr)
+        {
+            continue;
+        }
+        const int cSub = GetMenuItemCount(hSub);
+        for (int j = 0; j < cSub; j++)
+        {
+            if (GetMenuItemID(hSub, j) == uCmd)
+            {
+                EnableMenuItem(hMenu, (UINT)i, MF_BYPOSITION | (bOn ? MF_ENABLED : MF_GRAYED));
+                return(true);
+            }
+        }
+        if (MenuEnablePopupHolding(hSub, uCmd, bOn))
+        {
+            return(true);
+        }
+    }
+    return(false);
+}
+
+static inline void MenuEnableCmd(HMENU hBar, UINT uCmd, bool bOn)
+{
+    EnableMenuItem(hBar, uCmd, MF_BYCOMMAND | (bOn ? MF_ENABLED : MF_GRAYED));
+}
+
+// 7.04: enables / grays every command by what is on screen: no content = nothing to find, copy, export,
+// compare...; no selection = no copy; hex = no encoding, wrap, filter, whitespace; text / CSV = no hex layout
+// and no hex "copy as". (The accelerators still reach the handlers, which already refuse politely.)
+void UpdateMenuEnable(void)
+{
+    if (hWndMain == nullptr)
+    {
+        return;
+    }
+    HMENU hBar = GetMenu(hWndMain);
+    if (hBar == nullptr)
+    {
+        return;
+    }
+    const bool bBytes = (pFileBytes != nullptr && cbFile > 0);                          // something is loaded (a file or the clipboard)
+    const bool bContent = (bBytes && g_tv.pText != nullptr && g_tv.cch > 0);            // ...and it is on screen
+    const bool bFile = (bBytes && g_szCurrentFile[0] != L'\0');                          // it comes from a file on disk
+    const bool bSel = (bContent && g_tv.iSelStart != g_tv.iSelEnd);
+    const bool bHex = (iView == VIEW_HEX);
+
+    // File
+    MenuEnableCmd(hBar, ID_FILE_ADS, bFile);
+    MenuEnableCmd(hBar, ID_FILE_EXPORT, bContent);
+    MenuEnableCmd(hBar, ID_FILE_EXPORTSEL, bSel);
+    MenuEnablePopupHolding(hBar, ID_FILE_EXPORT, bContent);
+    MenuEnableCmd(hBar, ID_FILE_PROPERTIES, bFile);
+    MenuEnableCmd(hBar, ID_FILE_COMPARE, bFile);
+    MenuEnableCmd(hBar, ID_COMPARE_NEXT, bFile && g_cCmpHits > 0);
+    MenuEnableCmd(hBar, ID_COMPARE_PREV, bFile && g_cCmpHits > 0);
+    MenuEnablePopupHolding(hBar, ID_FILE_COMPARE, bFile);
+    MenuEnableCmd(hBar, ID_FILE_PRINT, bContent);
+    MenuEnableCmd(hBar, ID_FILE_VIEWCLIP, IsClipboardFormatAvailable(CF_UNICODETEXT) || IsClipboardFormatAvailable(CF_TEXT));
+
+    // Edit
+    MenuEnableCmd(hBar, ID_COPY, bSel);
+    MenuEnableCmd(hBar, ID_COPY_APPEND, bSel && !bHex);
+    MenuEnableCmd(hBar, ID_COPY_COLUMN, bSel && !bHex);
+    MenuEnableCmd(hBar, ID_COPY_CARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_ASMARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_PHPARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_JSARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_PYARRAY, bSel && bHex);
+    MenuEnableCmd(hBar, ID_COPY_B64, bSel && bHex);
+    MenuEnablePopupHolding(hBar, ID_COPY_APPEND, bSel);
+    MenuEnableCmd(hBar, ID_SELECTALL, bContent);
+    MenuEnableCmd(hBar, ID_FIND, bContent);
+    MenuEnableCmd(hBar, ID_FINDNEXT, bContent);
+    MenuEnableCmd(hBar, ID_FIND_PREV, bContent);
+    MenuEnableCmd(hBar, ID_FIND_ALL, bContent);
+    MenuEnablePopupHolding(hBar, ID_FINDNEXT, bContent);
+    MenuEnableCmd(hBar, ID_EDIT_BOOKMARK, bContent);
+    MenuEnableCmd(hBar, ID_EDIT_NEXTBOOKMARK, bContent && g_cBookmarks > 0);
+    MenuEnableCmd(hBar, ID_EDIT_PREVBOOKMARK, bContent && g_cBookmarks > 0);
+    MenuEnablePopupHolding(hBar, ID_EDIT_NEXTBOOKMARK, bContent && g_cBookmarks > 0);
+
+    // Search
+    MenuEnableCmd(hBar, ID_SEARCH_GOTO, bContent);
+    MenuEnableCmd(hBar, ID_SEARCH_BYTES, bBytes);
+    MenuEnableCmd(hBar, ID_SEARCH_STATS, bContent);
+    MenuEnableCmd(hBar, ID_INSPECT_CHAR, bContent);
+
+    // View
+    MenuEnableCmd(hBar, ID_VIEW_MODE_TEXT, bBytes);
+    MenuEnableCmd(hBar, ID_VIEW_HEX, bBytes);
+    MenuEnableCmd(hBar, ID_VIEW_CSV, bBytes);
+    MenuEnablePopupHolding(hBar, ID_VIEW_ANSI, bBytes && !bHex);                        // Encoding: meaningless on the hex dump
+    MenuEnablePopupHolding(hBar, ID_HEX_BPL8, bContent && bHex);                        // Hex Layout: hex only
+    MenuEnableCmd(hBar, ID_VIEW_NEXTPAGE, bFile && ((ULONGLONG)g_qwBase + ((cbFile < PageCapBytes()) ? cbFile : PageCapBytes())) < g_cbFileTotal);
+    MenuEnableCmd(hBar, ID_VIEW_PREVPAGE, bFile && g_qwBase > 0);
+    MenuEnableCmd(hBar, ID_VIEW_REFRESH, bFile);
+    MenuEnableCmd(hBar, ID_VIEW_TAIL, bFile);
+    MenuEnableCmd(hBar, ID_VIEW_FONTPLUS, g_iFontIndex < (int)_countof(g_iFontSizes) - 1);
+    MenuEnableCmd(hBar, ID_VIEW_FONTMINUS, g_iFontIndex > 0);
+
+    // Options
+    MenuEnableCmd(hBar, ID_VIEW_WRAP, !bHex);
+    MenuEnableCmd(hBar, ID_VIEW_WRAPWIDTH, !bHex);
+    MenuEnableCmd(hBar, ID_VIEW_FREEZECOLS, !bHex);
+    MenuEnableCmd(hBar, ID_VIEW_WHITESPACE, !bHex);
+    MenuEnableCmd(hBar, ID_OPTIONS_FILTER, bContent && !bHex);
+    MenuEnableCmd(hBar, ID_OPTIONS_HILITEALL, bContent);
 }
 
 
@@ -17077,38 +17308,10 @@ void PaintGutter(void)
     ReleaseDC(hWndMain, hdc);
 }
 
-/* -------------------------------------------------------------------------------------------- */
-// View > Word Wrap: the wrap is a pair of styles (WS_HSCROLL + ES_AUTOHSCROLL
-// off), and edit styles are chosen at creation, so the control is recreated.
-// The content ALWAYS comes back from the raw bytes of the page (ApplyView),
-// so no text is copied across controls.
-void RecreateEditControl(bool bApplyContent)
-{
-    if (hWndMain == nullptr)
-    {
-        return;
-    }
-    // V5: free the custom control's line index + view text before destroying
-    ReleaseViewContent();   // 5.2: one helper
-    if (hEdit != nullptr)
-    {
-        DestroyWindow(hEdit);
-        hEdit = nullptr;
-    }
-    // 5.4: the custom control serves EVERY view now, hex included — the
-    // standard EDIT branch (ES_MULTILINE + EM_SETHANDLE + EditSubclassProc)
-    // is gone, and with it the synchronous line-table build that made the
-    // hex view the slowest path in the program.
-    hEdit = CreateTextView(hWndMain);
-    if (hEdit == nullptr)
-    {
-        return;
-    }
-    if (hFont != nullptr) SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, MAKELPARAM(TRUE, 0));
-    UpdateHexMetrics();
-    if (bApplyContent) ApplyView();   // 5.2: loads sync the type and deliver themselves
-    SetFocus(hEdit);
-}
+// 7.03: RecreateEditControl is GONE. Its recreate-with-content branch died
+// with the standard EDIT (5.4: a view switch never recreates the control) and
+// its only remaining caller was the create-only bootstrap of
+// EnsureEditControlType, which now holds that body itself.
 
 void ToggleWrap(void)
 {
@@ -17596,6 +17799,23 @@ static long ProfileCoord(LPCWSTR pszKey)
 }
 
 
+// 7.03: the four colour keys round-trip UNSIGNED. The old read went through
+// GetPrivateProfileIntW (signed): a colour of 0x80000000 or more — near-white,
+// pale themes — came back negative and was mapped to "default" on every
+// start, so those colours could never survive a restart.
+static COLORREF ProfileColor(LPCWSTR pszKey)
+{
+    WCHAR sz[16];
+    GetPrivateProfileStringW(L"4More", pszKey, L"", sz, _countof(sz), g_szIniPath);
+    ULONGLONG qw = 0;
+    if (sz[0] == L'\0' || !ParseU64(sz, qw) || qw > 0xFFFFFFFEull)
+    {
+        return 0xFFFFFFFF;                      // absent, garbage or the sentinel: default
+    }
+    return (COLORREF)qw;
+}
+
+
 /* -------------------------------------------------------------------------------------------- */
 // The INI lives beside the executable (like 4DOS/4NT), not in a roaming
 // profile: a viewer is per-installation state, and a portable directory
@@ -17702,14 +17922,13 @@ void LoadSettings(void)
         fr.Flags |= FR_WHOLEWORD;               // the Find dialog starts checked (it reports its own flags at Find Next)
     }
     GetPrivateProfileStringW(L"Session", L"LastFile", L"", g_szLastSession, MAX_PATH, g_szIniPath);
-    // Colors: -1 in INI means default (stored as signed long); absent = default
-    {
-        long v;
-        v = ProfileLong(L"ColorWindow", -1); g_clrWindow = (v < 0) ? 0xFFFFFFFF : (COLORREF)v;
-        v = ProfileLong(L"ColorText", -1); g_clrText = (v < 0) ? 0xFFFFFFFF : (COLORREF)v;
-        v = ProfileLong(L"ColorGreenbar", -1); g_clrGreenbar = (v < 0) ? 0xFFFFFFFF : (COLORREF)v;
-        v = ProfileLong(L"ColorGutter", -1); g_clrGutter = (v < 0) ? 0xFFFFFFFF : (COLORREF)v;
-    }
+    // Colors: 0xFFFFFFFF = default; absent or out of range = default.
+    // 7.03: unsigned strings — see ProfileColor (the signed read lost every
+    // colour above 0x7FFFFFFF).
+    g_clrWindow = ProfileColor(L"ColorWindow");
+    g_clrText = ProfileColor(L"ColorText");
+    g_clrGreenbar = ProfileColor(L"ColorGreenbar");
+    g_clrGutter = ProfileColor(L"ColorGutter");
     // Window placement: all four edges must be present AND land on a
     // monitor that exists right now.
     long lLeft = ProfileCoord(L"WinLeft");      // 6.21: signed — monitors left of / above the primary
@@ -17791,10 +18010,11 @@ void SaveSettings(void)
     p += wsprintfW(p, L"WatchChanges=%d", g_bWatch ? 1 : 0) + 1;
     p += wsprintfW(p, L"ReopenLastFile=%d", g_bReopenLast ? 1 : 0) + 1;
     p += wsprintfW(p, L"WholeWord=%d", (fr.Flags & FR_WHOLEWORD) ? 1 : 0) + 1;
-    if (g_clrWindow != 0xFFFFFFFF) p += wsprintfW(p, L"ColorWindow=%d", (int)g_clrWindow) + 1;
-    if (g_clrText != 0xFFFFFFFF) p += wsprintfW(p, L"ColorText=%d", (int)g_clrText) + 1;
-    if (g_clrGreenbar != 0xFFFFFFFF) p += wsprintfW(p, L"ColorGreenbar=%d", (int)g_clrGreenbar) + 1;
-    if (g_clrGutter != 0xFFFFFFFF) p += wsprintfW(p, L"ColorGutter=%d", (int)g_clrGutter) + 1;
+    // 7.03: unsigned — see ProfileColor; the signed %d mangled colours above 0x7FFFFFFF.
+    if (g_clrWindow != 0xFFFFFFFF) p += wsprintfW(p, L"ColorWindow=%u", (unsigned)g_clrWindow) + 1;
+    if (g_clrText != 0xFFFFFFFF) p += wsprintfW(p, L"ColorText=%u", (unsigned)g_clrText) + 1;
+    if (g_clrGreenbar != 0xFFFFFFFF) p += wsprintfW(p, L"ColorGreenbar=%u", (unsigned)g_clrGreenbar) + 1;
+    if (g_clrGutter != 0xFFFFFFFF) p += wsprintfW(p, L"ColorGutter=%u", (unsigned)g_clrGutter) + 1;
     WINDOWPLACEMENT wp = {};
     wp.length = sizeof(wp);
     if (GetWindowPlacement(hWndMain, &wp))

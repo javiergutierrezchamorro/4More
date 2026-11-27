@@ -107,8 +107,9 @@
 // 6.22: whole-file find, filter, highlight-all, export, hash, properties,
 // statistics, character inspector, copy-as (hex), jump list
 #define ID_FILE_EXPORT                  32861   // File > Export View... (Ctrl+E)
-#define ID_FILE_HASH                    32862   // File > File Hash (SHA-256)...
 #define ID_FILE_PROPERTIES              32863   // File > Properties
+// 7.03: ID_FILE_HASH (32862) is GONE — Properties has owned hashing since
+// 7.00 and no menu item referenced the alias any more.
 #define ID_SEARCH_STATS                 32864   // Search > Statistics...
 #define ID_INSPECT_CHAR                 32865   // Search > Character at Caret (Ctrl+Q)
 #define ID_OPTIONS_FILTER               32866   // Options > Filter Lines (Ctrl+Shift+G)
@@ -137,6 +138,7 @@
 #define ID_FILE_COMPARE                 32885   // File > Compare with...
 #define ID_COMPARE_NEXT                 32886   // Next difference
 #define ID_COMPARE_PREV                 32887   // Previous difference
+#define ID_FIND_PREV                    32888   // Edit > Find More > Find Previous (Shift+F3)
 #define IDD_FINDINFILES                 134
 #define IDD_COMPARE                     135
 #define IDC_CMP_LIST                    1118
@@ -158,7 +160,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
 #define _APS_NEXT_RESOURCE_VALUE        136
-#define _APS_NEXT_COMMAND_VALUE         32888
+#define _APS_NEXT_COMMAND_VALUE         32889
 #define _APS_NEXT_CONTROL_VALUE         1125
 #define _APS_NEXT_SYMED_VALUE           110
 #endif

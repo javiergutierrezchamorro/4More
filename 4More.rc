@@ -1,4 +1,8 @@
-// 4More.rc — recursos del visor (Build 7.02)
+// 4More.rc — recursos del visor (Build 7.03)
+//
+// 7.03: sin cambios de recursos (solo el número de versión, que viaja en el
+// manifest y en APP_VERSION del .cpp). resource.h pierde ID_FILE_HASH, el
+// alias sin menú desde 7.00.
 //
 // 7.02: sin cambios de recursos (solo el número de versión).
 //
@@ -345,6 +349,7 @@ BEGIN
         POPUP "Find &More"
         BEGIN
             MENUITEM "Find &Next\tF3",                  ID_FINDNEXT
+            MENUITEM "Find Pre&vious\tShift+F3",        ID_FIND_PREV
             MENUITEM "Find with &Regex",                ID_FIND_REGEX
             MENUITEM "Find &All\tCtrl+Shift+F3",        ID_FIND_ALL
         END

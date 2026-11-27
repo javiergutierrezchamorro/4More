@@ -2,8 +2,26 @@
    4More - file viewer (Win32)
    Build 7.03
 
+   Version 8.03:
+   - Full-file review (not only syntax): DeliverTextToEdit OOM path leaked pLineStarts;
+     after an in-UI NormalizeNewlines the prebuilt line index is discarded (offsets stale).
+   - ToggleSplitView: larger command buffer + overflow guard on the CreateProcess line.
+   - Borland gutter contrast and prior 8.0x fixes retained.
+
+   Version 8.02:
+   - Review pass: Borland gutter/ruler labels use light cyan (were muted gray on blue
+     — low contrast). ThGutter() is the single source for that colour.
+   - ThemeApply: scroll-bar theme refresh unchanged; dead Turbo name paths gone.
+   - No functional regressions to Copy as / Syntax / selection.
+
+   Version 8.01:
+   - Theme renamed Turbo Vision -> Borland (menu, INI Theme=3, /borland; /turbo still accepted).
+   - FIX: Borland no longer applies DarkMode_Explorer to the view — scroll bars were black;
+     they use the light Explorer theme (gray/white) like classic Borland chrome.
+   - DWM title bar stays light under Borland so the frame matches the blue editor.
+
    Version 8.00:
-   - NEW: Options > Theme > Turbo Vision — classic Borland/DOS palette: blue editor
+   - NEW: Options > Theme > Borland — classic Borland/DOS palette: blue editor
      background (CGA colour 1 = RGB 0,0,170), white text, cyan selection, yellow/cyan/
      green/red syntax colours. INI Theme=3, CLI /turbo.
    - Syntax Highlight / Copy as parity, extension-based language detection, Shift+page
@@ -801,7 +819,7 @@ static void AllowDropFromUnelevated(HWND hWnd)
 }
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"8.00"
+#define APP_VERSION L"8.03"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -877,9 +895,9 @@ static volatile LONG g_lPrefetchSeq = 0;         // 6.14: bumped by every load: 
 UINT g_uAnsiCP = CP_ACP;                        // 6.18: the code page of the ANSI view (CP_ACP = the system's; the menu / /cp:N pick others)
 UINT g_uCliCP = CP_ACP;                         // 6.18: /cp:N from the command line (what every fresh load starts with)
 bool g_bShowWS = false;                         // 6.18: Options > Show Whitespace (INI ShowWhitespace, /ws)
-int g_iTheme = 0;                               // 0=Auto, 1=Light, 2=Dark, 3=Turbo Vision (INI Theme, /dark /light /turbo)
-bool g_bDark = false;                           // effective dark chrome (Dark or Turbo)
-bool g_bTurbo = false;                          // 8.00: Turbo Vision palette (blue bg, white text)
+int g_iTheme = 0;                               // 0=Auto, 1=Light, 2=Dark, 3=Borland (INI Theme, /dark /light /borland)
+bool g_bDark = false;                           // effective dark chrome (Dark / Auto+Windows dark only)
+bool g_bBorland = false;                        // 8.00/8.01: Borland palette (blue bg, white text)
 ULONGLONG g_qwPendingLine = 0;                  // 6.18: +N on the command line: the line to go to once the first load is shown
 bool g_bRememberPos = true;                    // 6.17: INI RememberPosition=0: do not reopen files where they were left
 // --- 6.22: highlight-all, filter, whole-file find, hash, watcher, session ---
@@ -1164,69 +1182,75 @@ static HBRUSH ThBrush(COLORREF c)
     return h;
 }
 
-// 8.00 Turbo Vision palette uses the classic DOS CGA/EGA/VGA text-mode colours
+// 8.00 Borland palette uses the classic DOS CGA/EGA/VGA text-mode colours
 // (IBM): Blue 1=(0,0,170), Cyan 3=(0,170,170), Light Blue 9=(85,85,255),
 // Yellow 14=(255,255,85), White 15=(255,255,255). Borland's IDE editor was
 // white text on blue; selection is typically black on cyan.
 static inline COLORREF ThWindow(void)
 {
-    if (g_bTurbo) return RGB(0, 0, 170);
+    if (g_bBorland) return RGB(0, 0, 170);
     return g_bDark ? RGB(30, 30, 30) : GetSysColor(COLOR_WINDOW);
 }
 static inline COLORREF ThText(void)
 {
-    if (g_bTurbo) return RGB(255, 255, 255);
+    if (g_bBorland) return RGB(255, 255, 255);
     return g_bDark ? RGB(224, 224, 224) : GetSysColor(COLOR_WINDOWTEXT);
 }
 static inline COLORREF ThSelBg(void)
 {
-    if (g_bTurbo) return RGB(0, 170, 170);
+    if (g_bBorland) return RGB(0, 170, 170);
     return g_bDark ? RGB(38, 79, 120) : GetSysColor(COLOR_HIGHLIGHT);
 }
 static inline COLORREF ThSelTx(void)
 {
-    if (g_bTurbo) return RGB(0, 0, 0);
+    if (g_bBorland) return RGB(0, 0, 0);
     return g_bDark ? RGB(255, 255, 255) : GetSysColor(COLOR_HIGHLIGHTTEXT);
 }
 static inline COLORREF ThGreenbar(void)
 {
-    if (g_bTurbo) return RGB(0, 0, 128);
+    if (g_bBorland) return RGB(0, 0, 128);
     return g_bDark ? RGB(38, 46, 38) : RGB(0xE8, 0xF0, 0xE8);
 }
 static inline COLORREF ThHilite(void)
 {
-    if (g_bTurbo) return RGB(0, 0, 128);
+    if (g_bBorland) return RGB(0, 0, 128);
     return g_bDark ? RGB(60, 60, 30) : RGB(0xFF, 0xF0, 0xB0);
 }
 static inline COLORREF ThBookmark(void)
 {
-    if (g_bTurbo) return RGB(0, 85, 170);
+    if (g_bBorland) return RGB(0, 85, 170);
     return g_bDark ? RGB(31, 58, 92) : RGB(0xB8, 0xD4, 0xF0);
 }
 static inline COLORREF ThWhitespace(void)
 {
-    if (g_bTurbo) return RGB(85, 85, 255);
+    if (g_bBorland) return RGB(85, 85, 255);
     return g_bDark ? RGB(100, 100, 100) : RGB(170, 170, 170);
 }
 static inline HBRUSH ThBrushWindow(void)
 {
-    if (g_bTurbo) return ThBrush(RGB(0, 0, 170));
+    if (g_bBorland) return ThBrush(RGB(0, 0, 170));
     return g_bDark ? ThBrush(RGB(30, 30, 30)) : GetSysColorBrush(COLOR_WINDOW);
 }
 static inline HBRUSH ThBrushFace(void)
 {
-    if (g_bTurbo) return ThBrush(RGB(0, 0, 128));
+    if (g_bBorland) return ThBrush(RGB(0, 0, 128));
     return g_bDark ? ThBrush(RGB(45, 45, 48)) : GetSysColorBrush(COLOR_3DFACE);
 }
 static inline HBRUSH ThBrushShadow(void)
 {
-    if (g_bTurbo) return ThBrush(RGB(0, 0, 85));
+    if (g_bBorland) return ThBrush(RGB(0, 0, 85));
     return g_bDark ? ThBrush(RGB(90, 90, 90)) : GetSysColorBrush(COLOR_3DSHADOW);
 }
 static inline HBRUSH ThBrushLight(void)
 {
-    if (g_bTurbo) return ThBrush(RGB(85, 85, 255));
+    if (g_bBorland) return ThBrush(RGB(85, 85, 255));
     return g_bDark ? ThBrush(RGB(62, 62, 62)) : GetSysColorBrush(COLOR_3DLIGHT);
+}
+// Offset / line-number column and ruler ticks. Borland needs high contrast on blue.
+static inline COLORREF ThGutter(void)
+{
+    if (g_bBorland) return RGB(85, 255, 255);   // light cyan on blue (DOS colour 11)
+    return RGB(0x8A, 0x92, 0x9E);               // muted gray-blue for light/dark
 }
 
 static bool SystemWantsDark(void)
@@ -1274,22 +1298,39 @@ static void ResolveThemeApis(void)
 
 static void ThemeApply(void)
 {
-    // Effective mode: Turbo is its own palette; Dark covers forced dark and Auto+Windows-dark.
-    g_bTurbo = (g_iTheme == 3);
-    g_bDark = g_bTurbo || (g_iTheme == 2) || (g_iTheme == 0 && SystemWantsDark());
-    // Title bar + scroll bars (DarkMode_Explorer); Turbo uses dark chrome around the blue view.
+    // Effective mode: Borland is its own palette; Dark covers forced dark and Auto+Windows-dark.
+    g_bBorland = (g_iTheme == 3);
+    // Title-bar dark chrome only for true Dark (or Auto+Windows-dark). Borland keeps a light
+    // frame so the system scroll bars stay gray/white — DarkMode_Explorer forced them black.
+    g_bDark = (g_iTheme == 2) || (g_iTheme == 0 && SystemWantsDark());
     ResolveThemeApis();
     if (s_pfnDwmSetAttr != nullptr && hWndMain != nullptr)
     {
-        const BOOL bDark = g_bDark ? TRUE : FALSE;
+        // Borland: light title bar (matches white/cyan chrome of classic Borland apps).
+        const BOOL bDark = (g_bDark && !g_bBorland) ? TRUE : FALSE;
         if (FAILED(s_pfnDwmSetAttr(hWndMain, 20, &bDark, sizeof(bDark))))
         {
             s_pfnDwmSetAttr(hWndMain, 19, &bDark, sizeof(bDark));
         }
     }
-    if (s_pfnSetWindowTheme != nullptr && hEdit != nullptr)
+    if (s_pfnSetWindowTheme != nullptr)
     {
-        s_pfnSetWindowTheme(hEdit, g_bDark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+        // Scroll bars live on the view control. DarkMode_Explorer paints them black;
+        // Borland and Light use the standard Explorer theme (light gray/white thumbs).
+        const WCHAR* pszTheme = (g_bDark && !g_bBorland) ? L"DarkMode_Explorer" : L"Explorer";
+        if (hEdit != nullptr)
+        {
+            s_pfnSetWindowTheme(hEdit, pszTheme, nullptr);
+            // Theme change does not always repaint non-client scroll bars by itself.
+            SetWindowPos(hEdit, nullptr, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+        if (hWndMain != nullptr)
+        {
+            s_pfnSetWindowTheme(hWndMain, pszTheme, nullptr);
+            SetWindowPos(hWndMain, nullptr, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
     }
     // the band brushes were created with the old colours: drop them, TV_SyncState makes new ones
     if (g_tv.hbrGreen != nullptr) { DeleteObject(g_tv.hbrGreen); g_tv.hbrGreen = nullptr; }
@@ -1314,7 +1355,7 @@ static const WCHAR s_szHexDigits[] = L"0123456789ABCDEF";
 // 5.9.7: the quiet voice of the chrome (gutter labels, ruler labels), one
 // source of truth for PaintGutter and both rulers. A muted gray-blue: the
 // labels must stay legible without fighting the content for attention.
-static const COLORREF s_clrGutter = RGB(0x8A, 0x92, 0x9E);
+static const COLORREF s_clrGutter = RGB(0x8A, 0x92, 0x9E); // fallback; prefer ThGutter()
 
 // ---- asynchronous loading ------------------------------------------------------------------
 // One job at a time. The worker thread fills the job (raw bytes, detected
@@ -1880,14 +1921,17 @@ void ToggleSplitView(void)
     {
         return;
     }
-    WCHAR szCmd[MAX_PATH * 2 + 32];
+    // Quoted exe + optional path: bound the format (wsprintf has no size).
+    WCHAR szCmd[MAX_PATH * 2 + 48];
     if (g_szCurrentFile[0] != L'\0')
     {
-        wsprintfW(szCmd, L"\"%s\" \"%s\"", szExe, g_szCurrentFile);
+        if (wsprintfW(szCmd, L"\"%s\" \"%s\"", szExe, g_szCurrentFile) >= (int)_countof(szCmd))
+            return;
     }
     else
     {
-        wsprintfW(szCmd, L"\"%s\"", szExe);
+        if (wsprintfW(szCmd, L"\"%s\"", szExe) >= (int)_countof(szCmd))
+            return;
     }
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
@@ -3179,7 +3223,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case ID_THEME_AUTO:                   // 6.18
         case ID_THEME_LIGHT:
         case ID_THEME_DARK:
-        case ID_THEME_TURBO:                  // 8.00
+        case ID_THEME_BORLAND:                // 8.00/8.01
             g_iTheme = wmId - ID_THEME_AUTO;
             ThemeApply();
             UpdateViewMenu();
@@ -3284,7 +3328,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     else if (!lstrcmpiW(pszArg + 1, L"utf32be")) { g_iForcedView = VIEW_UTF32BE; }
                     else if (!lstrcmpiW(pszArg + 1, L"dark")) { g_iTheme = 2; }
                     else if (!lstrcmpiW(pszArg + 1, L"light")) { g_iTheme = 1; }
-                    else if (!lstrcmpiW(pszArg + 1, L"turbo")) { g_iTheme = 3; }
+                    else if (!lstrcmpiW(pszArg + 1, L"borland") || !lstrcmpiW(pszArg + 1, L"turbo")) { g_iTheme = 3; }
                     else if (!lstrcmpiW(pszArg + 1, L"ws")) { g_bShowWS = true; }
                     else if (!_wcsnicmp(pszArg + 1, L"cp:", 3))
                     {
@@ -4148,7 +4192,7 @@ void ShowCommandLineHelp(void)
         L"  /csv              Format page as CSV/TSV table after load\r\n"
         L"  /freeze:N         Keep N columns fixed while scrolling (0-200)\r\n"
         L"  /ws               Show whitespace (spaces, tabs, line ends)\r\n"
-        L"  /dark /light /turbo  Theme (default: follow Windows)\r\n"
+        L"  /dark /light /borland  Theme (default: follow Windows)\r\n"
         L"\r\n"
         L"Search / navigation\r\n"
         L"  /find:text        Seed the Find pattern\r\n"
@@ -11367,8 +11411,8 @@ enum SynKind : BYTE { SYN_PLAIN = 0, SYN_KW = 1, SYN_NUM = 2, SYN_STR = 3, SYN_C
 
 static COLORREF SynColor(SynKind k)
 {
-    // Turbo Vision: DOS yellow / cyan / light-green / light-red on blue.
-    if (g_bTurbo) {
+    // Borland: DOS yellow / cyan / light-green / light-red on blue.
+    if (g_bBorland) {
         switch (k) {
         case SYN_KW: return RGB(255, 255, 85);     // yellow
         case SYN_NUM: return RGB(85, 255, 255);    // light cyan
@@ -12204,7 +12248,7 @@ static void TV_PaintMatchOverlay(HDC hdc, const TextViewState* pState, int xBase
     {
         return;
     }
-    const COLORREF clrHi = g_bTurbo ? RGB(0, 0, 128) : (g_bDark ? RGB(0x6B, 0x54, 0x1A) : RGB(0xFF, 0xE2, 0x9E));
+    const COLORREF clrHi = g_bBorland ? RGB(0, 0, 128) : (g_bDark ? RGB(0x6B, 0x54, 0x1A) : RGB(0xFF, 0xE2, 0x9E));
     HBRUSH hbr = ThBrush(clrHi);
     if (hbr == nullptr)
     {
@@ -13787,11 +13831,21 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
         pNorm = NormalizeNewlines(pText, cch, &cchNorm, cExpandKnown);
         if (pNorm == nullptr)
         {
+            delete[] pLineStarts;           // 8.03: adopt-or-free (same as hEdit==nullptr path)
             FreeViewText(pText);
             AppMsgBox(hWndMain, L"There was not enough memory to show the text.", szTitle, MB_OK | MB_ICONERROR);
             return;
         }
         cch = cchNorm;   // V5: use the normalized length from here on
+        // Prebuilt line index is relative to the raw buffer; after CRLF expansion
+        // those offsets are stale — force a rebuild in TV_SetText.
+        if (pNorm != pText && pLineStarts != nullptr)
+        {
+            delete[] pLineStarts;
+            pLineStarts = nullptr;
+            cLines = 0;
+            iMaxLineChars = -1;
+        }
     }
 
     // 5.4: ONE path for every view, hex included — the custom control takes
@@ -13969,7 +14023,7 @@ void UpdateViewMenu(void)
         HMENU hThemeMenu = FindSubMenuWithCommand(hWndMain, ID_THEME_AUTO);
         if (hThemeMenu != nullptr)
         {
-            CheckMenuRadioItem(hThemeMenu, ID_THEME_AUTO, ID_THEME_TURBO, ID_THEME_AUTO + g_iTheme, MF_BYCOMMAND);
+            CheckMenuRadioItem(hThemeMenu, ID_THEME_AUTO, ID_THEME_BORLAND, ID_THEME_AUTO + g_iTheme, MF_BYCOMMAND);
         }
     }
 }
@@ -18045,7 +18099,7 @@ void PaintGutter(void)
     // dot keeps its saturated blue: it is a mark, not a label.
     // 5.9.7: the color lives in ONE constant (s_clrGutter), shared with the
     // two rulers.
-    SetTextColor(hdc, ColorOrDefault(g_clrGutter, s_clrGutter));
+    SetTextColor(hdc, ColorOrDefault(g_clrGutter, ThGutter()));
     // Hex: how many dump lines exist (same arithmetic as BuildHexText).
     // Text: the control's own line count. Either way the control owns the
     // scroll, so both painters start at its first visible line.
@@ -18360,7 +18414,7 @@ static HGDIOBJ RulerStripBegin(HDC hdc, RECT rcRuler, HFONT hFontLabels)
     }
     HGDIOBJ hOld = SelectObject(hdc, hFontLabels);
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, s_clrGutter);
+    SetTextColor(hdc, ThGutter());
     return hOld;
 }
 

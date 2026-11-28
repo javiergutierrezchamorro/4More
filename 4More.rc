@@ -1,4 +1,6 @@
-// 4More.rc — recursos del visor (Build 8.03)
+// 4More.rc — recursos del visor (Build 8.05)
+//
+// 8.05: sin cambios de recursos (solo el número de versión).
 //
 // 8.03: Theme > Borland (ID_THEME_BORLAND). Scrollbars use light Explorer theme
 // (not DarkMode) so they stay gray/white instead of black. APP_VERSION 8.03.

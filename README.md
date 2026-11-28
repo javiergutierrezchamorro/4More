@@ -10,7 +10,7 @@ Open any file — from a 100-byte note to a multi-hundred-gigabyte log — insta
 dir | 4More               view a command’s output (stdin)
 4More huge.log /hex       open in hexadecimal
 4More app.log /tail       follow a growing log, like tail -f
-4More big.log /timing     load and show per-phase timings
+4More app.log +120        start at line 120
 ```
 
 ---
@@ -27,7 +27,7 @@ Inspired by the classic V File Viewer, 4More delivers the essential large-file e
 
 ---
 
-## Limits (Build 7.03)
+## Limits (Build 8.05)
 
 4More never tries to load an entire huge file into memory. Everything is paged.
 
@@ -80,7 +80,6 @@ The program is fully DPI-aware and works correctly on multi-monitor setups, incl
 - Asynchronous two-phase loading (64 KB detection → bounded page)
 - Worker-thread decoding, CRLF normalisation and line-index construction
 - Optional read-ahead / prefetch of neighbouring pages
-- `/timing` switch shows exact milliseconds for read / decode / CRLF / deliver
 
 ### Views & encodings
 - Text, Hexadecimal, CSV/TSV table
@@ -112,7 +111,7 @@ The program is fully DPI-aware and works correctly on multi-monitor setups, incl
 
 ### Usability
 - Recent Files (10 entries, including clipboard and stdin)
-- Themes: Auto / Light / Dark
+- Themes: Auto / Light / Dark / Borland (classic blue DOS editor)
 - Portable INI next to the executable
 - Full keyboard navigation and a rich set of accelerators
 - Status bar with regional number formatting, selection length, file percentage, encoding, etc.
@@ -124,7 +123,7 @@ The program is fully DPI-aware and works correctly on multi-monitor setups, incl
 ```
 4More [file] [/hex] [/utf8] [/unicode] [/utf16be] [/utf32] [/utf32be]
       [/ebcdic] [/ansi] [/cp:N] [/tail] [/wrap] [/lines] [/ws]
-      [/dark] [/light] [/timing]
+      [/dark] [/light]
 ```
 
 | Switch          | Effect |
@@ -137,7 +136,6 @@ The program is fully DPI-aware and works correctly on multi-monitor setups, incl
 | `/lines`        | Start with line-number gutter on |
 | `/ws`           | Show whitespace |
 | `/dark` `/light`| Force theme |
-| `/timing`       | Show load-phase timings on the status bar |
 
 Switches also accept a leading `-`.
 

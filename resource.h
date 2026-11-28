@@ -68,7 +68,6 @@
 #define ID_THEME_LIGHT                  32836
 #define ID_THEME_DARK                   32837
 #define ID_THEME_BORLAND                32838   // Options > Theme > Borland (DOS blue editor)
-#define ID_THEME_TURBO                  ID_THEME_BORLAND  // 8.01: alias
 // the code page items are consecutive: ID_ENC_CP00 + k = kCodePages[k] in 4More.cpp
 #define ID_ENC_CP00                      32840
 #define ID_ENC_CP01                      32841

@@ -1,6 +1,107 @@
 /* ============================================================================================
    4More - file viewer (Win32)
-   Build 7.03
+   Build 8.05
+
+   Version 8.05 (review round: bugs, dead code, simplification, speed):
+   - FIX (BUILD-BREAKING): this header comment TERMINATED at the Version 8.04 entry — its text
+     contained the two block-comment markers as literal prose, and the first of them closed
+     the comment early, so every changelog line after it reached the compiler as bare tokens
+     and the project did not build at all. The entry is reworded; prose in this header must
+     never contain a raw block-comment marker.
+   - FIX: cancelling a hash reported SUCCESS: the done-code was bOk ? 1 : (bCancel ? ...)
+     while bCancel can only be true when bOk already is, so ESC answered wParam==1 and the
+     box showed (and copied) four zero digests. The cancel code wins now.
+   - FIX: Export > Whole file dereferenced its mapped view with no SEH jacket (the load
+     worker and the whole-file find both have one): EXCEPTION_IN_PAGE_ERROR (a truncating
+     writer — the source opens shared-write — or a bad sector) killed the process mid-export.
+   - FIX: use-after-free on the load progress: the worker deleted the job right after
+     raising g_bLoadJobWorkerFreed, and the poll timer / preview check the flag and THEN
+     dereference g_pJob — the flag could be set between the check and the deref. The worker
+     now NEVER frees the job: the flag only announces "abandoned", the first UI reader
+     (the poll timer) deletes it, WM_DESTROY deletes it unconditionally after the join.
+   - FIX: the whole-file find read szFind / fr.Flags LIVE per chunk while the modeless
+     Find dialog rewrites them on the UI thread (wrong hit length, phantom anchors, races
+     on whole-word). The worker snapshots pattern and flags once (like the file path, the
+     view and the code page already were); FxPlainScan / WfEncodePattern take them as
+     parameters, WfScanCtx carries them.
+   - FIX: File > Properties wrote g_szPropText BEFORE checking whether a hash was already
+     running: a second Properties overwrote the text that the running hash would combine
+     with ITS digests (file B's metadata next to file A's hashes). The busy check is first.
+   - FIX: WM_DESTROY never joined the Find in Files and Compare workers (WfWorkerCancelAll
+     only signalled them): they kept walking the tree / diff during teardown and their
+     handles leaked when the final done-post had nobody to receive it. Bounded waits added.
+   - FIX: Wrap to Fixed Width preloaded a hard-coded "80": opening the dialog and pressing
+     OK silently reset the user's width. It preloads the current g_iWrapWidth (0 = off).
+   - FIX: the column ruler and the byte ruler ignored the INI's ColorGutter (they asked
+     ThGutter() directly while PaintGutter honors the override — the 5.9.7 "one colour"
+     contract). Both rulers take ColorOrDefault(g_clrGutter, ThGutter()) now.
+   - FIX: the Find Bytes "pattern too long" message said 127 bytes; the buffer accepts
+     126 (WideCharToMultiByte needs the terminator slot).
+   - FIX: a locale that answers LOCALE_SGROUPING "0" (no grouping) was forced to group by
+     thousands. Only a failed locale query falls back to 3 now; NUMBERFMTW keeps 0.
+   - FIX: UTF-16 BE text without a BOM opened as UTF-16 LE (mojibake): the detector only
+     ever read units little-endian. It now reads both orientations, and the NUL byte
+     positions (odd slot = LE, even slot = BE for Latin text) pick the orientation.
+   - FIX: AppMsgBox's main-instruction split read p[n+1..n+3] past the string's NUL when
+     the text ended first (out-of-bounds read; the look-aheads are length-bounded now).
+   - FIX: Syntax Highlight: a row that emitted more than the token cap dropped the tail
+     WITHOUT advancing the block-comment state, so an opened block-comment marker there
+     left every following row uncolored until the comment closed. The tail is scanned
+     state-only now.
+   - FIX: F3 / Ctrl+F3 on a busy loader flashed "Still busy" AND popped a wrong "Cannot
+     find on the page" box on top of it (the box fired for every decline). Only the
+     started case silences the caller now; declines keep their own status flash.
+   - FIX: PgDn in wrap mode compared VISUAL rows against LOGICAL lines to decide "at the
+     bottom edge", flipping to the next FILE page early on heavily wrapped pages. The
+     rows still below the first visible one are counted now (bounded walk).
+   - FIX: WfDecodeChunk's UTF-32 folded invalid units (lone surrogates, > 0x10FFFF) into
+     a truncating cast — 0x110000 became a NUL that also cut the regex segment walk.
+     It answers U+FFFD, exactly like the canonical Utf32ToUtf16.
+   - FIX: the Data Inspector's UTF-8 bytes for a LONE surrogate were the 3-byte CESU-8 form
+     (invalid UTF-8 presented as the bytes); it reports U+FFFD, like the decoders.
+   - PORTABILITY: FxIsWordChar / TvCharClass / FxPlainScan's ASCII fast paths compared the
+     raw wchar_t against 0x7F/0x80: MinGW's wchar_t is SIGNED 16-bit, so every character
+     at 0x8000 or above read as negative and took (or dodged) the ASCII path. All the
+     range tests cast through unsigned now (MSVC's unsigned short was already correct).
+   - SPEED: the Highlight Matches overlay scans only the visible column window when the
+     pattern is plain, wrap is off, tabs are off and no columns are frozen (a minified
+     file is ONE line of megabytes and paid the scan per repaint); FxPlainScan's inner
+     loop folds ASCII with a compare instead of a ChrCmpIW per character; the match
+     overlay hoists the chunk-end visual column out of the span loop; double-click walks
+     words with TvCharClass (the IsCharAlphaNumericW-per-character loop is gone);
+     Copy-as row breaks write their fixed characters directly instead of a wsprintfW
+     per row break.
+   - DEAD CODE: the whole-file find's hex branches (its only caller refuses VIEW_HEX —
+     Find Bytes is the whole-file search there) in WfBytesOfChars / WfCharsOfBytes and
+     the dead hex term in StartWholeFileFind's range; s_clrGutter (the colour is
+     ColorOrDefault(g_clrGutter, ThGutter()) everywhere); TV_HEX_ASCII_COL (the macro
+     only aliased HexAsciiCol()); PaintRuler's xOrigin parameter (never read);
+     CopyFmtAppendByte's unreachable capacity guard (the caller breaks at w + 24);
+     FxPlainScan's dead \0 first-character disjunct; TV_Copy's dead cch<=0 guard
+     (TV_Copy/TV_CopyAppend share one body now, TV_CopySel); the redundant forward
+     declarations of Crc32Of, FindInFilesDialog, ToggleSplitView, AnsiLabel, GoToOffset,
+     TV_BuildLineIndex, ClipboardSetText and U64ToHex; SynTokenize's bCppStyle list
+     (SynHasBlockSlash is the same set plus SQL, the disjunction reduced to it);
+     the stale 5.2 comment on CB_CHUNK (x64 chunks are 8 MB) and the stale 6.24 macro
+     comment.
+   - SIMPLIFY: the Compare result dialog's selection refresh (list cursor + preview
+     box) is one helper now (CmpShowPreview) — three identical copies stood in
+     CmpRefillList, CompareGotoHit and CompareDlgProc; TextView's WM_DESTROY releases
+     the current-line brush next to the greenbar one (same lifecycle, only hbrGreen
+     was freed); the TextView WM_PAINT answers a failed BeginPaint explicitly.
+   - Build identity unified: APP_VERSION, manifest and README all say 8.05.
+
+   Version 8.04:
+   - FIX: Syntax Highlight block-comment state (SynBlockStateAt). An apostrophe or quote inside a
+     block comment or a // comment ("don't") opened a phantom string, so the closing
+     block-comment marker was missed and the comment colouring of the rows below was wrong.
+     Line comments are now skipped, strings end at the line end, and quotes are ignored
+     while inside a block comment. (8.05 note: this entry used to contain the two comment
+     markers as literal text — the first of them CLOSED this header comment and the rest
+     of the changelog compiled as code: the build was broken. Prose in this header must
+     never contain a raw block-comment marker.)
+   - Build identity unified: APP_VERSION, manifest and README all say 8.04 (they said 8.03 / 7.03).
+   - Dead #define TDCBF_CLOSE_BUTTON removed.
 
    Version 8.03:
    - Full-file review (not only syntax): DeliverTextToEdit OOM path leaked pLineStarts;
@@ -602,7 +703,6 @@
 #define TDCBF_NO_BUTTON      0x0004
 #define TDCBF_CANCEL_BUTTON  0x0008
 #define TDCBF_RETRY_BUTTON   0x0010
-#define TDCBF_CLOSE_BUTTON   0x0020
 #endif
 #ifndef TDF_SIZE_TO_CONTENT
 #define TDF_ALLOW_DIALOG_CANCELLATION 0x0008
@@ -697,20 +797,24 @@ static int AppMsgBox(HWND hWnd, LPCWSTR pszText, LPCWSTR pszTitle, UINT uType)
         cfg.pszContent = pszText;
         cfg.dwFlags = TDF_SIZE_TO_CONTENT | TDF_ALLOW_DIALOG_CANCELLATION;
 
-        // Optional: first paragraph (up to blank line) as main instruction
+        // Optional: first paragraph (up to blank line) as main instruction.
+        // The look-aheads below are bounded by the string length: the loop
+        // used to read p[n+1..n+3] past the NUL when the text ended first
+        // (benign for literals, an out-of-bounds read all the same).
         WCHAR szInstr[240];
         szInstr[0] = 0;
         {
             const WCHAR* p = pszText;
+            const int cchText = lstrlenW(p);
             int n = 0;
             while (p[n] != 0 && n < 200)
             {
                 // blank line: \r\n\r\n or \n\n
-                if (p[n] == 13 && p[n + 1] == 10 && p[n + 2] == 13 && p[n + 3] == 10)
+                if (n + 3 < cchText && p[n] == 13 && p[n + 1] == 10 && p[n + 2] == 13 && p[n + 3] == 10)
                 {
                     break;
                 }
-                if (p[n] == 10 && p[n + 1] == 10)
+                if (n + 1 < cchText && p[n] == 10 && p[n + 1] == 10)
                 {
                     break;
                 }
@@ -819,7 +923,7 @@ static void AllowDropFromUnelevated(HWND hWnd)
 }
 
 // Version shown in Help > About. Keep in sync with 4More.rc.
-#define APP_VERSION L"8.03"
+#define APP_VERSION L"8.05"
 
 // Posted by the load worker when the job is done; lParam = LoadJob* that the
 // UI thread adopts (and frees). WM_APP keeps it clear of system messages.
@@ -1352,10 +1456,10 @@ static void ThemeApply(void)
 // The one digit table of the hexadecimal dumps, shared by the text builder
 // (BuildHexText) and the bold offset column (PaintGutter).
 static const WCHAR s_szHexDigits[] = L"0123456789ABCDEF";
-// 5.9.7: the quiet voice of the chrome (gutter labels, ruler labels), one
-// source of truth for PaintGutter and both rulers. A muted gray-blue: the
-// labels must stay legible without fighting the content for attention.
-static const COLORREF s_clrGutter = RGB(0x8A, 0x92, 0x9E); // fallback; prefer ThGutter()
+// 5.9.7: the quiet voice of the chrome (gutter labels, ruler labels). A muted gray-blue:
+// the labels must stay legible without fighting the content for attention. PaintGutter
+// and both rulers ask ThGutter() for it; a ColorGutter entry in the INI overrides it
+// (ColorOrDefault in every caller — one source of truth).
 
 // ---- asynchronous loading ------------------------------------------------------------------
 // One job at a time. The worker thread fills the job (raw bytes, detected
@@ -1463,10 +1567,12 @@ struct LoadJob
 LoadJob* g_pJob = nullptr;                      // != nullptr while a load is in flight
 HANDLE g_hLoadThread = nullptr;                 // handle of the load worker (async mode)
 volatile LONG g_bLoadCancel = 0;                // set by the UI to stop the worker
-// 5.9.9: set by the load worker itself right before it deletes the job after a
-// failed WM_APP_LOADDONE post. Lives OUTSIDE the job (the job may already be
-// freed when WM_DESTROY reads it). BeginLoadJob resets it to 0 (one job at a
-// time, UI thread); WM_DESTROY deletes g_pJob only if the worker did not.
+// 5.9.9: set by the load worker when it gave up posting its done-message
+// (20 retries over 2 s). The worker NEVER frees the job: the flag is only its
+// notice that the job is abandoned, and the next UI reader retires the
+// marker (deletes the job). Lives OUTSIDE the job for the same reason.
+// BeginLoadJob resets it to 0 (one job at a time, UI thread); WM_DESTROY
+// deletes g_pJob unconditionally after the join.
 volatile LONG g_bLoadJobWorkerFreed = 0;
 static unsigned int s_uLoadSeq = 0;             // 3.08: grows by one per job (UI thread only)
 
@@ -1531,7 +1637,7 @@ void DeliverTextToEdit(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKn
 BOOL DeliverTextSafely(WCHAR* pText, int cch, bool bPreNormalized, int cExpandKnown = -1, int* pLineStarts = nullptr, int cLines = 0, int iMaxLineChars = -1); // DeliverTextToEdit wrapped in SEH
 static WCHAR* BuildHexText(const BYTE* pBytes, DWORD cb, ULONGLONG cbAll, ULONGLONG qwBase, DWORD* pcch);
 static bool IsBinaryData(const BYTE* pBytes, DWORD cb);
-static bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb);
+static bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb, bool* pbBE);
 static int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure = nullptr);   // 6.16: the text encoding, without the binary test
 static bool LooksLikeUTF8Text(const BYTE* pBytes, DWORD cb);   // 2.99: UTF-8 sin BOM
 static WCHAR* U64ToWide(WCHAR* pwDst, ULONGLONG ull);  // 64-bit decimal, no CRT/wsprintf dependency
@@ -2077,6 +2183,21 @@ static void CmpPreviewText(WCHAR* psz, int cch)
     emit(g_cmpPrevB, g_cbCmpPrevB, L"B");
 }
 
+// The compare result dialog's selection refresh (list cursor + preview box):
+// one body for the three call sites that repeated it (a copy waiting to drift).
+static void CmpShowPreview(HWND hDlg, int iCur)
+{
+    HWND hList = GetDlgItem(hDlg, IDC_CMP_LIST);
+    if (hList != nullptr)
+    {
+        SendMessageW(hList, LB_SETCURSEL, (WPARAM)iCur, 0);
+    }
+    CmpLoadPreview(iCur);
+    WCHAR szPrev[200];
+    CmpPreviewText(szPrev, (int)_countof(szPrev));
+    SetDlgItemTextW(hDlg, IDC_CMP_PREVIEW, szPrev);
+}
+
 static void CmpRefillList(HWND hDlg)
 {
     HWND hList = GetDlgItem(hDlg, IDC_CMP_LIST);
@@ -2098,10 +2219,7 @@ static void CmpRefillList(HWND hDlg)
             g_iCmpCur = 0;
         }
         SendMessageW(hList, LB_SETCURSEL, (WPARAM)g_iCmpCur, 0);
-        CmpLoadPreview(g_iCmpCur);
-        WCHAR szPrev[200];
-        CmpPreviewText(szPrev, (int)_countof(szPrev));
-        SetDlgItemTextW(hDlg, IDC_CMP_PREVIEW, szPrev);
+        CmpShowPreview(hDlg, g_iCmpCur);
     }
     else
     {
@@ -2158,15 +2276,7 @@ void CompareGotoHit(int iDir)
     CmpGoCurrent();
     if (g_hCmpDlg != nullptr)
     {
-        HWND hList = GetDlgItem(g_hCmpDlg, IDC_CMP_LIST);
-        if (hList != nullptr)
-        {
-            SendMessageW(hList, LB_SETCURSEL, (WPARAM)g_iCmpCur, 0);
-        }
-        CmpLoadPreview(g_iCmpCur);
-        WCHAR szPrev[200];
-        CmpPreviewText(szPrev, (int)_countof(szPrev));
-        SetDlgItemTextW(g_hCmpDlg, IDC_CMP_PREVIEW, szPrev);
+        CmpShowPreview(g_hCmpDlg, g_iCmpCur);
     }
 }
 
@@ -2193,10 +2303,7 @@ INT_PTR CALLBACK CompareDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM l
                 if (i >= 0 && i < g_cCmpHits)
                 {
                     g_iCmpCur = i;
-                    CmpLoadPreview(i);
-                    WCHAR szPrev[200];
-                    CmpPreviewText(szPrev, (int)_countof(szPrev));
-                    SetDlgItemTextW(hDlg, IDC_CMP_PREVIEW, szPrev);
+                    CmpShowPreview(hDlg, i);
                     if (HIWORD(wParam) == LBN_DBLCLK)
                     {
                         CmpGoCurrent();
@@ -2538,9 +2645,6 @@ enum CopyFmt
 void CopyHexAs(int iFmt);
 static int HexAsciiCol(void);                   // 6.24
 static int HexLineChars(void);
-static DWORD Crc32Of(const BYTE* p, DWORD cb);
-void FindInFilesDialog(HWND hWnd);
-void ToggleSplitView(void);
 
 void WatchTick(void);
 static bool OffsetToCharPos(ULONGLONG qwOff, int* piChar);       // file offset -> char of the page text (hit selection)
@@ -2548,11 +2652,11 @@ static bool CharToFileOffset(int iChar, ULONGLONG* pqwOff);      // char of the 
 static bool FilterIsLineMatch(const WCHAR* p, int cch);          // the Find pattern against one line
 static void ApplyFilterToPage(void);                             // rebuild the view with the matching lines only
 static void FilterClear(bool bRebuild);                          // leave filter mode (bRebuild: restore the full page)
-static int TvCollectMatches(const WCHAR* pText, int iLS, int iLE, int* pOutLo, int* pOutHi, int cMax);  // paint overlay data
+static int TvCollectMatches(const WCHAR* pText, int iLS, int iLE, int* pOutLo, int* pOutHi, int cMax,
+    const WCHAR* szPat, DWORD dwFlags, bool bAtLineStart = true);  // paint overlay data
 static void WfWorkerCancelAll(void);                             // stop every 6.22 worker
 static void ApplyPendingBookmarks(void);                         // rebind the [Positions] bookmark offsets on their landing
 static void TV_GutterRepaint(void);                              // 5.8: one repaint door for bookmark/gutter changes
-static const WCHAR* AnsiLabel(void);            // 6.18: "ANSI" or the name of the chosen code page
 static void SetAnsiCodePage(UINT cp);
 static void ChooseView(int iNew);
 static int GutterLineAt(int x, int y);          // 6.16: logical line under a point of the offset / line-number column, -1 = none
@@ -2568,7 +2672,7 @@ void ToggleRuler(void);                         // V4: View > Ruler
 void SetWrapWidth(int iCols);                   // V4: 0 = wrap to window, >0 = wrap to N chars
 void WrapWidthDialog(HWND hWnd);                // V4: View > Wrap to Fixed Width...
 INT_PTR CALLBACK WrapWidthProc(HWND, UINT, WPARAM, LPARAM);
-void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin);   // V4: column ruler (xOrigin = gutter offset)
+void PaintRuler(HDC hdc, RECT rcRuler);   // V4: column ruler (starts at rcRuler.left)
 void PaintHexRuler(HDC hdc, RECT rcRuler, int xOrigin);   // 5.9.6: byte-position header over the hex dump
 void EnsureEditControlType(void);               // 5.2: creates the view control when it does not exist yet (7.03: absorbs RecreateEditControl)
 void ReapSearchThread(void);                    // 5.2: close a finished Find Bytes worker and re-open the gate
@@ -2615,7 +2719,7 @@ static void EditGetSel(DWORD& rdwStart, DWORD& rdwEnd);
 void GoToDialog(HWND hWnd);
 INT_PTR CALLBACK GoToProc(HWND, UINT, WPARAM, LPARAM);
 void GoToLine(ULONGLONG qwLine);                // line of the page on screen
-void GoToOffset(ULONGLONG qwOff);               // absolute byte offset: loads its page if needed
+
 void PositionAtOffset(ULONGLONG qwOff);         // caret on a byte of the current page
 bool LineAtOffset(ULONGLONG qwOff, int& riLine);
 void FindBytesDialog(HWND hWnd);
@@ -3753,8 +3857,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
             else if (wParam == 0xFFFFFFFF)
             {
-                WCHAR szText[160];
-                wsprintfW(szText, L"The whole file does not contain \"%s\".", szFind);
+                WCHAR szText[200];
+                wnsprintfW(szText, (int)_countof(szText), L"The whole file does not contain \"%s\".", szFind);
                 AppMsgBox(hWndMain, szText, L"Find", MB_OK | MB_ICONINFORMATION);
             }
             else if (wParam == 2)
@@ -3916,7 +4020,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 }
                 else
                 {
-                    PaintRuler(hdc, rcRuler, iGutter);
+                    PaintRuler(hdc, rcRuler);
                 }
                 RECT rcCorner = { 0, 0, iGutter, iHexLineH };
                 FillRect(hdc, &rcCorner, ThBrushWindow());
@@ -4017,22 +4121,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 if (WaitForSingleObject(hThread, 10000) == WAIT_OBJECT_0)
                 {
-                    // The worker is done. Whether it managed to post its
-                    // done-message or not, this delete is safe (a stale
-                    // posted job is only ever COMPARED against g_pJob,
-                    // now nullptr, never dereferenced) and the LoadJob
-                    // destructor releases any buffer the worker had
+                    // The worker is done. This delete is ALWAYS ours to make:
+                    // the worker never frees the job (it only raises
+                    // g_bLoadJobWorkerFreed when it gave up posting its
+                    // done-message and the poll retires the marker), so no
+                    // double free is possible. A stale posted job is only ever
+                    // COMPARED against g_pJob, never dereferenced, and the
+                    // LoadJob destructor releases any buffer the worker had
                     // already filled.
-                    // 5.9.9: EXCEPT when the worker itself freed the job
-                    // after a failed done-post (window already gone): it
-                    // sets g_bLoadJobWorkerFreed before the delete, so a
-                    // second delete here would be a double free. The flag
-                    // is read AFTER the successful join, so the worker's
-                    // store is visible.
-                    if (InterlockedCompareExchange(&g_bLoadJobWorkerFreed, 0, 0) == 0)
-                    {
-                        delete g_pJob;
-                    }
+                    delete g_pJob;
                 }
                 // If the worker is still stuck (a dead network path, say),
                 // abandon the job instead of hanging the exit: the process
@@ -4069,6 +4166,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             WaitForSingleObject(g_hExportThread, 10000);
             CloseHandle(g_hExportThread);
             g_hExportThread = nullptr;
+        }
+        // Find in Files (6.24) and Compare (6.25) run on their own threads
+        // with their own cancel flags: WfWorkerCancelAll signals both above;
+        // without a bounded join the threads kept walking the tree / the
+        // diff while the window tore down, and their handles leaked when the
+        // final done-post had nobody to receive it.
+        if (g_hFifThread != nullptr)
+        {
+            WaitForSingleObject(g_hFifThread, 5000);
+            CloseHandle(g_hFifThread);
+            g_hFifThread = nullptr;
+        }
+        if (g_hCmpThread != nullptr)
+        {
+            WaitForSingleObject(g_hCmpThread, 5000);
+            CloseHandle(g_hCmpThread);
+            g_hCmpThread = nullptr;
         }
         g_bExportBusy = false;
         FilterClear(false);
@@ -4338,12 +4452,9 @@ static const EbcdicTable g_EbcdicTable;
 // Forward declarations of file-scope statics defined LATER in this file (used here).
 static void PostSearchDone(UINT uCode);
 static const std::wregex* GetCachedRegex(void);
-static bool TV_BuildLineIndex(const WCHAR* pText, int cch, int** ppStarts, int* pcLines, int* piMaxLine);
-static bool ClipboardSetText(HWND hOwner, const WCHAR* psz, int cch, bool bAppend);
 static int TV_DispEnd(const WCHAR* pText, int iLS, int iLE);          // 5.9.10
 static int HexByteOfCol(int col);                                     // 6.17's byte-of-column helper (defined near FindPlainBefore)
 static const WCHAR* ViewLabel(int iV);                                // the view's name for the status / dialogs
-static void U64ToHex(WCHAR* d, ULONGLONG v);                          // hex digits, at least 8
 
 // The Find word-boundary rule: the same classes the double-click word logic uses
 // (spaces are breaks; letters/digits/_ are word; everything else is punctuation).
@@ -4351,7 +4462,7 @@ static void U64ToHex(WCHAR* d, ULONGLONG v);                          // hex dig
 // locale-aware IsCharAlphaNumericW call for the BMP Latin range.
 static inline bool FxIsWordChar(WCHAR c)
 {
-    if (c < 128)
+    if ((unsigned)c < 128)              // unsigned: MinGW's signed wchar_t makes 0x8000+ negative
     {
         return (c == L'_') ||
                (c >= L'0' && c <= L'9') ||
@@ -4404,11 +4515,8 @@ static int WfCharsOfBytes(int iView, UINT uCP, const BYTE* p, DWORD cb, ULONGLON
     {
         return (int)cb;                     // one byte -> one WCHAR, 1:1
     }
-    if (iView == VIEW_HEX)
-    {
-        return (int)(cb / (DWORD)HexBpl());   // not a text walk (hex rows are arithmetic elsewhere)
-    }
-    // VIEW_UTF8 / VIEW_ANSI
+    // VIEW_UTF8 / VIEW_ANSI. (The hex view has no text walk: both callers
+    // refuse it, the dump's layout is arithmetic the callers own.)
     DWORD i = 0;
     while (i < cb)
     {
@@ -4469,11 +4577,8 @@ static DWORD WfBytesOfChars(int iView, UINT uCP, const BYTE* p, DWORD cb, int iC
     {
         return ((DWORD)iChar > cb) ? cb : (DWORD)iChar;
     }
-    if (iView == VIEW_HEX)
-    {
-        return ((DWORD)iChar * (DWORD)(HexBpl()) > cb) ? cb : (DWORD)iChar * (DWORD)(HexBpl());
-    }
-    // VIEW_UTF8 / VIEW_ANSI
+    // VIEW_UTF8 / VIEW_ANSI. (The hex view has no text walk: both callers
+    // refuse it, the dump's layout is arithmetic the callers own.)
     DWORD i = 0;
     int c = 0;
     while (i < cb && c < iChar)
@@ -4583,21 +4688,29 @@ static bool OffsetToCharPos(ULONGLONG qwOff, int* piChar)
 }
 
 // --------------------------------------------------------------------------------------------
-// 6.22: THE FIND PATTERN AGAINST ONE LINE (plain part shared by the filter and
-// the highlight overlay). Answers the match positions; a line matches when the
-// pattern occurs in it (Match case / Whole word follow the Find dialog's flags).
+// 6.22: THE FIND PATTERN AGAINST ONE LINE (plain part shared by the filter, the
+// highlight overlay and the whole-file find). Answers the match positions; a line
+// matches when the pattern occurs in it (Match case / Whole word follow the Find
+// dialog's flags). The pattern and flags travel as parameters: the whole-file
+// worker passes its own snapshot (the modeless Find dialog rewrites the globals
+// while the scan runs), the UI paths pass szFind / fr.Flags live.
+// bAtLineStart=false marks a scan window INSIDE a line (the highlight collector
+// clips to the visible columns): i == 0 then checks the real character to the
+// left (p[-1]) instead of declaring a word boundary, and the right edge reads
+// the real next character too.
 // The regex part is in TvCollectMatches (it needs the compiled regex).
 // --------------------------------------------------------------------------------------------
-static bool FxPlainScan(const WCHAR* p, int cchLine, int* piLo, int* piHi)
+static bool FxPlainScan(const WCHAR* p, int cchLine, int* piLo, int* piHi,
+    const WCHAR* szPat, DWORD dwFlags, bool bAtLineStart = true)
 {
-    const int n = lstrlenW(szFind);
+    const int n = lstrlenW(szPat);
     if (n <= 0 || n > cchLine)
     {
         return false;
     }
-    const bool bCase = (fr.Flags & FR_MATCHCASE) != 0;
-    const bool bWord = (fr.Flags & FR_WHOLEWORD) != 0;
-    WCHAR c0 = szFind[0];
+    const bool bCase = (dwFlags & FR_MATCHCASE) != 0;
+    const bool bWord = (dwFlags & FR_WHOLEWORD) != 0;
+    WCHAR c0 = szPat[0];
     WCHAR c0Lo = c0, c0Up = c0;
     if (!bCase)
     {
@@ -4612,7 +4725,7 @@ static bool FxPlainScan(const WCHAR* p, int cchLine, int* piLo, int* piHi)
         {
             bFirst = (t == c0);
         }
-        else if (c0 < 0x80)
+        else if ((unsigned)c0 < 0x80)       // unsigned: see the fast path below (MinGW wchar_t is signed)
         {
             bFirst = (t == c0Lo || t == c0Up);
         }
@@ -4628,10 +4741,18 @@ static bool FxPlainScan(const WCHAR* p, int cchLine, int* piLo, int* piHi)
         for (int k = 1; k < n; k++)
         {
             const WCHAR a = p[i + k];
-            const WCHAR b = szFind[k];
+            const WCHAR b = szPat[k];
             if (bCase)
             {
                 if (a != b) { bEq = false; break; }
+            }
+            else if ((unsigned)(a | b) <= 0x7F)   // unsigned: MinGW's signed wchar_t would take the fast path for ≥ 0x8000
+            {
+                // ASCII fast path: fold with one compare, no locale call per
+                // character (the first character above already does the same).
+                const WCHAR la = (a >= L'A' && a <= L'Z') ? (WCHAR)(a + 32) : a;
+                const WCHAR lb = (b >= L'A' && b <= L'Z') ? (WCHAR)(b + 32) : b;
+                if (la != lb) { bEq = false; break; }
             }
             else
             {
@@ -4644,8 +4765,10 @@ static bool FxPlainScan(const WCHAR* p, int cchLine, int* piLo, int* piHi)
         }
         if (bWord)
         {
-            const bool bLeftOk = (i == 0) || !FxIsWordChar(p[i - 1]);
-            const bool bRightOk = (i + n >= cchLine) || !FxIsWordChar(p[i + n]);
+            const bool bLeftOk = (i == 0) ? (bAtLineStart || !FxIsWordChar(p[-1]))
+                : !FxIsWordChar(p[i - 1]);
+            const bool bRightOk = (i + n >= cchLine) ? (bAtLineStart || !FxIsWordChar(p[i + n]))
+                : !FxIsWordChar(p[i + n]);
             if (!bLeftOk || !bRightOk)
             {
                 continue;
@@ -4659,14 +4782,16 @@ static bool FxPlainScan(const WCHAR* p, int cchLine, int* piLo, int* piHi)
 }
 
 // --------------------------------------------------------------------------------------------
-// 6.22: matches of the Find pattern within one logical line [iLS, iLE) of the
+// 6.22: matches of the Find pattern within one line range [iLS, iLE) of the
 // page text — the data behind Options > Highlight Matches. Plain uses FxPlainScan
 // repeatedly; a regular expression is searched line-scoped (a line starts at
 // iLS: ^ works; $ ends at the line's display end). Cap: cMax spans per line.
+// szPat/dwFlags: the pattern to highlight (szFind / fr.Flags from the UI).
 // --------------------------------------------------------------------------------------------
-static int TvCollectMatches(const WCHAR* pText, int iLS, int iLE, int* pOutLo, int* pOutHi, int cMax)
+static int TvCollectMatches(const WCHAR* pText, int iLS, int iLE, int* pOutLo, int* pOutHi, int cMax,
+    const WCHAR* szPat, DWORD dwFlags, bool bAtLineStart)
 {
-    if (!g_bHiliteAll || szFind[0] == L'\0' || iView == VIEW_HEX || iLE <= iLS)
+    if (!g_bHiliteAll || szPat[0] == L'\0' || iView == VIEW_HEX || iLE <= iLS)
     {
         return 0;
     }
@@ -4730,7 +4855,8 @@ static int TvCollectMatches(const WCHAR* pText, int iLS, int iLE, int* pOutLo, i
     while (cOut < cMax)
     {
         int lo = -1, hi = -1;
-        if (!FxPlainScan(pText + iLS + iOff, iLE - iLS - iOff, &lo, &hi))
+        if (!FxPlainScan(pText + iLS + iOff, iLE - iLS - iOff, &lo, &hi, szPat, dwFlags,
+            (iOff > 0) ? false : bAtLineStart))
         {
             break;
         }
@@ -4797,7 +4923,7 @@ static bool FilterIsLineMatch(const WCHAR* p, int cch)
         return false;
     }
     int lo = -1, hi = -1;
-    return FxPlainScan(p, cch, &lo, &hi);
+    return FxPlainScan(p, cch, &lo, &hi, szFind, fr.Flags);
 }
 
 static void FilterFreeOrig(void)
@@ -4847,7 +4973,7 @@ static void ApplyFilterToPage(void)
         g_bFilter = false;
         FilterFreeOrig();
         WCHAR sz[160];
-        wsprintfW(sz, L"No line of the page matches \"%s\".", szFind);
+        wnsprintfW(sz, (int)_countof(sz), L"No line of the page matches \"%s\".", szFind);
         StatusFlash(sz);
         return;
     }
@@ -5028,7 +5154,7 @@ static ULONGLONG CaretFileOffset(void)
             (ULONGLONG)HexByteOfCol((int)(dwE - (DWORD)TV_LineIndex((iLine < 0) ? 0 : iLine)));
         if (g_cbFileTotal > 0 && qwOff >= g_cbFileTotal)
         {
-            qwOff = (g_cbFileTotal > 0) ? g_cbFileTotal - 1 : 0;
+            qwOff = g_cbFileTotal - 1;
         }
         return qwOff;
     }
@@ -5058,8 +5184,10 @@ static ULONGLONG CaretFileOffset(void)
 // --------------------------------------------------------------------------------------------
 struct WfHit { ULONGLONG qwOff; int cch; };
 
-// the byte encoding of szFind for the byte-level scan; false = use the decode path
-static bool WfEncodePattern(int iView, BYTE* pOut, DWORD cbOut, DWORD* pcbOut, bool* pbAsciiFold)
+// the byte encoding of the search pattern for the byte-level scan; false = use the
+// decode path. The pattern and the code page travel as parameters: the worker
+// snapshots both at start (the UI may rewrite szFind / switch pages mid-scan).
+static bool WfEncodePattern(int iView, const WCHAR* szPat, UINT uCP, BYTE* pOut, DWORD cbOut, DWORD* pcbOut, bool* pbAsciiFold)
 {
     *pbAsciiFold = false;
     int cb = 0;
@@ -5068,17 +5196,17 @@ static bool WfEncodePattern(int iView, BYTE* pOut, DWORD cbOut, DWORD* pcbOut, b
         // 6.23: WCHAR is 16-bit; expand surrogate pairs and cast to DWORD before >>24/16
         // (MSVC C4333 on bare WCHAR shifts of 24).
         const bool bBE = (iView == VIEW_UTF32BE);
-        const int nW = lstrlenW(szFind);
+        const int nW = lstrlenW(szPat);
         for (int k = 0; k < nW; k++)
         {
             if (cb + 4 > (int)cbOut)
             {
                 return false;
             }
-            DWORD uc = (DWORD)(WCHAR)szFind[k];
+            DWORD uc = (DWORD)(WCHAR)szPat[k];
             if (uc >= 0xD800 && uc <= 0xDBFF && k + 1 < nW)
             {
-                const DWORD lo = (DWORD)(WCHAR)szFind[k + 1];
+                const DWORD lo = (DWORD)(WCHAR)szPat[k + 1];
                 if (lo >= 0xDC00 && lo <= 0xDFFF)
                 {
                     uc = 0x10000 + ((uc - 0xD800) << 10) + (lo - 0xDC00);
@@ -5102,15 +5230,15 @@ static bool WfEncodePattern(int iView, BYTE* pOut, DWORD cbOut, DWORD* pcbOut, b
     if (iView == VIEW_UTF16 || iView == VIEW_UTF16BE)
     {
         const bool bBE = (iView == VIEW_UTF16BE);
-        const int nUnits = lstrlenW(szFind);
+        const int nUnits = lstrlenW(szPat);
         for (int k = 0; k < nUnits; k++)
         {
             if (cb + 2 > (int)cbOut)
             {
                 return false;
             }
-            const BYTE bLo = (BYTE)(szFind[k] & 0xFF);
-            const BYTE bHi = (BYTE)((szFind[k] >> 8) & 0xFF);
+            const BYTE bLo = (BYTE)(szPat[k] & 0xFF);
+            const BYTE bHi = (BYTE)((szPat[k] >> 8) & 0xFF);
             pOut[cb++] = (bBE) ? bHi : bLo;
             pOut[cb++] = (bBE) ? bLo : bHi;
         }
@@ -5120,7 +5248,7 @@ static bool WfEncodePattern(int iView, BYTE* pOut, DWORD cbOut, DWORD* pcbOut, b
     if (iView == VIEW_ANSI)
     {
         BOOL bDefUsed = FALSE;
-        cb = WideCharToMultiByte(g_uAnsiCP, 0, szFind, -1, (LPSTR)pOut, (int)cbOut - 1, nullptr, &bDefUsed);
+        cb = WideCharToMultiByte(uCP, 0, szPat, -1, (LPSTR)pOut, (int)cbOut - 1, nullptr, &bDefUsed);
         if (cb <= 0 || bDefUsed)
         {
             return false;                       // not representable: decode path
@@ -5130,7 +5258,7 @@ static bool WfEncodePattern(int iView, BYTE* pOut, DWORD cbOut, DWORD* pcbOut, b
     }
     if (iView == VIEW_UTF8)
     {
-        cb = WideCharToMultiByte(CP_UTF8, 0, szFind, -1, (LPSTR)pOut, (int)cbOut - 1, nullptr, nullptr);
+        cb = WideCharToMultiByte(CP_UTF8, 0, szPat, -1, (LPSTR)pOut, (int)cbOut - 1, nullptr, nullptr);
         if (cb <= 0)
         {
             return false;
@@ -5276,9 +5404,13 @@ static bool WfDecodeChunk(int iView, UINT uCP, const BYTE* p, DWORD cb, ULONGLON
                 pText[cch++] = (WCHAR)(0xD800 + (u2 >> 10));
                 pText[cch++] = (WCHAR)(0xDC00 + (u2 & 0x3FF));
             }
-            else if (cch < (int)cb)
+            else
             {
-                pText[cch++] = (WCHAR)uc;       // BMP, or a lone surrogate folded in
+                // BMP, or an invalid unit (a lone surrogate, above 0x10FFFF):
+                // the canonical UTF-32 decoder (Utf32ToUtf16) answers U+FFFD
+                // for those — the truncating cast used to fold 0x110000 into
+                // a NUL, which also cut the regex segment walk short.
+                pText[cch++] = (uc < 0xD800 || (uc > 0xDFFF && uc < 0x10000)) ? (WCHAR)uc : (WCHAR)0xFFFD;
             }
         }
     }
@@ -5302,9 +5434,14 @@ static bool WfDecodeChunk(int iView, UINT uCP, const BYTE* p, DWORD cb, ULONGLON
     return true;
 }
 
-// the scan on the DECODED chunk: plain (whole-word / non-ASCII fold) or regex
+// the scan on the DECODED chunk: plain (whole-word / non-ASCII fold) or regex.
+// szPat/dwFlags are the worker's private snapshot of the Find pattern and the
+// Find-dialog flags: the modeless Find dialog rewrites szFind/fr.Flags on the
+// UI thread while this scan runs, and the old live reads produced hits with
+// the wrong length, phantom anchors and races on the whole-word flag.
 static bool WfScanChunkText(const WfChunk* pChunk, int iView, UINT uCP, const std::wregex* pre,
-    ULONGLONG qwChunkBase, const BYTE* pRaw, DWORD cbRaw, WfHit* pHit)
+    ULONGLONG qwChunkBase, const BYTE* pRaw, DWORD cbRaw, WfHit* pHit,
+    const WCHAR* szPat, DWORD dwFlags)
 {
     const WCHAR* pT = pChunk->pText;
     const int cchT = pChunk->cch;
@@ -5319,13 +5456,14 @@ static bool WfScanChunkText(const WfChunk* pChunk, int iView, UINT uCP, const st
         {
             const WCHAR* pSeg = pT;
             const WCHAR* pEnd = pT + cchT;
+            const bool bAnchored = (wcschr(szPat, L'^') != nullptr || wcschr(szPat, L'$') != nullptr);   // once per chunk, not per segment
             while (pSeg < pEnd && iHit < 0)
             {
                 const WCHAR* z = (const WCHAR*)wmemchr(pSeg, L'\0', (size_t)(pEnd - pSeg));
                 const WCHAR* segEnd = (z != nullptr) ? z : pEnd;
                 std::wcmatch m;
                 // line-scoped when the pattern carries an anchor (6.06 rule)
-                if (wcschr(szFind, L'^') != nullptr || wcschr(szFind, L'$') != nullptr)
+                if (bAnchored)
                 {
                     const WCHAR* pL = pSeg;
                     for (;;)
@@ -5375,12 +5513,12 @@ static bool WfScanChunkText(const WfChunk* pChunk, int iView, UINT uCP, const st
     }
     else
     {
-        // FxPlainScan applies Match case / Whole word itself (the flags of the
-        // Find dialog); the chunk starts on a line boundary, so a candidate at
+        // FxPlainScan applies Match case / Whole word itself (the worker's own
+        // flag snapshot); the chunk starts on a line boundary, so a candidate at
         // its edge sees a correct word break on the left. (7.03: the old loop
         // never advanced past its first iteration — iScan stayed 0.)
         int lo = -1, hi = -1;
-        if (FxPlainScan(pT, cchT, &lo, &hi))
+        if (FxPlainScan(pT, cchT, &lo, &hi, szPat, dwFlags))
         {
             iHit = lo;
             cchHit = hi - lo;
@@ -5470,6 +5608,8 @@ struct WfScanCtx
     bool bByteScan;
     bool bFold;
     const std::wregex* pre;
+    const WCHAR* szPat;      // the worker's private pattern snapshot (see WfScanChunkText)
+    DWORD dwFlags;           // ... and its Find-dialog flags snapshot
 };
 
 static void WfScanBody(WfScanCtx* c, bool* pbFound, bool* pbCancel, bool* pbError)
@@ -5490,6 +5630,8 @@ static void WfScanBody(WfScanCtx* c, bool* pbFound, bool* pbCancel, bool* pbErro
     const BYTE* abPat = c->abPat;
     const DWORD cbPat = c->cbPat;
     const std::wregex* pre = c->pre;
+    const WCHAR* szPat = c->szPat;
+    const DWORD dwFlags = c->dwFlags;
     __try
     {
 
@@ -5558,7 +5700,7 @@ static void WfScanBody(WfScanCtx* c, bool* pbFound, bool* pbCancel, bool* pbErro
                 if (qwHit != (ULONGLONG)-1)
                 {
                     hit.qwOff = qwHit;
-                    hit.cch = lstrlenW(szFind);
+                    hit.cch = lstrlenW(szPat);
                 }
             }
             else
@@ -5569,7 +5711,7 @@ static void WfScanBody(WfScanCtx* c, bool* pbFound, bool* pbCancel, bool* pbErro
                     *pbError = true;
                     break;
                 }
-                (void)WfScanChunkText(&chunk, iViewWf, uCPWf, pre, qwPos, pChunk, cbChunk, &hit);
+                (void)WfScanChunkText(&chunk, iViewWf, uCPWf, pre, qwPos, pChunk, cbChunk, &hit, szPat, dwFlags);
                 delete[] chunk.pText;
             }
             if (hit.qwOff != (ULONGLONG)-1)
@@ -5609,20 +5751,26 @@ unsigned __stdcall WFSearchThreadProc(void* pParameter)
     const int iViewWf = iView;                  // snapshot: the UI may switch views mid-scan
     const UINT uCPWf = g_uAnsiCP;
     const bool bRegex = g_bRegexFind;
+    // PRIVATE snapshots of the pattern and the Find-dialog flags: the modeless
+    // Find dialog rewrites szFind / fr.Flags on the UI thread while this scan
+    // runs (the old code re-read them per chunk).
+    WCHAR szPat[128];
+    (void)lstrcpynW(szPat, szFind, (int)_countof(szPat));
+    const DWORD dwFlags = fr.Flags;
     const std::wregex* pre = nullptr;
     std::wregex rxLocal;
-    if (bRegex && szFind[0] != L'\0')
+    if (bRegex && szPat[0] != L'\0')
     {
         // a PRIVATE compiled regex: the UI thread may re-build the shared cache
         // while this worker is running (GetCachedRegex is not thread-safe to rebuild)
         try
         {
             std::regex_constants::syntax_option_type opts = std::regex_constants::ECMAScript;
-            if ((fr.Flags & FR_MATCHCASE) == 0)
+            if ((dwFlags & FR_MATCHCASE) == 0)
             {
                 opts |= std::regex_constants::icase;
             }
-            rxLocal.assign(szFind, opts);
+            rxLocal.assign(szPat, opts);
             pre = &rxLocal;
         }
         catch (...)
@@ -5640,15 +5788,15 @@ unsigned __stdcall WFSearchThreadProc(void* pParameter)
     DWORD cbPat = 0;
     bool bByteScan = false;
     bool bFold = false;
-    if (pre == nullptr && !(fr.Flags & FR_WHOLEWORD))
+    if (pre == nullptr && !(dwFlags & FR_WHOLEWORD))
     {
-        bByteScan = WfEncodePattern(iViewWf, abPat, sizeof(abPat), &cbPat, &bFold);
-        if (bByteScan && !(fr.Flags & FR_MATCHCASE))
+        bByteScan = WfEncodePattern(iViewWf, szPat, uCPWf, abPat, sizeof(abPat), &cbPat, &bFold);
+        if (bByteScan && !(dwFlags & FR_MATCHCASE))
         {
             bool bAsciiOnly = true;
-            for (int k = 0; szFind[k] != L'\0'; k++)
+            for (int k = 0; szPat[k] != L'\0'; k++)
             {
-                if (szFind[k] >= 0x80) { bAsciiOnly = false; break; }
+                if (szPat[k] >= 0x80) { bAsciiOnly = false; break; }
             }
             if (!bAsciiOnly)
             {
@@ -5699,6 +5847,8 @@ unsigned __stdcall WFSearchThreadProc(void* pParameter)
         ctx.bByteScan = bByteScan;
         ctx.bFold = bFold;
         ctx.pre = pre;
+        ctx.szPat = szPat;
+        ctx.dwFlags = dwFlags;
         WfScanBody(&ctx, &bFound, &bCancel, &bError);
     }
     delete[] pBuf;
@@ -5716,21 +5866,24 @@ unsigned __stdcall WFSearchThreadProc(void* pParameter)
 }
 
 // F3 found nothing on the page: continue on the WHOLE file (a real file only).
-static void StartWholeFileFind(void)
+// Returns true when the worker actually started; a decline already flashed its
+// own status (no file, still busy, out of memory) and the caller must not
+// stack a wrong "Cannot find on the page" box on top of it.
+static bool StartWholeFileFind(void)
 {
     if (g_szCurrentFile[0] == L'\0')
     {
-        return;                                 // stdin / clipboard: the caller keeps its message
+        return false;                           // stdin / clipboard: the caller keeps its message
     }
     if (g_pJob != nullptr || g_bInByteSearch)
     {
         StatusFlash(L"Still busy; try again in a moment.");
-        return;
+        return false;
     }
     g_bWFActive = true;
     g_qwWFHit = (ULONGLONG)-1;
     g_cchWFHit = 0;
-    g_qwWFRange = (iView == VIEW_HEX || !g_bFilter) ? CaretFileOffset() : g_qwBase;
+    g_qwWFRange = (!g_bFilter) ? CaretFileOffset() : g_qwBase;    // (the hex term was dead: the caller refuses VIEW_HEX — Find Bytes is the whole-file search there)
     (void)lstrcpynW(g_szWFFile, g_szCurrentFile, MAX_PATH);     // the worker reads its OWN snapshot (a page load may land mid-scan)
     InterlockedExchange(&g_bSearchCancel, 0);
     g_bInByteSearch = true;
@@ -5740,11 +5893,10 @@ static void StartWholeFileFind(void)
         g_bInByteSearch = false;
         g_bWFActive = false;
         StatusFlash(L"Not enough memory to start the search.");
+        return false;
     }
-    else
-    {
-        g_hSearchThread = (HANDLE)uThread;
-    }
+    g_hSearchThread = (HANDLE)uThread;
+    return true;
 }
 
 // --------------------------------------------------------------------------------------------
@@ -6008,7 +6160,7 @@ unsigned __stdcall HashThreadProc(void* pParameter)
             p += wsprintfW(p, L"\r\nCRC-32: %08X", crcFinal);
         }
     }
-    PostMessage(hWndMain, WM_APP_HASHDONE, (WPARAM)(bOk ? 1 : (bCancel ? 0 : 0xFFFFFFFF)), 0);
+    PostMessage(hWndMain, WM_APP_HASHDONE, (WPARAM)(bCancel ? 0 : (bOk ? 1 : 0xFFFFFFFF)), 0);
     return(0);
 }
 
@@ -6026,7 +6178,9 @@ static void FxFileTimeText(const FILETIME& ft, WCHAR* psz, int cch)
         if (GetDateFormatW(LOCALE_USER_DEFAULT, DATE_SHORTDATE, &st, nullptr, szDate, (int)_countof(szDate)) > 0 &&
             GetTimeFormatW(LOCALE_USER_DEFAULT, 0, &st, nullptr, szTime, (int)_countof(szTime)) > 0)
         {
-            wsprintfW(psz, L"%s %s", szDate, szTime);
+            // wnsprintfW honors the caller's buffer: two custom long date/time
+            // formats could outgrow it (the cch parameter was never used).
+            wnsprintfW(psz, cch, L"%s %s", szDate, szTime);
         }
     }
 }
@@ -6069,16 +6223,19 @@ void ShowFileProperties(void)
     WCHAR szPage[160];
     wsprintfW(szPage, L"On screen: %s  |  %I64u..%I64u of %I64u bytes",
         ViewLabel(iView), g_qwBase, g_qwBase + (ULONGLONG)cbFile, g_cbFileTotal);
-    // 6.27: one dialog only — stash metadata, hash worker completes the box
-    wsprintfW(g_szPropText,
-        L"%s\r\n\r\nSize: %s bytes (%I64u)\r\nCreated:   %s\r\nModified:  %s\r\nAccessed:  %s\r\nAttributes: %s\r\n\r\n%s\r\nBookmarks on this page: %d",
-        g_szCurrentFile, szSize, cbSize, szCreated, szWritten, szAccessed, szAttr, szPage, g_cBookmarks);
+    // 6.27: one dialog only — stash metadata, hash worker completes the box.
+    // The busy check comes FIRST: writing g_szPropText before it let a second
+    // Properties overwrite the text a running hash was going to combine with
+    // ITS digests (file B's metadata next to file A's hashes).
     if (g_hHashThread != nullptr)
     {
         StatusFlash(L"A hash is already running; Properties will show when it finishes.");
         g_bPropPending = true;
         return;
     }
+    wsprintfW(g_szPropText,
+        L"%s\r\n\r\nSize: %s bytes (%I64u)\r\nCreated:   %s\r\nModified:  %s\r\nAccessed:  %s\r\nAttributes: %s\r\n\r\n%s\r\nBookmarks on this page: %d",
+        g_szCurrentFile, szSize, cbSize, szCreated, szWritten, szAccessed, szAttr, szPage, g_cBookmarks);
     StatusFlash(L"Properties: computing hashes... (ESC cancels)");
     g_bPropPending = true;
     InterlockedExchange(&g_bHashCancel, 0);
@@ -6274,11 +6431,15 @@ void ShowCharInspector(void)
     BYTE abUtf8[4];
     int cbUtf8 = 0;
     {
-        // the UTF-8 bytes of the code point (manual, deterministic)
-        if (uc < 0x80) { abUtf8[cbUtf8++] = (BYTE)uc; }
-        else if (uc < 0x800) { abUtf8[cbUtf8++] = (BYTE)(0xC0 | (uc >> 6)); abUtf8[cbUtf8++] = (BYTE)(0x80 | (uc & 0x3F)); }
-        else if (uc < 0x10000) { abUtf8[cbUtf8++] = (BYTE)(0xE0 | (uc >> 12)); abUtf8[cbUtf8++] = (BYTE)(0x80 | ((uc >> 6) & 0x3F)); abUtf8[cbUtf8++] = (BYTE)(0x80 | (uc & 0x3F)); }
-        else { abUtf8[cbUtf8++] = (BYTE)(0xF0 | (uc >> 18)); abUtf8[cbUtf8++] = (BYTE)(0x80 | ((uc >> 12) & 0x3F)); abUtf8[cbUtf8++] = (BYTE)(0x80 | ((uc >> 6) & 0x3F)); abUtf8[cbUtf8++] = (BYTE)(0x80 | (uc & 0x3F)); }
+        // the UTF-8 bytes of the code point (manual, deterministic). A LONE
+        // surrogate (an unpaired half, not a character) answered its 3-byte
+        // CESU-8 form — invalid UTF-8 shown as "the UTF-8 bytes": it reports
+        // U+FFFD, exactly like the text decoders.
+        const DWORD uEnc = (uc >= 0xD800 && uc <= 0xDFFF) ? 0xFFFD : uc;
+        if (uEnc < 0x80) { abUtf8[cbUtf8++] = (BYTE)uEnc; }
+        else if (uEnc < 0x800) { abUtf8[cbUtf8++] = (BYTE)(0xC0 | (uEnc >> 6)); abUtf8[cbUtf8++] = (BYTE)(0x80 | (uEnc & 0x3F)); }
+        else if (uEnc < 0x10000) { abUtf8[cbUtf8++] = (BYTE)(0xE0 | (uEnc >> 12)); abUtf8[cbUtf8++] = (BYTE)(0x80 | ((uEnc >> 6) & 0x3F)); abUtf8[cbUtf8++] = (BYTE)(0x80 | (uEnc & 0x3F)); }
+        else { abUtf8[cbUtf8++] = (BYTE)(0xF0 | (uEnc >> 18)); abUtf8[cbUtf8++] = (BYTE)(0x80 | ((uEnc >> 12) & 0x3F)); abUtf8[cbUtf8++] = (BYTE)(0x80 | ((uEnc >> 6) & 0x3F)); abUtf8[cbUtf8++] = (BYTE)(0x80 | (uEnc & 0x3F)); }
     }
     WCHAR szU8[40];
     {
@@ -6439,7 +6600,8 @@ static int FxHexStringEncode(const BYTE* p, DWORD cb, WCHAR* pszOut, int cchOut)
 
 static int CopyFmtAppendByte(WCHAR* psz, int w, int cchCap, int iFmt, BYTE b, bool bSep)
 {
-    if (w + 18 >= cchCap) return w;
+    // No capacity check here: the one caller breaks out of its loop while
+    // w + 24 < cchCap, and the largest single emission is well below 24.
     if (bSep) { psz[w++] = L','; psz[w++] = L' '; }
     if (iFmt == COPYFMT_ASM)
     {
@@ -6599,12 +6761,20 @@ void CopyHexAs(int iFmt)
         if (w + 24 >= cchCap) break;
         if (iFmt == COPYFMT_ASM)
         {
-            if (i > 0 && (i % 16) == 0) { w += wsprintfW(psz + w, L"\r\ndb "); w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false); }
+            if (i > 0 && (i % 16) == 0)
+            {
+                psz[w++] = L'\r'; psz[w++] = L'\n'; psz[w++] = L'd'; psz[w++] = L'b'; psz[w++] = L' ';
+                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false);
+            }
             else w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], (i % 16) != 0);
         }
         else
         {
-            if (i > 0 && (i % 16) == 0) { w += wsprintfW(psz + w, L",\r\n"); w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false); }
+            if (i > 0 && (i % 16) == 0)
+            {
+                psz[w++] = L','; psz[w++] = L'\r'; psz[w++] = L'\n';    // fixed text: no wsprintfW per row break
+                w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], false);
+            }
             else w = CopyFmtAppendByte(psz, w, cchCap, iFmt, pBytes[i], i > 0);
         }
     }
@@ -6827,6 +6997,13 @@ unsigned __stdcall ExportThreadProc(void* pParameter)
                         ULONGLONG qwPos = 0;
                         bool bPrevCR = false;
                         ULONGLONG qwNextPost = GetTickCount64() + 100;
+                        // The walk dereferences the mapped view, exactly like the
+                        // load worker and the whole-file find — with the same SEH
+                        // jacket (EXCEPTION_IN_PAGE_ERROR: the source is opened
+                        // shared-write, so a truncating writer or a bad sector
+                        // would otherwise kill the process mid-export).
+                        __try
+                        {
                         while (qwPos < cbSize)
                         {
                             if (InterlockedExchange(&g_bExportCancel, 0) != 0)
@@ -6871,6 +7048,11 @@ unsigned __stdcall ExportThreadProc(void* pParameter)
                                 PostMessage(hWndMain, WM_APP_EXPORTPROG, (WPARAM)(DWORD)qwWritten, (LPARAM)(DWORD)(qwWritten >> 32));
                                 qwNextPost = qwNow + 100;
                             }
+                        }
+                        }
+                        __except (EXCEPTION_EXECUTE_HANDLER)
+                        {
+                            uResult = 0xFFFFFFFF;       // the walk died on the mapped view
                         }
                         if (bPrevCR)
                         {
@@ -7405,12 +7587,15 @@ unsigned __stdcall LoadThreadProc(void* pParameter)
     // is gone, the job would leak and g_pJob would stay non-null forever,
     // wedging every subsequent load with "Still loading the previous file".
     // 5.9.9: a full queue is transient, so retry for up to 2 s before giving
-    // up. And when the post finally fails because the window DIED, WM_DESTROY
-    // is about to (or already did) wait for this thread and then delete the
-    // job: freeing it here too would be a double free. The worker marks
-    // g_bLoadJobWorkerFreed BEFORE the delete (the job itself may be gone when
-    // WM_DESTROY reads the flag) and never frees when it was cancelled — a
-    // cancel always means the UI thread owns the job after the join.
+    // up. When the post finally fails, the worker raises g_bLoadJobWorkerFreed
+    // and LEAVES: it never frees the job. Deleting here raced the UI's
+    // flag-then-dereference pattern (poll timer, preview): the UI could
+    // check the flag, see 0, and dereference a job the worker was freeing.
+    // With the worker not freeing, every reader's "flag check then deref"
+    // is airtight: flag 0 = the job is alive (only the UI frees it), and the
+    // first reader that sees 1 retires the marker. WM_DESTROY deletes the
+    // job unconditionally after the join; a cancel always means the UI
+    // thread owns the job after the join too.
     if (!PostMessage(pJob->hWnd, WM_APP_LOADDONE, 0, (LPARAM)pJob))
     {
         int nRetry = 0;
@@ -7425,8 +7610,7 @@ unsigned __stdcall LoadThreadProc(void* pParameter)
         }
         if (!LoadCancelled())
         {
-            InterlockedExchange(&g_bLoadJobWorkerFreed, 1);
-            delete pJob;                    // nobody will adopt it: free here
+            InterlockedExchange(&g_bLoadJobWorkerFreed, 1);   // abandoned: the UI retires (deletes) the marker
         }
     }
     return 0;                               // the exit code is never inspected
@@ -8915,9 +9099,9 @@ static LocaleInfo BuildLocaleInfo(void)
     }
     // LOCALE_SGROUPING spells groups right to left, ";"-terminated
     // ("3;0" for es-ES/US, "12;0" for hi-IN): keep the digits up to the
-    // first ';' and let NUMBERFMTW do what it always did. 0 = a locale
-    // that answered nothing useful: group by thousands, like the whole
-    // world's default.
+    // first ';' and let NUMBERFMTW do what it always did. Only a locale
+    // that answered nothing useful falls back to grouping by thousands;
+    // an explicit "0" (no grouping) is NUMBERFMTW's own value and survives.
     li.dwGrouping = 0;
     WCHAR szGrouping[8];
     int cGroup = GetLocaleInfoW(LOCALE_USER_DEFAULT, LOCALE_SGROUPING, szGrouping, 8);
@@ -8932,9 +9116,11 @@ static LocaleInfo BuildLocaleInfo(void)
             break;                  // the ';' (or anything else) ends the useful part
         }
     }
-    if (li.dwGrouping == 0)
+    if (cGroup <= 0)
     {
-        li.dwGrouping = 3;
+        li.dwGrouping = 3;          // the locale answered nothing useful: the usual thousands default
+        // (a locale that answered "0" — NO grouping — keeps 0: NUMBERFMTW's
+        // own "do not group" value, which the forced 3 used to override)
     }
     return(li);
 }
@@ -9007,7 +9193,7 @@ static bool LooksLikeUTF32Text(const BYTE* p, DWORD cb, bool* pbBE)
 // NOTE: the old IsTextUnicode (Advapi32) is gone. It was happy to call an
 // executable header "Unicode" (MZ/PE headers are full of 00 00 words) and
 // its statistical results vary between Windows versions.
-static bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
+static bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb, bool* pbBE)
 {
     if (cb < 2)
     {
@@ -9015,7 +9201,12 @@ static bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
     }
     // 5.2: the NUL count goes through a memchr chain (the CRT's SIMD scan)
     // instead of a per-byte walk: ~4x on the 64 KB detection window.
+    // 8.05: the walk also counts WHERE the NULs sit. Latin text in UTF-16 LE
+    // carries its NULs in the ODD byte slot (the high half of each unit), the
+    // same text in UTF-16 BE carries them in the EVEN slot — the orientation
+    // a file without a BOM used to be guessed from, always answering LE.
     DWORD cZero = 0;
+    DWORD cZeroEven = 0;
     const BYTE* pZ = pBytes;
     const BYTE* pZEnd = pBytes + cb;
     for (;;)
@@ -9026,6 +9217,7 @@ static bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
             break;
         }
         cZero++;
+        cZeroEven += (DWORD)(((pHit - pBytes) & 1) == 0);
         pZ = pHit + 1;
     }
     if ((unsigned long long) cZero * 100 < (unsigned long long) cb * 25)   // under ~25% NULs: not UTF-16 text
@@ -9033,20 +9225,36 @@ static bool LooksLikeUTF16Text(const BYTE* pBytes, DWORD cb)
         return(false);
     }
     DWORD cwch = cb / 2;
-    DWORD cBad = 0;
+    DWORD cBadLE = 0;
+    DWORD cBadBE = 0;
     for (DWORD i = 0; i < cwch; i++)
     {
-        WCHAR wch = (WCHAR)(pBytes[i * 2] | ((WCHAR)pBytes[i * 2 + 1] << 8));
-        if (wch == 0x09 || wch == 0x0A || wch == 0x0C || wch == 0x0D || wch == 0x1B)
-        {
-            continue;                       // accepted text controls
-        }
-        if (wch < 0x20 || wch == 0x7F || wch >= 0xFFF0)
-        {
-            cBad++;                         // controls + DEL + the FFF0..FFFF zone
-        }
+        const BYTE bLo = pBytes[i * 2];
+        const BYTE bHi = pBytes[i * 2 + 1];
+        const WCHAR wchLE = (WCHAR)(bLo | ((WCHAR)bHi << 8));
+        const WCHAR wchBE = (WCHAR)(bHi | ((WCHAR)bLo << 8));
+        // accepted text controls; controls + DEL + the FFF0..FFFF zone are bad
+        const bool bOkLE = (wchLE == 0x09 || wchLE == 0x0A || wchLE == 0x0C || wchLE == 0x0D || wchLE == 0x1B);
+        const bool bOkBE = (wchBE == 0x09 || wchBE == 0x0A || wchBE == 0x0C || wchBE == 0x0D || wchBE == 0x1B);
+        if (!bOkLE && (wchLE < 0x20 || wchLE == 0x7F || wchLE >= 0xFFF0)) cBadLE++;
+        if (!bOkBE && (wchBE < 0x20 || wchBE == 0x7F || wchBE >= 0xFFF0)) cBadBE++;
     }
-    return((unsigned long long) cBad * 10 <= cwch); // >= 90% printable
+    const bool bLEPass = ((unsigned long long) cBadLE * 10 <= cwch);        // >= 90% printable
+    const bool bBEPass = ((unsigned long long) cBadBE * 10 <= cwch);
+    if (!bLEPass && !bBEPass)
+    {
+        return(false);
+    }
+    // Orientation: the NUL positions win (they are the signal that survives
+    // CJK text, where both readings of a unit are "printable"); the badness
+    // count only decides when the NULs are equally split.
+    const bool bBE = (cZeroEven > cZero - cZeroEven) ? true :
+        (cZeroEven < cZero - cZeroEven) ? false : (cBadBE < cBadLE);
+    if (pbBE != nullptr)
+    {
+        *pbBE = bBE;
+    }
+    return true;
 }
 
 
@@ -9172,9 +9380,10 @@ static int DetectTextView(const BYTE* pBytes, DWORD cb, bool* pbSure)
     {
         return(bBE32 ? VIEW_UTF32BE : VIEW_UTF32);      // 6.19: UTF-32 sin BOM
     }
-    if (LooksLikeUTF16Text(pBytes, cbWin))
+    bool bBE16 = false;
+    if (LooksLikeUTF16Text(pBytes, cbWin, &bBE16))
     {
-        return(VIEW_UTF16);                     // UTF-16 sin BOM
+        return(bBE16 ? VIEW_UTF16BE : VIEW_UTF16);      // UTF-16 sin BOM (either byte order)
     }
     if (pbSure != nullptr) *pbSure = false;
     return(LooksLikeUTF8Text(pBytes, cbWin) ? VIEW_UTF8 : VIEW_ANSI);     // UTF-8 sin BOM (2.99) / ANSI (active code page)
@@ -11084,29 +11293,32 @@ static bool ClipboardSetText(HWND hOwner, const WCHAR* psz, int cch, bool bAppen
 }
 
 
+// Copy / Copy Append share one body: both send the selection to the
+// clipboard, Append just chains onto what is already there and flashes.
+static void TV_CopySel(bool bAppend)
+{
+    if (g_tv.iSelStart == g_tv.iSelEnd || g_tv.pText == nullptr)
+    {
+        if (bAppend) StatusFlash(L"Nothing selected to append.");
+        return;
+    }
+    const int iStart = TV_LoI(g_tv.iSelStart, g_tv.iSelEnd);
+    const int iEnd = TV_HiI(g_tv.iSelStart, g_tv.iSelEnd);
+    const bool bOk = ClipboardSetText(g_tv.hWnd, g_tv.pText + iStart, iEnd - iStart, bAppend);
+    if (bAppend && bOk)
+    {
+        StatusFlash(L"Appended to clipboard.");
+    }
+}
+
 static void TV_Copy(void)
 {
-    if (g_tv.iSelStart == g_tv.iSelEnd || g_tv.pText == nullptr) return;
-    int iStart = TV_LoI(g_tv.iSelStart, g_tv.iSelEnd);
-    int iEnd = TV_HiI(g_tv.iSelStart, g_tv.iSelEnd);
-    int cch = iEnd - iStart;
-    if (cch <= 0) return;
-    ClipboardSetText(g_tv.hWnd, g_tv.pText + iStart, cch, false);
+    TV_CopySel(false);
 }
 
 static void TV_CopyAppend(void)
 {
-    if (g_tv.iSelStart == g_tv.iSelEnd || g_tv.pText == nullptr)
-    {
-        StatusFlash(L"Nothing selected to append.");
-        return;
-    }
-    int iStart = TV_LoI(g_tv.iSelStart, g_tv.iSelEnd);
-    int iEnd = TV_HiI(g_tv.iSelStart, g_tv.iSelEnd);
-    int cch = iEnd - iStart;
-    if (cch <= 0) return;
-    if (ClipboardSetText(g_tv.hWnd, g_tv.pText + iStart, cch, true))
-        StatusFlash(L"Appended to clipboard.");
+    TV_CopySel(true);
 }
 
 // Copy the caret column across the selected lines (or the current line).
@@ -11699,49 +11911,49 @@ static bool SynHasBlockSlash(int iLang)
 }
 static bool SynHasBlockPascal(int iLang) { return iLang == SYN_LANG_PASCAL; }
 
-// Approximate "inside /* */ at iPos?" — scans up to 64 KB before iPos.
+// Approximate "inside a block comment at iPos?" - scans the 16K characters before iPos.
+// Line comments are skipped and a string never outlives its line, so an apostrophe in
+// "// don't" or in a block comment cannot hide the next comment delimiter.
 static bool SynBlockStateAt(const WCHAR* p, int iPos, int iLang)
 {
     if (p == nullptr || iPos <= 0) return false;
+    const bool bSlash = SynHasBlockSlash(iLang);
+    if (!bSlash && !SynHasBlockPascal(iLang)) return false;
     int i = iPos - 16384;
     if (i < 0) i = 0;
     bool in = false;
-    bool inStr = false;
-    WCHAR q = 0;
-    if (SynHasBlockSlash(iLang))
+    WCHAR q = 0;                                    // open string quote, 0 = none
+    for (; i < iPos; i++)
     {
-        for (; i < iPos; i++)
+        const WCHAR c = p[i];
+        if (in)
         {
-            if (inStr)
-            {
-                if (p[i] == L'\\' && i + 1 < iPos) { i++; continue; }
-                if (p[i] == q) inStr = false;
-                continue;
-            }
-            if (p[i] == L'"' || p[i] == L'\'') { inStr = true; q = p[i]; continue; }
-            if (!in && p[i] == L'/' && i + 1 < iPos && p[i + 1] == L'*') { in = true; i++; continue; }
-            if (in && p[i] == L'*' && i + 1 < iPos && p[i + 1] == L'/') { in = false; i++; continue; }
+            if (bSlash) { if (c == L'*' && i + 1 < iPos && p[i + 1] == L'/') { in = false; i++; } }
+            else if (c == L'}') in = false;
+            else if (c == L'*' && i + 1 < iPos && p[i + 1] == L')') { in = false; i++; }
+            continue;
         }
-        return in;
-    }
-    if (SynHasBlockPascal(iLang))
-    {
-        for (; i < iPos; i++)
+        if (q != 0)
         {
-            if (inStr)
-            {
-                if (p[i] == q) inStr = false;
-                continue;
-            }
-            if (p[i] == L'\'' || p[i] == L'"') { inStr = true; q = p[i]; continue; }
-            if (!in && p[i] == L'{') { in = true; continue; }
-            if (!in && p[i] == L'(' && i + 1 < iPos && p[i + 1] == L'*') { in = true; i++; continue; }
-            if (in && p[i] == L'}') { in = false; continue; }
-            if (in && p[i] == L'*' && i + 1 < iPos && p[i + 1] == L')') { in = false; i++; continue; }
+            if (c == L'\n') q = 0;
+            else if (c == L'\\' && bSlash && i + 1 < iPos) i++;
+            else if (c == q) q = 0;
+            continue;
         }
-        return in;
+        if (c == L'"' || c == L'\'') { q = c; continue; }
+        const bool bNext = i + 1 < iPos;
+        const bool bLine = (iLang == SYN_LANG_SQL) ? (c == L'-' && bNext && p[i + 1] == L'-')
+                                                  : (c == L'/' && bNext && p[i + 1] == L'/');
+        if (bLine)
+        {
+            while (i < iPos && p[i] != L'\n') i++;
+            continue;
+        }
+        if (bSlash) { if (c == L'/' && bNext && p[i + 1] == L'*') { in = true; i++; } }
+        else if (c == L'{') in = true;
+        else if (c == L'(' && bNext && p[i + 1] == L'*') { in = true; i++; }
     }
-    return false;
+    return in;
 }
 
 static bool s_bSynInBlock = false;
@@ -11755,10 +11967,10 @@ static int SynTokenize(const WCHAR* p, int iLo, int iHi, int iLang, bool* pbInBl
     int c = 0, i = iLo;
     bool bIn = (pbInBlock != nullptr) ? *pbInBlock : false;
 
-    const bool bCppStyle = (iLang == SYN_LANG_CPP || iLang == SYN_LANG_CSHARP ||
-        iLang == SYN_LANG_PHP || iLang == SYN_LANG_JS || iLang == SYN_LANG_JAVA ||
-        iLang == SYN_LANG_GO || iLang == SYN_LANG_RUST || iLang == SYN_LANG_SWIFT ||
-        iLang == SYN_LANG_KOTLIN);
+    // bBlockSlash covers every language with /* */ comments (SynHasBlockSlash);
+    // the local bCppStyle list that used to stand next to it was the same set
+    // minus SQL, and the `(bCppStyle || bBlockSlash)` read of the two always
+    // reduced to bBlockSlash alone.
     const bool bHash = (iLang == SYN_LANG_PYTHON || iLang == SYN_LANG_RUBY || iLang == SYN_LANG_PHP ||
         iLang == SYN_LANG_LOG);
     const bool bDash = (iLang == SYN_LANG_SQL);
@@ -11813,7 +12025,7 @@ static int SynTokenize(const WCHAR* p, int iLo, int iHi, int iLang, bool* pbInBl
             pStart[c] = a; pEnd[c] = i; pKind[c] = SYN_KW; c++; continue;
         }
 
-        if ((bCppStyle || bBlockSlash) && ch == L'/' && i + 1 < iHi && p[i + 1] == L'/')
+        if (bBlockSlash && ch == L'/' && i + 1 < iHi && p[i + 1] == L'/')
         {
             pStart[c] = i; pEnd[c] = iHi; pKind[c] = SYN_COMMENT; c++; i = iHi; continue;
         }
@@ -11923,6 +12135,41 @@ static int SynTokenize(const WCHAR* p, int iLo, int iHi, int iLang, bool* pbInBl
         }
 
         i++;
+    }
+    if (c >= cMax)
+    {
+        // The row emitted more tokens than one paint keeps: the tail still has
+        // to advance the BLOCK-COMMENT state, or a "/*" opened in the dropped
+        // tokens left every following row uncolored until the comment closed
+        // (the state this function reports is the row's carry-over). State
+        // only — nothing is emitted.
+        while (i < iHi)
+        {
+            if (bBlockSlash && p[i] == L'/' && i + 1 < iHi && p[i + 1] == L'*')
+            {
+                i += 2;
+                bIn = true;
+                while (i + 1 < iHi && !(p[i] == L'*' && p[i + 1] == L'/')) i++;
+                if (i + 1 < iHi) { i += 2; bIn = false; }
+                else i = iHi;
+            }
+            else if (bPas && p[i] == L'{')
+            {
+                i++;
+                bIn = true;
+                while (i < iHi && p[i] != L'}') i++;
+                if (i < iHi) { i++; bIn = false; }
+            }
+            else if (bPas && p[i] == L'(' && i + 1 < iHi && p[i + 1] == L'*')
+            {
+                i += 2;
+                bIn = true;
+                while (i + 1 < iHi && !(p[i] == L'*' && p[i + 1] == L')')) i++;
+                if (i + 1 < iHi) { i += 2; bIn = false; }
+                else i = iHi;
+            }
+            else i++;
+        }
     }
     if (pbInBlock) *pbInBlock = bIn;
     return c;
@@ -12217,8 +12464,6 @@ static void TV_PaintWhitespace(HDC hdc, const TextViewState* pState, int xBase, 
 // row across the two. The shade follows whatever background the row has (plain, green bar, current line,
 // bookmark), the text colour follows the theme (blue on light, light blue on dark). Each part is drawn with
 // its own clip rectangle by the same painters (selection, tabs, frozen columns all keep working).
-// 6.24: TV_HEX_ASCII_COL was 50 (16 bytes, group 8). Use HexAsciiCol() instead.
-#define TV_HEX_ASCII_COL (HexAsciiCol())
 
 static COLORREF TV_HexAsciiBg(COLORREF c)
 {
@@ -12257,6 +12502,7 @@ static void TV_PaintMatchOverlay(HDC hdc, const TextViewState* pState, int xBase
     const int iSelLo = TV_LoI(pState->iSelStart, pState->iSelEnd);
     const int iSelHi = TV_HiI(pState->iSelStart, pState->iSelEnd);
     const int iColBase = TV_VisCol(iLS, iPos);              // visual column of the chunk's first char
+    const int iColChunkEnd = TV_VisCol(iLS, iChunkEnd);     // invariant of the loop (8.05: was recomputed per span, and it is a tab walk)
     for (int k = 0; k < cSpans; k++)
     {
         const int lo = pLo[k];
@@ -12273,9 +12519,9 @@ static void TV_PaintMatchOverlay(HDC hdc, const TextViewState* pState, int xBase
         const int x1 = xBase + (TV_VisCol(iLS, (hi < iChunkEnd) ? hi : iChunkEnd) - iColBase) * iHexCharW;
         int xa = (x0 < 0) ? 0 : x0;
         int xb = (x1 > cxClient) ? cxClient : x1;
-        if (xb > xBase + (TV_VisCol(iLS, iChunkEnd) - iColBase) * iHexCharW)
+        if (xb > xBase + (iColChunkEnd - iColBase) * iHexCharW)
         {
-            xb = xBase + (TV_VisCol(iLS, iChunkEnd) - iColBase) * iHexCharW;   // never past the chunk's own edge
+            xb = xBase + (iColChunkEnd - iColBase) * iHexCharW;   // never past the chunk's own edge
         }
         if (xb <= xa)
         {
@@ -12298,7 +12544,7 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
     int iSelLo, int iSelHi, HBRUSH hbrBg, COLORREF clrBg, COLORREF clrText, COLORREF clrSelBg, COLORREF clrSelTx, int cxClient)
 {
     // a byte row (not the truncation notice, which starts with '[') in the hex view, unwrapped, long enough to hold the ASCII block
-    if (iView != VIEW_HEX || pState->bWrap || iHexCharW <= 0 || iChunkEnd - iPos <= TV_HEX_ASCII_COL ||
+    if (iView != VIEW_HEX || pState->bWrap || iHexCharW <= 0 || iChunkEnd - iPos <= HexAsciiCol() ||
         pState->pText[iPos] == L'[')
     {
         TV_PaintChunkTabs(hdc, pState, xBase, y, iPos, iChunkEnd, iSelLo, iSelHi, hbrBg, clrBg, clrText, clrSelBg, clrSelTx, cxClient);
@@ -12316,8 +12562,8 @@ static void TV_PaintChunk(HDC hdc, const TextViewState* pState, int xBase, int y
         return;
     }
     const COLORREF clrAscTx = TV_HexAsciiText(clrBg);
-    const int xSplit = xBase + TV_HEX_ASCII_COL * iHexCharW;
-    const int iSplit = iPos + TV_HEX_ASCII_COL;
+    const int xSplit = xBase + HexAsciiCol() * iHexCharW;
+    const int iSplit = iPos + HexAsciiCol();
     if (xSplit > 0)                                         // the hex block (unless it is scrolled out to the left)
     {
         const int iSaved = SaveDC(hdc);
@@ -12398,7 +12644,7 @@ static inline int TvCharClass(WCHAR c)
     {
         return 0;
     }
-    if (c < 128)
+    if ((unsigned)c < 128)              // unsigned: MinGW's signed wchar_t makes 0x8000+ negative
     {
         return ((c >= L'0' && c <= L'9') ||
                 (c >= L'A' && c <= L'Z') ||
@@ -12533,7 +12779,7 @@ static ULONGLONG PercentOffset(ULONGLONG qwTotal, ULONGLONG qwPct)
 }
 
 // Hex view: the byte (0-15) of a row that a text column belongs to. Layout of a row: 8 bytes "XX " , one extra space,
-// 8 bytes, one space, then the 16 ASCII characters from column TV_HEX_ASCII_COL.
+// 8 bytes, one space, then the 16 ASCII characters from column HexAsciiCol().
 static int HexByteOfCol(int col)
 {
     // 6.24: walk the same geometry BuildHexText uses (group gaps).
@@ -13167,6 +13413,11 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         }
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
+        if (hdc == nullptr)
+        {
+            ValidateRect(hWnd, nullptr);        // never leave the region pending (WM_PAINT storm)
+            return 0;
+        }
         RECT rc;
         GetClientRect(hWnd, &rc);
 
@@ -13284,10 +13535,29 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
             // 6.22: Highlight Matches — the spans of the Find pattern in THIS
             // logical line (visible rows only get painted anyway). Plain and
             // regex share the collector; the overlay runs after each chunk.
+            // 8.05: with a plain pattern, no wrap, no tabs and no frozen
+            // columns the scan is bounded to the visible column window (plus
+            // one pattern to the left, so a hit that starts off-window but
+            // ends inside is not lost). A minified file is ONE line of
+            // megabytes and used to pay this scan per repaint; with tabs or
+            // freeze the visual/char columns diverge and the whole line is
+            // still scanned (the regex path keeps the whole line too: its
+            // anchors would see false line starts at a window edge).
             enum { kHiliteMax = 64 };
             int aHiLo[kHiliteMax], aHiHi[kHiliteMax];
+            int iHiLo = iLineStart, iHiHi = iDispEnd;
+            if (!g_bRegexFind && !pState->bWrap && !TV_TabsOn() && g_iFreezeCols <= 0 &&
+                iHexCharW > 0 && szFind[0] != L'\0')
+            {
+                const int nPat = lstrlenW(szFind);
+                iHiLo = iLineStart + pState->iScrollX / iHexCharW - nPat;
+                iHiHi = iLineStart + (pState->iScrollX + rc.right) / iHexCharW + 1;
+                if (iHiLo < iLineStart) iHiLo = iLineStart;
+                if (iHiHi > iDispEnd) iHiHi = iDispEnd;
+            }
             int cHiSpans = (g_bHiliteAll && iView != VIEW_HEX && szFind[0] != L'\0')
-                ? TvCollectMatches(pState->pText, iLineStart, iDispEnd, aHiLo, aHiHi, kHiliteMax)
+                ? TvCollectMatches(pState->pText, iHiLo, iHiHi, aHiLo, aHiHi, kHiliteMax, szFind, fr.Flags,
+                    iHiLo == iLineStart)
                 : 0;
 
             // V5: greenbar background for this logical line; 5.8: the
@@ -13471,7 +13741,7 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
                     }
                     else
                     {
-                        PaintRuler(hdcParent, rcRuler, iGutter);
+                        PaintRuler(hdcParent, rcRuler);
                     }
                     ReleaseDC(hWndMain, hdcParent);
                 }
@@ -13583,8 +13853,31 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
                     bool bPage = bCtrl;
                     if (!bPage && g_szCurrentFile[0] != L'\0')
                     {
-                        if (wParam == VK_NEXT && pState->iFirstVisible + cVis >= pState->cLines) bPage = true;
                         if (wParam == VK_PRIOR && pState->iFirstVisible == 0) bPage = true;
+                        else if (wParam == VK_NEXT)
+                        {
+                            // "Is the view already at its bottom edge?" No-wrap
+                            // answers in lines (first + visible >= lines). Wrap
+                            // mixes units otherwise: cVis counts VISUAL rows and
+                            // cLines LOGICAL lines, so the flip fired early on
+                            // heavily wrapped pages. Count the rows still below
+                            // the first visible one (the walk stops at cVis: it
+                            // never scans the whole page).
+                            if (!pState->bWrap)
+                            {
+                                if (pState->iFirstVisible + cVis >= pState->cLines) bPage = true;
+                            }
+                            else
+                            {
+                                const int iMaxCharsW = TV_WrapChars(g_tv.iWrapWidth, rc.right);
+                                int cRowsBelow = 0;
+                                for (int l = pState->iFirstVisible; l < pState->cLines && cRowsBelow < cVis; l++)
+                                {
+                                    cRowsBelow += TV_WrapRowsOfLine(l, iMaxCharsW, cVis);
+                                }
+                                if (cRowsBelow < cVis) bPage = true;
+                            }
+                        }
                     }
                     if (bPage)
                     {
@@ -13741,8 +14034,11 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         if (pState == nullptr || pState->pText == nullptr) return 0;
         const int iPos = TV_HitTest(pState, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         int iL = iPos, iR = iPos;
-        while (iL > 0 && (pState->pText[iL - 1] == L'_' || IsCharAlphaNumericW(pState->pText[iL - 1]))) iL--;
-        while (iR < pState->cch && (pState->pText[iR] == L'_' || IsCharAlphaNumericW(pState->pText[iR]))) iR++;
+        // TvCharClass == 1 is exactly "word char" (the '_' OR IsCharAlphaNumericW
+        // pair above) with the ASCII fast path: the IsCharAlphaNumericW call per
+        // character walked a pathological word-line on every double click.
+        while (iL > 0 && TvCharClass(pState->pText[iL - 1]) == 1) iL--;
+        while (iR < pState->cch && TvCharClass(pState->pText[iR]) == 1) iR++;
         pState->iSelStart = iL;
         pState->iSelEnd = iR;
         g_iCaretCol = -1;
@@ -13790,8 +14086,10 @@ LRESULT CALLBACK TextViewProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lPa
         return 0;
     case WM_DESTROY:
         TV_ClearText();
-        // V5: free the cached greenbar brush
+        // V5: free the cached greenbar brush; 8.05: its sibling, the current-line
+        // band brush (same flag-driven lifecycle in TV_SyncState).
         if (g_tv.hbrGreen != nullptr) { DeleteObject(g_tv.hbrGreen); g_tv.hbrGreen = nullptr; }
+        if (g_tv.hbrHilite != nullptr) { DeleteObject(g_tv.hbrHilite); g_tv.hbrHilite = nullptr; }
         if (s_hbmPaintBuf != nullptr) { DeleteObject(s_hbmPaintBuf); s_hbmPaintBuf = nullptr; s_cxPaintBuf = s_cyPaintBuf = 0; }   // 6.04
         g_tv.hWnd = nullptr;   // V5: clear the dangling window handle
         return 0;
@@ -14420,12 +14718,17 @@ void PositionProgress(void)
 void OnLoadProgressTimer(void)
 {
     // 6.21: the worker may have given up posting its result (20 failed retries
-    // over 2 s) and freed the job — then g_pJob dangles and every tick read
-    // freed memory. The flag is the worker's own notice: retire the marker
-    // with it, so the loader is not wedged ("one load at a time") until exit.
+    // over 2 s) and abandoned the job — it raised g_bLoadJobWorkerFreed and
+    // never frees the job itself, so THIS reader retires the marker: delete
+    // the job, clear the pointer, stop the poll (before the fix the worker
+    // freed the job and the flag-check-then-dereference below raced it —
+    // a use-after-free window every 16 ms while the worker was giving up).
     if (g_pJob != nullptr && InterlockedCompareExchange(&g_bLoadJobWorkerFreed, 0, 0) != 0)
     {
+        delete g_pJob;
         g_pJob = nullptr;
+        KillTimer(hWndMain, IDT_LOADPROG);
+        return;
     }
     if (g_hProgress == nullptr || g_pJob == nullptr)
     {
@@ -14957,7 +15260,7 @@ static const WCHAR* FindPatternFrom(const WCHAR* pszText, DWORD dwFrom)
         {
             pHit = wcsstr(p, szFind);
         }
-        else if (wcFirst == L'\0' || wcFirst >= 0x80)
+        else if (wcFirst >= 0x80)
         {
             pHit = StrStrIW(p, szFind);
         }
@@ -15080,18 +15383,14 @@ void SearchNext(HWND hWnd, bool bShowError)
         // The hit's page is loaded and the hit itself selected on landing.
         // Piped input and the clipboard keep the classic message below; the
         // hex view keeps it too (Find Bytes is the whole-file search there).
-        StartWholeFileFind();
-        if (!g_bInByteSearch)
-        {
-            WCHAR szText2[160];
-            wsprintfW(szText2, L"Cannot find \"%s\" on the page.", szFind);
-            AppMsgBox(hWnd, szText2, L"Find", MB_OK | MB_ICONINFORMATION);
-        }
+        // A decline (busy, out of memory) already flashed its own status —
+        // the old code stacked a wrong "Cannot find on the page" box on top.
+        (void)StartWholeFileFind();
     }
     else if (bShowError)
     {
         WCHAR szText[160];
-        wsprintfW(szText, L"Cannot find \"%s\".", szFind);
+        wnsprintfW(szText, (int)_countof(szText), L"Cannot find \"%s\".", szFind);
         AppMsgBox(hWnd, szText, L"Find", MB_OK | MB_ICONINFORMATION);
     }
 }
@@ -17266,7 +17565,7 @@ INT_PTR CALLBACK FindBytesProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
                         // than the ones typed (accents/emoji): say so instead.
                         if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
                         {
-                            AppMsgBox(hDlg, L"The pattern is too long (127 bytes maximum).", L"Find Bytes", MB_OK | MB_ICONWARNING);
+                            AppMsgBox(hDlg, L"The pattern is too long (126 bytes maximum).", L"Find Bytes", MB_OK | MB_ICONWARNING);
                             return (INT_PTR)TRUE;
                         }
                         cb = WideCharToMultiByte(CP_ACP, 0, szPat, -1, (LPSTR)bPat, (int)sizeof(bPat) - 1, nullptr, nullptr);
@@ -17412,7 +17711,7 @@ unsigned __stdcall SearchThreadProc(void* pParameter)
         PostSearchDone(2);   // 3.07: could not open: NOT "not found"
         return(0);
     }
-    const DWORD CB_CHUNK = CB_READ_CHUNK;          // 5.2: 4 MB, the loader's chunk (was 1 MB): 4x fewer syscalls
+    const DWORD CB_CHUNK = CB_READ_CHUNK;          // the loader's chunk (4 MB x86 / 8 MB x64)
     const DWORD cbPat = g_cbSearchPat;
     DWORD cbOverlap = (cbPat > 1) ? cbPat - 1 : 0;
     // 5.9.6: the whole file rides ONE read-only view when the OS grants it:
@@ -18097,8 +18396,8 @@ void PaintGutter(void)
     // gray-blue (the tone editors like VS Code use for gutters) keeps them
     // legible and lets the bytes and the text lead the eye. The bookmark
     // dot keeps its saturated blue: it is a mark, not a label.
-    // 5.9.7: the color lives in ONE constant (s_clrGutter), shared with the
-    // two rulers.
+    // 5.9.7: the color lives in ONE place (ColorOrDefault(g_clrGutter,
+    // ThGutter())), shared with the two rulers via RulerStripBegin.
     SetTextColor(hdc, ColorOrDefault(g_clrGutter, ThGutter()));
     // Hex: how many dump lines exist (same arithmetic as BuildHexText).
     // Text: the control's own line count. Either way the control owns the
@@ -18414,7 +18713,11 @@ static HGDIOBJ RulerStripBegin(HDC hdc, RECT rcRuler, HFONT hFontLabels)
     }
     HGDIOBJ hOld = SelectObject(hdc, hFontLabels);
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, ThGutter());
+    // 5.9.7 (fixed 8.05): the rulers honor the INI's ColorGutter exactly like
+    // PaintGutter does — the comment below PaintGutter promises one shared
+    // colour for all three, but this line asked the theme directly and the
+    // INI override only ever reached the gutter.
+    SetTextColor(hdc, ColorOrDefault(g_clrGutter, ThGutter()));
     return hOld;
 }
 
@@ -18429,12 +18732,13 @@ static void RulerStripEnd(HDC hdc, RECT rcRuler, HGDIOBJ hOldFont)
 /* -------------------------------------------------------------------------------------------- */
 // V4: PaintRuler — draws a column ruler at the top of the text area.
 // Painted by the PARENT's WM_PAINT in the strip reserved by LayoutEdit.
-// rcRuler is the full ruler rect (x = gutter, y = 0, bottom = iHexLineH).
-// xOrigin is the pixel x of the gutter (the ruler starts to its right).
+// rcRuler is the full ruler rect (x = gutter, y = 0, bottom = iHexLineH); the
+// ruler starts at rcRuler.left. (PaintHexRuler still takes the gutter x as a
+// parameter: its byte labels walk pixels, not columns.)
 // Accounts for the custom control's horizontal scroll so column numbers
 // align with the visible text. (5.9.6: the hex view has its own ruler, the
 // byte-position header, PaintHexRuler; both share RulerStripBegin/End.)
-void PaintRuler(HDC hdc, RECT rcRuler, int xOrigin)
+void PaintRuler(HDC hdc, RECT rcRuler)
 {
     if (iHexCharW <= 0 || iHexLineH <= 0 || hEdit == nullptr)
     {
@@ -18581,9 +18885,16 @@ INT_PTR CALLBACK WrapWidthProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lP
     switch (message)
     {
     case WM_INITDIALOG:
-        SetDlgItemTextW(hDlg, IDC_WRAP_COLS, L"80");
+    {
+        // Preload the CURRENT width (V4 preloaded a hard-coded 80, so just
+        // opening the dialog and pressing OK silently reset the user's
+        // fixed width). 0 = wrap to window (the help text documents it).
+        WCHAR szVal[32];
+        wsprintfW(szVal, L"%d", g_iWrapWidth);
+        SetDlgItemTextW(hDlg, IDC_WRAP_COLS, szVal);
         SendDlgItemMessageW(hDlg, IDC_WRAP_COLS, EM_SETSEL, 0, -1);
         return (INT_PTR)TRUE;
+    }
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK)
         {
